@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>哔哩哔哩扫码登录</title>
+    <style>
+        :root {
+            --bg-color: #18191c;
+            --text-main: #f1f2f3;
+            --text-sub: #9499a0;
+            --accent: #00aeec;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+        }
+        body {
+            width: 100vw;
+            height: 100vh;
+            background: var(--bg-color);
+            color: var(--text-main);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            overflow: hidden;
+        }
+        .header {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 14px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .qr-box {
+            width: 190px;
+            height: 190px;
+            background: #ffffff;
+            border-radius: 10px;
+            padding: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        }
+        #qr-container svg {
+            width: 170px;
+            height: 170px;
+            display: block;
+        }
+        .status-text {
+            margin-top: 14px;
+            font-size: 13px;
+            color: var(--text-sub);
+            text-align: center;
+        }
+        .refresh-btn {
+            margin-top: 8px;
+            background: transparent;
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .refresh-btn:hover {
+            background: rgba(0, 174, 236, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <span>Bilibili 账号登录</span>
+    </div>
+    <div class="qr-box">
+        <div id="qr-container">
+            <svg id="qr-svg" viewBox="0 0 100 100" fill="currentColor"></svg>
+        </div>
+    </div>
+    <div id="status-text" class="status-text">正在加载二维码...</div>
+    <button id="refresh-btn" class="refresh-btn" style="display:none;">刷新二维码</button>
+
+    <script>
+        const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+        const listen = window.__TAURI__?.event?.listen;
+        const refreshBtn = document.getElementById('refresh-btn');
+
+        async function initQrWindow() {
+            if (listen) {
+                await listen('qr_code_updated', (event) => {
+                    const data = event.payload;
+                    if (data && data.svg) {
+                        document.getElementById('qr-container').innerHTML = data.svg;
+                    }
+                    if (data && data.message) {
+                        document.getElementById('status-text').innerText = data.message;
+                    }
+                    if (refreshBtn) {
+                        refreshBtn.style.display = data && data.show_refresh ? 'inline-block' : 'none';
+                    }
+                });
+                await listen('qr_login_success', () => {
+                    document.getElementById('status-text').innerText = "登录成功，正在关闭...";
+                    if (refreshBtn) refreshBtn.style.display = 'none';
+                });
+            }
+
+            refreshBtn?.addEventListener('click', () => {
+                refreshBtn.style.display = 'none';
+                document.getElementById('status-text').innerText = "正在刷新二维码...";
+                invoke?.('refresh_qr_code').catch(console.error);
+            });
+
+            invoke?.('refresh_qr_code').catch(console.error);
+        }
+
+        document.addEventListener('DOMContentLoaded', initQrWindow);
+    </script>
+</body>
+</html>

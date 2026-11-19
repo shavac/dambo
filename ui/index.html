@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Dambo Capsule</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main class="pod-container">
+        <!-- Far-left drag grip rail -->
+        <div id="drag-handle" class="drag-handle" data-tauri-drag-region title="拖动悬浮舱">
+            <svg class="grip-svg" width="8" height="18" viewBox="0 0 8 18" fill="currentColor" aria-hidden="true">
+                <circle cx="2" cy="3" r="1.15" />
+                <circle cx="6" cy="3" r="1.15" />
+                <circle cx="2" cy="9" r="1.15" />
+                <circle cx="6" cy="9" r="1.15" />
+                <circle cx="2" cy="15" r="1.15" />
+                <circle cx="6" cy="15" r="1.15" />
+            </svg>
+        </div>
+
+        <div class="pod-content">
+            <!-- Account badge (click to switch / re-login) -->
+            <button id="account-badge" class="badge-btn" title="点击重新扫码登录">
+                <span id="account-dot" class="status-dot dot-gray"></span>
+                <span id="account-name">未登录</span>
+            </button>
+
+            <span class="divider"></span>
+
+            <!-- Room selection & switch -->
+            <div class="room-selector-group">
+                <div id="room-input-box" class="room-pill">
+                    <span id="room-dot" class="status-dot dot-gray"></span>
+                    <input id="room-input" type="text" placeholder="房间号或链接..." spellcheck="false" autocomplete="off" />
+                    <button id="room-dropdown-btn" class="icon-btn" title="展开房间列表">▾</button>
+                </div>
+                <button id="room-switch-btn" class="action-btn">连接</button>
+
+                <!-- Quick dropdown panel (hidden by default) -->
+                <div id="room-dropdown-menu" class="dropdown-menu hidden">
+                    <div class="dropdown-section">
+                        <div class="section-title">🏠 我的直播间</div>
+                        <div id="my-room-item" class="menu-item empty-hint">未获取到直播间</div>
+                    </div>
+                    <div class="dropdown-section">
+                        <div class="section-title">🔴 关注开播中</div>
+                        <div id="following-rooms-list" class="menu-items-list">
+                            <div class="menu-item empty-hint">暂无开播主播</div>
+                        </div>
+                    </div>
+                    <div class="dropdown-section">
+                        <div class="section-title">🕒 历史房间</div>
+                        <div id="history-rooms-list" class="menu-items-list">
+                            <div class="menu-item empty-hint">暂无历史</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <span class="divider"></span>
+
+            <!-- Theme selector -->
+            <div class="theme-group">
+                <select id="theme-select" class="dropdown-select" title="选择 OBS 挂件主题">
+                    <option value="default">default</option>
+                    <option value="sc-ticker">sc-ticker</option>
+                </select>
+            </div>
+
+            <!-- Copy OBS URL button -->
+            <button id="copy-obs-btn" class="pill-btn" title="复制 OBS 浏览器源地址">
+                📋 OBS (:3838)
+            </button>
+
+            <!-- Window controls (minimize / quit) -->
+            <div class="win-controls">
+                <button id="min-btn" class="win-btn" title="最小化到托盘">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                </button>
+                <button id="close-btn" class="win-btn win-close" title="退出 Dambo">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></svg>
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

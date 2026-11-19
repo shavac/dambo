@@ -1,0 +1,37 @@
+[bilibili]
+room_id = 22924075
+history_rooms = [22924075, 22748536]
+session_file = "./etc/dambo_session.json"
+min_gift_coin = 0           # Real-time channel gift filter threshold in gold seeds (1000 = 1 CNY; does not affect recorder)
+ignore_enter = false           # Whether to drop room-enter events in real-time channels (default: false)
+ignore_like = false             # Whether to drop like events in real-time channels (default: true; does not affect recorder)
+avatar_cache_size = 2000       # In-memory LRU cache capacity for uid -> face_url
+
+# Channel A: Real-time feed configuration (serves / OBS overlay and /list web feed)
+[feed]
+max_history = 300              # Max items retained in Snapshot ring buffer
+show_enter = true              # Render viewer enter notifications in frontend themes
+show_medal = true              # Render fan medal badge and level
+
+# Channel B: robao central controller dam stream (ws://localhost:3838/ws/dam)
+[dam]
+window_ms = 2500               # Reservoir batching window in milliseconds
+dedup_enabled = true           # Deduplicate and count repeated chat messages within window
+buffer_capacity = 512          # Bounded ingress queue capacity for backpressure protection
+
+[server]
+host = "localhost"             # Change to "0.0.0.0" for LAN access (e.g., iPad/mobile /list)
+port = 3838                    # Adjacent to robabel's port 3737
+html_dir = "static/themes"
+theme = "default"
+
+[log]
+level = "info"
+path = "./logs"
+
+[record]
+enabled = true                 # Enable lossless JSONL recording (tapped pre-filter)
+dir = "./rec"
+# Placeholders: {room_name} (sanitized streamer name), {room_id}, and chrono strftime specifiers
+# Automatically rotates to a new file and resets offset_ms on room switch or LIVE signal
+filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"

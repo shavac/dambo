@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>Dambo 弹幕监看列表</title>
+    <link rel="stylesheet" href="/static/themes/list/style.css">
+</head>
+<body>
+    <div class="list-layout">
+        <!-- Top Sticky Area for SuperChat & Guard -->
+        <header id="sticky-header" class="sticky-header hidden">
+            <div class="sticky-title">⭐ 醒目留言与大航海</div>
+            <div id="sticky-cards" class="sticky-cards"></div>
+        </header>
+
+        <!-- Controls & Filters Bar -->
+        <nav class="filter-bar">
+            <div class="filter-tags">
+                <button class="filter-btn active" data-filter="all">全部</button>
+                <button class="filter-btn" data-filter="chat">仅发言</button>
+                <button class="filter-btn" data-filter="gift_sc">礼物 & SC</button>
+                <button class="filter-btn" data-filter="medal">仅粉丝牌</button>
+            </div>
+            <div id="room-status-badge" class="room-status-badge">未连接</div>
+        </nav>
+
+        <!-- Main Feed Scroll Container -->
+        <main id="feed-container" class="feed-container">
+            <div id="feed-list" class="feed-list"></div>
+        </main>
+
+        <!-- Smart Scroll Lock Floating Button -->
+        <button id="scroll-bottom-btn" class="scroll-bottom-btn hidden">
+            ↓ <span id="new-msg-count">0</span> 条新消息
+        </button>
+    </div>
+
+    <script src="/static/themes/list/feed.js"></script>
+</body>
+</html>

@@ -1,0 +1,531 @@
+use dambo_core::auth::QrPollStatus;
+use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
+use dambo_core::DamboRuntime;
+use serde::Serialize;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::Duration;
+use tauri::menu::{MenuBuilder, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder};
+use tokio_util::sync::CancellationToken;
+
+struct AppContext {
+    runtime: Arc<DamboRuntime>,
+    qr_poll_cancel: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
+}
+
+#[derive(Clone, Serialize)]
+struct QrCodePayload {
+    svg: String,
+    message: String,
+    show_refresh: bool,
+}
+
+fn format_room_identity(state: &RoomStateSnapshot) -> String {
+    let head = if state.room_uname.is_empty() {
+        state.room_id.to_string()
+    } else {
+        format!("{}({})", state.room_id, state.room_uname)
+    };
+    if state.room_title.is_empty() {
+        head
+    } else {
+        format!("{}: {}", head, state.room_title)
+    }
+}
+
+fn format_tray_tooltip(state: &RoomStateSnapshot) -> String {
+    if state.room_id == 0 {
+        return "Dambo · 未连接".to_string();
+    }
+    let identity = format_room_identity(state);
+    if !state.connected {
+        format!("Dambo · {} · 未连接", identity)
+    } else if state.is_live {
+        format!("Dambo · {} · 直播中", identity)
+    } else {
+        format!("Dambo · {} · 未开播", identity)
+    }
+}
+
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let visible = win.is_visible().unwrap_or(true);
+        if visible {
+            let _ = win.hide();
+        } else {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
+}
+
+fn copy_to_clipboard(text: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(mut child) = Command::new("cmd")
+            .args(["/C", "clip"])
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(mut child) = Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+}
+
+fn open_in_os(target: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(target).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd").args(["/C", "start", "", target]).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(target).spawn();
+    }
+}
+
+fn open_dir_in_os(dir: &PathBuf) {
+    let target = if dir.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        let _ = std::fs::create_dir_all(dir);
+        dir.clone()
+    };
+    open_in_os(&target.to_string_lossy());
+}
+
+fn ensure_qr_window(app: &AppHandle) -> Result<bool, String> {
+    if let Some(win) = app.get_webview_window("bili-qr-login") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(false);
+    }
+
+    WebviewWindowBuilder::new(app, "bili-qr-login", WebviewUrl::App("login.html".into()))
+        .title("哔哩哔哩扫码登录")
+        .inner_size(320.0, 380.0)
+        .resizable(false)
+        .always_on_top(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    Ok(true)
+}
+
+async fn start_qr_poll_flow(
+    app: AppHandle,
+    runtime: Arc<DamboRuntime>,
+    qr_slot: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
+) -> Result<(), String> {
+    let poll_cancel = {
+        let mut guard = qr_slot.lock().await;
+        if let Some(prev) = guard.take() {
+            prev.cancel();
+        }
+        let next = CancellationToken::new();
+        *guard = Some(next.clone());
+        next
+    };
+
+    let mut qr = match runtime.auth.generate_qr().await {
+        Ok(q) => q,
+        Err(e) => {
+            let _ = app.emit_to(
+                "bili-qr-login",
+                "qr_code_updated",
+                QrCodePayload {
+                    svg: String::new(),
+                    message: format!("获取二维码失败: {}", e),
+                    show_refresh: true,
+                },
+            );
+            return Err(e.to_string());
+        }
+    };
+
+    let _ = app.emit_to(
+        "bili-qr-login",
+        "qr_code_updated",
+        QrCodePayload {
+            svg: qr.svg.clone(),
+            message: "请使用哔哩哔哩手机客户端扫码".to_string(),
+            show_refresh: false,
+        },
+    );
+
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = poll_cancel.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+
+            if app.get_webview_window("bili-qr-login").is_none() {
+                break;
+            }
+
+            match runtime.auth.poll_qr(&qr.qrcode_key).await {
+                Ok(QrPollStatus::Waiting) => {}
+                Ok(QrPollStatus::Scanned) => {
+                    let _ = app.emit_to(
+                        "bili-qr-login",
+                        "qr_code_updated",
+                        QrCodePayload {
+                            svg: String::new(),
+                            message: "已扫码，请在手机端确认登录".to_string(),
+                            show_refresh: false,
+                        },
+                    );
+                }
+                Ok(QrPollStatus::Expired) => match runtime.auth.generate_qr().await {
+                    Ok(fresh) => {
+                        qr = fresh;
+                        let _ = app.emit_to(
+                            "bili-qr-login",
+                            "qr_code_updated",
+                            QrCodePayload {
+                                svg: qr.svg.clone(),
+                                message: "二维码已过期，已自动刷新".to_string(),
+                                show_refresh: false,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        let _ = app.emit_to(
+                            "bili-qr-login",
+                            "qr_code_updated",
+                            QrCodePayload {
+                                svg: String::new(),
+                                message: format!("刷新二维码失败: {}", e),
+                                show_refresh: true,
+                            },
+                        );
+                        break;
+                    }
+                },
+                Ok(QrPollStatus::Success(_)) => {
+                    let _ = app.emit_to("bili-qr-login", "qr_login_success", ());
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if let Some(win) = app.get_webview_window("bili-qr-login") {
+                        let _ = win.close();
+                    }
+                    break;
+                }
+                Ok(QrPollStatus::Error(msg)) => {
+                    let _ = app.emit_to(
+                        "bili-qr-login",
+                        "qr_code_updated",
+                        QrCodePayload {
+                            svg: String::new(),
+                            message: msg,
+                            show_refresh: true,
+                        },
+                    );
+                    break;
+                }
+                Err(e) => {
+                    let _ = app.emit_to(
+                        "bili-qr-login",
+                        "qr_code_updated",
+                        QrCodePayload {
+                            svg: String::new(),
+                            message: format!("轮询状态失败: {}", e),
+                            show_refresh: true,
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_initial_state(ctx: State<'_, AppContext>) -> Result<InitialUiState, String> {
+    Ok(ctx.runtime.initial_ui_state())
+}
+
+#[tauri::command]
+async fn switch_room(target: String, ctx: State<'_, AppContext>) -> Result<u64, String> {
+    ctx.runtime
+        .switch_room(&target)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn disconnect_room(ctx: State<'_, AppContext>) -> Result<(), String> {
+    ctx.runtime
+        .disconnect_room()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn change_theme(theme: String, ctx: State<'_, AppContext>) -> Result<(), String> {
+    ctx.runtime.change_theme(&theme).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn fetch_room_options(ctx: State<'_, AppContext>) -> Result<RoomOptionsPayload, String> {
+    Ok(ctx.runtime.fetch_room_options().await)
+}
+
+#[tauri::command]
+async fn remove_history_room(
+    room_id: u64,
+    ctx: State<'_, AppContext>,
+) -> Result<Vec<u64>, String> {
+    ctx.runtime
+        .remove_history_room(room_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_dropdown_expanded(window: tauri::WebviewWindow, expanded: bool) -> Result<(), String> {
+    let height = if expanded { 310.0 } else { 56.0 };
+    window
+        .set_size(Size::Logical(LogicalSize::new(740.0, height)))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn open_qr_login(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(), String> {
+    if ctx.runtime.auth.current_state().is_login {
+        let _ = ctx.runtime.auth.logout();
+    }
+    let created_new = ensure_qr_window(&app)?;
+    if !created_new {
+        start_qr_poll_flow(app, ctx.runtime.clone(), ctx.qr_poll_cancel.clone()).await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn refresh_qr_code(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(), String> {
+    start_qr_poll_flow(app, ctx.runtime.clone(), ctx.qr_poll_cancel.clone()).await
+}
+
+#[tauri::command]
+async fn logout(ctx: State<'_, AppContext>) -> Result<(), String> {
+    ctx.runtime.auth.logout().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn minimize_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.hide().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn close_window(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(), String> {
+    if let Some(cancel) = ctx.qr_poll_cancel.lock().await.take() {
+        cancel.cancel();
+    }
+    ctx.runtime.shutdown();
+    app.exit(0);
+    Ok(())
+}
+
+pub fn run(config_path: &str) {
+    let runtime = Arc::new(
+        DamboRuntime::from_config_path(config_path)
+            .expect("Failed to initialize DamboRuntime from config"),
+    );
+    let qr_poll_cancel = Arc::new(tokio::sync::Mutex::new(None::<CancellationToken>));
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::default().build())
+        .manage(AppContext {
+            runtime: runtime.clone(),
+            qr_poll_cancel: qr_poll_cancel.clone(),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_initial_state,
+            switch_room,
+            disconnect_room,
+            change_theme,
+            fetch_room_options,
+            remove_history_room,
+            set_dropdown_expanded,
+            open_qr_login,
+            refresh_qr_code,
+            logout,
+            minimize_window,
+            close_window,
+        ])
+        .setup(move |app| {
+            let app_handle = app.handle().clone();
+
+            // 1. Start dambo-core pipeline & Axum dual-channel server
+            let rt_start = runtime.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = rt_start.start().await {
+                    log::error!("Failed to start DamboRuntime: {}", e);
+                }
+            });
+
+            // 2. Startup silent Bilibili cookie check; pop up QR window if missing or expired
+            let rt_auth_init = runtime.clone();
+            let app_auth_init = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if rt_auth_init.auth.current_session().is_none() {
+                    let _ = ensure_qr_window(&app_auth_init);
+                    return;
+                }
+                match rt_auth_init.auth.validate_session().await {
+                    Ok(state) if !state.is_login => {
+                        let _ = ensure_qr_window(&app_auth_init);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("Startup Bilibili session validation skipped: {}", e);
+                    }
+                }
+            });
+
+            // 3. IPC forwarder for room_state_changed (NO /ws subscription in dambo-ui!)
+            let mut room_rx = runtime.room_state_rx();
+            let app_room = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let state: RoomStateSnapshot = room_rx.borrow().clone();
+                    let _ = app_room.emit_to("main", "room_state_changed", &state);
+                    if let Some(tray) = app_room.tray_by_id("main-tray") {
+                        let _ = tray.set_tooltip(Some(&format_tray_tooltip(&state)));
+                    }
+                    if room_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // 4. IPC forwarder for auth_state_changed
+            let mut auth_rx = runtime.auth_state_rx();
+            let app_auth = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let auth_state: AuthState = auth_rx.borrow().clone();
+                    let _ = app_auth.emit_to("main", "auth_state_changed", &auth_state);
+                    if auth_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // 5. Build system tray icon & context menu
+            let menu = MenuBuilder::new(app)
+                .text("toggle_panel", "显示/隐藏面板")
+                .text("copy_obs_url", "复制 OBS 挂件地址 (:3838)")
+                .text("open_web_list", "打开网页弹幕列表 (:3838/list)")
+                .item(&PredefinedMenuItem::separator(app)?)
+                .text("relogin", "重新登录 B 站")
+                .text("open_config_dir", "打开配置目录")
+                .text("open_rec_dir", "打开录制目录")
+                .text("open_log_dir", "打开日志目录")
+                .item(&PredefinedMenuItem::separator(app)?)
+                .text("quit", "退出 dambo")
+                .build()?;
+
+            let rt_menu = runtime.clone();
+            let qr_menu = qr_poll_cancel.clone();
+            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .tooltip("Dambo · 未连接")
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        toggle_main_window(tray.app_handle());
+                    }
+                })
+                .on_menu_event(move |app, event| {
+                    let cfg = rt_menu.config_snapshot();
+                    match event.id().as_ref() {
+                        "toggle_panel" => toggle_main_window(app),
+                        "copy_obs_url" => {
+                            let url = format!("http://{}:{}", cfg.server.host, cfg.server.port);
+                            copy_to_clipboard(&url);
+                        }
+                        "open_web_list" => {
+                            let url = format!("http://{}:{}/list", cfg.server.host, cfg.server.port);
+                            open_in_os(&url);
+                        }
+                        "relogin" => {
+                            if rt_menu.auth.current_state().is_login {
+                                let _ = rt_menu.auth.logout();
+                            }
+                            if let Ok(false) = ensure_qr_window(app) {
+                                let app_c = app.clone();
+                                let rt_c = rt_menu.clone();
+                                let qr_c = qr_menu.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = start_qr_poll_flow(app_c, rt_c, qr_c).await;
+                                });
+                            }
+                        }
+                        "open_config_dir" => open_dir_in_os(&rt_menu.base_dir),
+                        "open_rec_dir" => open_dir_in_os(&rt_menu.rec_dir),
+                        "open_log_dir" => open_dir_in_os(&rt_menu.log_dir),
+                        "quit" => {
+                            if let Ok(mut guard) = qr_menu.try_lock() {
+                                if let Some(cancel) = guard.take() {
+                                    cancel.cancel();
+                                }
+                            }
+                            rt_menu.shutdown();
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+            tray_builder.build(app)?;
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running dambo tauri application");
+}

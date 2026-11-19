@@ -1,0 +1,132 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    background: transparent !important;
+    overflow: hidden;
+}
+
+.ticker-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    width: 100%;
+    max-width: 440px;
+}
+
+.ticker-card {
+    position: relative;
+    border-radius: 10px;
+    overflow: hidden;
+    color: #ffffff;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    animation: cardIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: opacity 0.35s ease, transform 0.35s ease;
+}
+
+.ticker-card.exiting {
+    opacity: 0;
+    transform: translateX(-18px);
+}
+
+.ticker-card.kind-sc {
+    background: linear-gradient(135deg, rgba(185, 28, 28, 0.92), rgba(220, 38, 38, 0.85));
+}
+
+.ticker-card.kind-sc.tier-high {
+    background: linear-gradient(135deg, rgba(180, 83, 9, 0.94), rgba(217, 119, 6, 0.88));
+    border-color: rgba(253, 224, 71, 0.55);
+}
+
+.ticker-card.kind-guard {
+    background: linear-gradient(135deg, rgba(91, 33, 182, 0.92), rgba(124, 58, 237, 0.86));
+    border-color: rgba(221, 214, 254, 0.4);
+}
+
+@keyframes cardIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px) scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.22);
+}
+
+.card-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1.5px solid rgba(255, 255, 255, 0.45);
+    flex-shrink: 0;
+}
+
+.card-user-meta {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.card-uname {
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.card-medal {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.2);
+    flex-shrink: 0;
+}
+
+.card-price {
+    font-size: 13px;
+    font-weight: 800;
+    color: #fef08a;
+    flex-shrink: 0;
+}
+
+.card-body {
+    padding: 8px 12px 10px;
+    font-size: 14px;
+    line-height: 1.45;
+    word-break: break-word;
+}
+
+.card-progress-track {
+    width: 100%;
+    height: 3px;
+    background: rgba(0, 0, 0, 0.25);
+}
+
+.card-progress-bar {
+    height: 100%;
+    width: 100%;
+    background: rgba(255, 255, 255, 0.85);
+    transform-origin: left center;
+}

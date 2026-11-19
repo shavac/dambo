@@ -76,7 +76,7 @@ dambo/
 ⚬ 数据层纯数字标识：配置文件与内部事件流统一使用纯数字 room_id（自动兼容 B 站短号转真实长号）。
 ⚬ 实时开播状态检测（is_live）：
   ⚬ 初始状态获取：连接房间时，通过房间初始化接口读取 live_status 字段（1 为直播中，0/2 为未开播或轮播），设置初始 is_live 状态。
-  ⚬ 长连信令秒级响应：保持长连挂机蹲守期间，一旦收到 LIVE 信令立即置为 is_live = true，收到 PREPARING 信令立即置为 is_live = false，并通过 /ws Snapshot 实时同步至控制面板。
+  ⚬ 长连信令秒级响应：保持长连挂机蹲守期间，一旦收到 LIVE 信令立即置为 is_live = true，收到 PREPARING 信令立即置为 is_live = false，并通过 Tauri 原生 IPC 事件（room_state_changed）实时同步至控制面板（同时通过 /ws Snapshot 同步至外部网页/OBS 客户端）。
 ⚬ 交互层展示与选房体验：
   ⚬ 统一展示格式与三态指示灯：建连获取到房间元信息后统一渲染为 room_id（主播名），未连接或未解析出主播名时仅显示 room_id。面板胶囊状态灯规则如下：
     ⚬ ⚪ 灰灯：未连接或断线重连中；
@@ -115,7 +115,7 @@ dambo/
 
 server.rs 使用 axum 搭建统一的异步 HTTP 与 WebSocket 服务（共享 Arc<AppState>），过滤后的事件流在内存总线处分流为两条互不阻塞的独立通道：
 
-通道 A：前端展示与实时直通流（http://<host>:3838/、/list & ws://<host>:3838/ws）
+通道 A：网页展示与实时直通流（http://<host>:3838/、/list & ws://<host>:3838/ws，面向 OBS 与网页监看）
 
 ⚬ axum 路由与静态托管设计：
   ⚬ GET /：镜像 robabel 约定，动态读取当前激活主题（static/themes/<theme>/index.html）并返回 HTML，提供透明背景 OBS 浏览器源弹幕挂件，支持运行时热切换主题即时生效。
@@ -145,6 +145,7 @@ server.rs 使用 axum 搭建统一的异步 HTTP 与 WebSocket 服务（共享 A
   ⚬ 左侧拖拽手柄（data-tauri-drag-region）+ 登录账号徽章（点击可登出重扫码）。
   ⚬ 房间选择与输入组件（三态指示灯 ⚪未连 / 🟡未开播 / 🟢直播中 + room_id（主播名），点击展开输入框 + 我的直播间 / 关注开播中 / 历史房间 面板）+ 连接切换按钮。
   ⚬ 功能控制区：OBS 主题下拉选择框、[📋 OBS (:3838)] 一键复制 http://localhost:3838 按钮（水坝引擎常驻开启，界面无开关）。
+  ⚬ 通信架构解耦（关键规范）：dambo-ui 悬浮舱不连接 /ws 弹幕流（避免弹幕风暴下的反序列化与性能损耗），全面使用 Tauri 原生 IPC（invoke 指令获取/操作、tauri::Emitter 事件监听 room_state_changed、auth_state_changed），实现极低系统开销。
 2. 系统托盘（Tray Icon）：
   ⚬ 左键点击切换主控制浮窗显隐，悬停 Tooltip 同步展示当前房间号、主播名及开播状态；右键菜单包含：显示/隐藏面板、复制 OBS 挂件地址 (:3838)、打开网页弹幕列表 (:3838/list)、重新登录 B 站、打开配置/录制/日志目录、退出 dambo。
 
@@ -200,7 +201,7 @@ filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 {"offset_ms":5420,"timestamp":1763280005420,"room_id":21452505,"room_uname":"主播A","kind":"like","uid":9918273,"uname":"老粉丁","content":"为主播点赞了","price":0,"raw_cmd":"LIKE_INFO_V3_CLICK"}
 
 
-6.2 通道 A：ws://<host>:3838/ws（面向 / OBS 挂件、/list 网页列表与 Tauri 控制面板）
+6.2 通道 A：ws://<host>:3838/ws（面向 / OBS 挂件与 /list 网页列表；dambo-ui 解耦走原生 IPC）
 
 连接成功立即推送首帧 Snapshot，后续每次收到过滤后的有效事件或房间开播状态变化时实时广播：
 

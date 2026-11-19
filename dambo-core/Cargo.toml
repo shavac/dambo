@@ -1,0 +1,31 @@
+[package]
+name = "dambo-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
+log = { version = "0.4.35", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+axum = { version = "0.8.9", features = ["ws"] }
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = "0.7.20"
+tower-http = { version = "0.7.1", features = ["fs", "cors", "set-header"] }
+http = "1.5.0"
+futures-util = "0.3.34"
+toml = "1.1.8"
+toml_edit = "0.25.19"
+regex = "1.13.1"
+clru = "0.6.3"
+blivedm = "0.5.8"
+reqwest = { version = "0.13.5", features = ["json", "query", "rustls"] }
+qrcode = { version = "0.15.0", features = ["svg"] }
+base64 = "0.22.1"
+flate2 = "1.1.11"
+prost = "0.13.5"
+tungstenite = "0.20.1"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29.0"

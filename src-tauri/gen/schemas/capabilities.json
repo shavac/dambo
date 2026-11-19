@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Capability for dambo windows","local":true,"windows":["main","bili-qr-login"],"permissions":["core:default","core:window:allow-start-dragging","core:window:allow-create","core:window:allow-destroy","core:window:allow-close","core:window:allow-show","core:window:allow-hide"]}}
