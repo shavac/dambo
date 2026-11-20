@@ -1,0 +1,117 @@
+name: Build and Package
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_name: dambo-macos-arm64
+          - os: windows-latest
+            artifact_name: dambo-windows-x64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install NASM on Windows (for aws-lc-sys)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Ensure CMake on macOS
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          command -v cmake >/dev/null 2>&1 || brew install cmake
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+      - name: Build release binaries
+        run: cargo build --release --workspace
+
+      - name: Package macOS release archive
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          chmod +x scripts/package_macos.sh
+          ./scripts/package_macos.sh --skip-build
+
+          STAGE_DIR="dist/${{ matrix.artifact_name }}"
+          rm -rf "$STAGE_DIR" "dist/${{ matrix.artifact_name }}.zip"
+          mkdir -p "$STAGE_DIR"
+
+          ditto Dambo.app "$STAGE_DIR/Dambo.app"
+          cp target/release/dambo "$STAGE_DIR/dambo"
+          chmod +x "$STAGE_DIR/dambo"
+          cp dambo_config.toml "$STAGE_DIR/dambo_config.toml"
+	  cp README.md README.md.zh "$STAGE_DIR/"
+          cp -R static "$STAGE_DIR/static"
+
+          ditto -c -k --sequesterRsrc --keepParent "$STAGE_DIR" "dist/${{ matrix.artifact_name }}.zip"
+
+      - name: Package Windows release archive
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $StageDir = "dist\${{ matrix.artifact_name }}"
+          $ArchivePath = "dist\${{ matrix.artifact_name }}.zip"
+          if (Test-Path $StageDir) { Remove-Item -Recurse -Force $StageDir }
+          if (Test-Path $ArchivePath) { Remove-Item -Force $ArchivePath }
+          New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+
+          Copy-Item "target\release\dambo-ui.exe" -Destination "$StageDir\dambo-ui.exe"
+          Copy-Item "target\release\dambo.exe" -Destination "$StageDir\dambo.exe"
+          Copy-Item "dambo_config.toml" -Destination "$StageDir\dambo_config.toml"
+          Copy-Item "static" -Destination "$StageDir\static" -Recurse
+	  Copy-Item "README.md" -Destination "$StageDir\README.md"
+	  Copy-Item "README.md.zh" -Destination "$StageDir\README.md.zh"
+          Compress-Archive -Path $StageDir -DestinationPath $ArchivePath -Force
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}.zip
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*.zip
+          generate_release_notes: true
