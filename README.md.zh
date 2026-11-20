@@ -1,0 +1,347 @@
+# dambo
+
+[English](README.md) | [简体中文](README.md.zh)
+
+**`dambo`**（Danmaku + Dam + Bot）是使用 Rust 编写的 B 站直播间弹幕采集、全量事件无损录制、OBS 透明挂件服务与流量整形边缘节点。
+
+在设计上，`dambo` 作为**无状态边缘管道**与同生态语音识别节点 `robabel`（默认端口 `3737`）对称协作（也可独立作为 OBS 弹幕挂件与弹幕录制工具使用）：它能够将直播间 100% 事件无损写入 JSONL，在 `:3838` 端口托管 OBS 浏览器源与网页监看页面，并将高并发弹幕风暴整形为带优先级的聚合批次流，供下游 AI 中控消费。
+
+完整的产品需求与架构设计请参阅 [DESIGN.md.zh](DESIGN.md.zh)。
+
+---
+
+## 项目概述与生态定位
+
+在三端本地 AI 直播助手架构中，`dambo` 与纯听觉节点 `robabel` 保持镜像对称，共同为有状态中控大脑 `robao` 提供实时感知输入：
+
+| 节点 | 默认端口 | 职责定位 | 输出能力 |
+| --- | --- | --- | --- |
+| **`robabel`** | `:3737` | 无状态听觉感知节点 | 实时 ASR 语音流（`/ws`）、OBS 语音字幕挂件（`/`） |
+| **`dambo`** | `:3838` | 无状态直播互动采集与流量整形节点 | OBS 弹幕挂件（`/`）、网页监看页（`/list`）、实时直通流（`/ws`）、水坝聚合流（`/ws/dam`）、全量 JSONL 录制（`./rec/`） |
+| **`robao`** | — | 有状态中控大脑 | 同时订阅 `3737/ws` 与 `3838/ws/dam`，负责双流毫秒级对齐、观众生命周期状态机、长期记忆与 LLM/TTS 回复生成 |
+
+> **架构边界**：`dambo` 保持**无状态边缘管道**定位，不在内部维护观众生命周期状态机，也不包含任何 LLM 推理逻辑；底层配置与传输协议统一使用纯数字 `room_id` 作为房间唯一标识。
+
+---
+
+## 系统架构
+
+```text
+B 站直播长连 WebSocket（blivedm + Protobuf v2 + Brotli/Zlib）
+                     │
+                     ▼
+           collector.rs（RawBiliEvent）
+                     │
+        ┌────────────┴────────────────────┐
+        │ 前置无损旁路（100% 原始事件）     │
+        ▼                                 ▼
+  recorder.rs                        filter.rs
+  全量 JSONL 落盘（./rec/）    LRU 头像缓存（uid -> face）
+  切换房间 / 开播自动轮转      过滤点赞 / 进场 / 低于阈值礼物
+                                          │
+                        ┌─────────────────┴─────────────────┐
+                        ▼                                   ▼
+             通道 A：StateHub                    通道 B：DamEngine
+             环形缓冲（300 条历史）              蓄水池（window_ms）+ 泄洪道
+                        │                                   │
+         ┌──────────────┼──────────────┐                    ▼
+         ▼              ▼              ▼               ws://:3838/ws/dam
+   GET / 与 /list  ws://:3838/ws   Tauri IPC            （面向 robao 的 DamBatch；
+   （OBS / 网页）   （Snapshot /    （room_state_changed   剔除头像字段、背压保护）
+                     Event /        与 auth_state_changed；
+                     RoomState）    桌面端不连接 /ws）
+```
+
+---
+
+## 核心特性
+
+- **无感 B 站鉴权与原生扫码登录（`auth.rs`）**：
+  - 启动时通过 `https://api.bilibili.com/x/web-interface/nav` 静默校验本地 Cookie（`dambo-ui` 在网络瞬断时会按 `2s`、`5s`、`10s` 自动重试）。
+  - 凭证缺失或失效时，`dambo-ui` 动态弹出置顶 `320×380` 矢量 SVG 扫码窗口（`dambo` CLI 则在终端打印 Unicode 字符二维码），每 2 秒轮询登录态并在过期后自动刷新二维码。
+  - 登录成功后将 `SESSDATA`、`bili_jct`、`DedeUserID`（以及缓存的昵称 `uname`、头像 `face`）持久化到 `session_file`。
+
+- **单房间长连采集与便捷选房（`collector.rs`）**：
+  - 支持直接输入纯数字房间号（自动兼容 B 站短号转真实长号）、完整 `https://live.bilibili.com/...` 直播间链接或格式化展示文本。
+  - 完整解析直播间状态与互动信令：`LIVE`、`PREPARING`、`ROOM_CHANGE`、`ROOM_BLOCK_MSG`、`WARNING`、`CUT_OFF`、`DANMU_MSG`（含大表情贴纸 `emoticon` 与文本内联表情 `emots`）、`SUPER_CHAT_MESSAGE` / `SUPER_CHAT_MESSAGE_JPN`、`SEND_GIFT` / `COMBO_SEND` / `GIFT_COMBO`、`GUARD_BUY` / `USER_TOAST_MSG` / `USER_TOAST_MSG_V2`、`INTERACT_WORD` / `INTERACT_WORD_V2`（`enter`、`follow`、`share`）及 `LIKE_INFO_V3_CLICK`（`like`）。
+  - 断线后执行上限 60 秒的指数退避自动重连。
+  - 下拉选房面板按需拉取 **我的直播间（My Room）**、**关注开播中（Following Live）** 与 **历史房间（Recent Rooms，最多保留 20 条，支持单项移除）**。
+
+- **前置旁路全量 JSONL 录制（`recorder.rs`）**：
+  - 挂载在降噪过滤器**之前**，确保点赞、免费礼物等直播间 100% 事件均按行实时追加写入 JSONL 文件。
+  - `record.filename_pattern` 支持 `{room_name}`（自动将跨平台非法文件名字符替换为 `_`，未获取主播名时自动回退为 `{room_id}`）、`{room_id}` 及 `chrono` `strftime` 时间占位符。
+  - 连接/切换房间以及收到 `LIVE` 开播信令时，自动关闭旧文件、创建新文件并重置 `offset_ms = 0`（开播事件作为新文件的第一行写入）。
+
+- **入口降噪与零风控 LRU 头像缓存（`filter.rs`）**：
+  - 严禁额外调用 HTTP 用户信息接口反查头像；直接从进入管道的事件（即使是被下游过滤掉的免费礼物）中提取头像并预热内存 LRU 缓存（`uid -> face_url`，默认容量 `2000`），自动为无头像的 `enter` 进场事件补全头像。
+  - 支持针对下游实时通道配置屏蔽点赞（`ignore_like`）、屏蔽进场（`ignore_enter`）及礼物最低金瓜子门槛（`min_gift_coin`，`1000 = 1 元`）。
+
+- **双通道 Axum 服务与内置主题（`server.rs`、`static/themes/`）**：
+  - 全局注入 `Cache-Control: no-store, no-cache, must-revalidate` 与 `Pragma: no-cache` 响应头，避免 OBS 浏览器源缓存旧版主题样式与脚本。
+  - **`default`**：默认透明 OBS 弹幕挂件，顶部提供醒目留言/大航海固定栏（`sc-pin-bar`，最多 4 张卡片），主区域支持头像、粉丝牌、大表情贴纸与内联表情（最多 60 条），底部提供临时进场提示停靠栏（`enter-dock`）。
+  - **`sc-ticker`**：精简 OBS 挂件，仅展示带倒计时的醒目留言（按金额档位持续 60s–300s）与大航海（90s）卡片（最多 8 张）。
+  - **`list`（`/list`）**：独立网页端弹幕监看台，提供顶部 SC/大航海常驻栏、智能防滚屏锁定（`↓ N new messages` 一键回底）与多维过滤（`All` / `Chat` / `Gifts & SC` / `Medals`）。
+  - **水坝聚合引擎（`/ws/dam`）**：常驻运行的蓄水池（`window_ms`，`priority = 0`，支持相同文本弹幕去重计数与代表用户列表）+ 零延迟泄洪道（礼物 `priority = 1`，SC/大航海/直播间状态事件 `priority = 2`），配合有界背压队列（`buffer_capacity`，默认 `512`）。
+
+- **IPC 解耦的 Tauri v2 桌面悬浮舱与系统托盘（`src-tauri/`、`ui/`）**：
+  - `740×56` 紧凑单行置顶悬浮舱（展开选房下拉面板时自动扩展至 `380px` 高度），内置三态指示灯（`⚪` 未连接 / `🟡` 已连接未开播 / `🟢` 直播中）、OBS 主题热切换、一键复制 OBS 地址及更多功能菜单（`...`）。
+  - 系统托盘支持左键切换悬浮舱显隐，悬停提示同步显示房间号、主播名、标题与开播状态；右键菜单可快捷打开/复制 OBS 挂件与监看页地址、打开配置/录制/日志目录、重新登录或退出。
+  - 桌面端严格只订阅 Tauri 原生 IPC 事件（`room_state_changed`、`auth_state_changed`），不连接 `/ws` 弹幕流，在弹幕风暴下仍保持极低资源占用。
+
+---
+
+## 目录结构
+
+```text
+dambo/
+├── Cargo.toml                  # 虚拟 Cargo Workspace 清单（Edition 2024）
+├── DESIGN.md.zh                # 产品需求规格与系统架构设计文档
+├── dambo_config.toml           # 默认运行时配置文件
+├── dambo-core/                 # 核心共享库
+│   └── src/
+│       ├── lib.rs              # DamboRuntime 核心流水线编排器
+│       ├── config.rs           # TOML 配置加载与保留注释的原位回写（toml_edit）
+│       ├── model.rs            # RawBiliEvent、通道 A/B 与 IPC 数据契约
+│       ├── auth.rs             # B 站 Cookie 验活、SVG / 终端二维码登录
+│       ├── collector.rs        # blivedm 与 Protobuf v2 采集器 + 退避重连
+│       ├── recorder.rs         # 前置无损 JSONL 录制器与自动轮转
+│       ├── filter.rs           # 下游降噪过滤与 LRU 头像缓存
+│       ├── hub.rs              # 通道 A 环形缓冲与 Tauri watch 状态中心
+│       ├── dam_engine.rs       # 通道 B 蓄水池、泄洪道与背压保护队列
+│       └── server.rs           # Axum HTTP 静态服务与双 WebSocket 端点
+├── cli/                        # 无头命令行入口 crate（dambo-cli，二进制 dambo）
+│   └── src/main.rs
+├── ui/                         # Tauri 桌面端前端资源（index.html、login.html、style.css、app.js）
+├── src-tauri/                  # Tauri v2 桌面宿主与系统托盘（dambo-ui）
+│   ├── Cargo.toml
+│   ├── tauri.conf.json
+│   ├── capabilities/default.json
+│   └── src/
+│       ├── main.rs
+│       └── lib.rs
+├── static/themes/              # OBS 挂件与网页监看主题目录
+│   ├── default/                # 默认透明 OBS 弹幕挂件（GET /）
+│   ├── sc-ticker/              # 仅展示 SC 与大航海的 OBS 挂件
+│   └── list/                   # 网页端弹幕监看台（GET /list）
+├── scripts/
+│   └── package_macos.sh        # 构建并签名 Dambo.app 安装包
+└── .github/workflows/
+    └── build.yml               # macOS arm64 与 Windows x64 CI 构建及 Release 打包
+```
+
+---
+
+## 快速开始
+
+### 环境准备
+
+- **Rust 工具链**：Rust **1.90+**（Cargo Edition 2024）。
+- **macOS**：Xcode Command Line Tools 与 `cmake`（如未安装可通过 `brew install cmake` 安装）。
+- **Windows**：MSVC 构建工具、WebView2（Windows 10/11 通常已预装）以及 `nasm`（`aws-lc-sys` 依赖）。
+- **Linux**：Tauri v2 所需的系统 WebKit/GTK 依赖（如 `libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`libayatana-appindicator3-dev` 等）。
+
+### 1. 运行无头 CLI（`dambo`）
+
+```bash
+# 在工作区根目录编译并启动 CLI
+cargo run -p dambo-cli --release -- --config dambo_config.toml
+```
+
+CLI 参数说明：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-c, --config <CONFIG>` | `dambo_config.toml` | 指定 TOML 配置文件路径 |
+| `-r, --room <ROOM>` | *（读取配置文件）* | 覆盖目标房间号、短号或 `https://live.bilibili.com/...` 直播间链接 |
+| `--no-login` | `false` | 未登录时跳过终端交互式二维码登录 |
+
+### 2. 运行桌面控制悬浮舱（`dambo-ui`）
+
+```bash
+# 启动悬浮控制舱与系统托盘应用
+cargo run -p dambo-ui --release -- --config dambo_config.toml
+```
+
+`dambo-ui` 支持 `-c, --config <CONFIG>`（默认 `dambo_config.toml`）。传入相对路径时，程序会依次在当前工作目录、可执行文件上级目录（含 macOS 应用包 `Contents/Resources/`）以及仓库根目录自动解析配置文件位置。
+
+### 3. 接入 OBS 与网页监看台
+
+1. 根据弹窗或终端提示使用哔哩哔哩手机端扫码登录（也可在 CLI 中使用 `--no-login`）。
+2. 输入房间号或直接粘贴 `https://live.bilibili.com/<id>` 链接（或在下拉面板中选择 **My Room** / **Following Live** / **Recent Rooms**）。
+3. 在 **OBS Studio** 中添加 **浏览器（Browser Source）**，URL 填写 `http://localhost:3838/`（`default` 与 `sc-ticker` 主题均已内置透明背景）。
+4. 若需在副屏或局域网手机/iPad 监看，请将 `dambo_config.toml` 中的 `[server].host` 改为 `"0.0.0.0"`，并在浏览器打开 `http://<本机IP>:3838/list`。
+
+### 4. 测试与打包
+
+```bash
+# 运行工作区全部单元与集成测试
+cargo test --workspace
+
+# 打包 macOS 应用（生成 ./Dambo.app）
+chmod +x scripts/package_macos.sh
+./scripts/package_macos.sh
+```
+
+`scripts/package_macos.sh` 支持 `--debug`、`--offline` 与 `--skip-build` 选项。GitHub Actions（`.github/workflows/build.yml`）会在推送时自动构建 `macos-latest`（`dambo-macos-arm64.zip`）与 `windows-latest`（`dambo-windows-x64.zip`），并在推送 `v*` 标签时自动发布 GitHub Release。
+
+---
+
+## 配置文件说明（`dambo_config.toml`）
+
+以下为默认配置模板（在 UI 或 CLI 中切换房间与 OBS 主题时，程序会通过 `toml_edit` 原位更新 `dambo_config.toml` 并保留你的原有注释）：
+
+```toml
+[bilibili]
+room_id = 0                    # 目标直播间号（纯数字；0 表示未连接；自动解析短号）
+history_rooms = []             # 最近连接过的数字房间号列表（最多 20 条）
+session_file = "./dambo_session.json"
+min_gift_coin = 1000           # 实时通道礼物过滤阈值（单位：金瓜子，1000 = 1 元；不影响录制）
+ignore_enter = false           # 实时通道是否屏蔽进场事件（默认：false）
+ignore_like = true             # 实时通道是否屏蔽点赞事件（默认：true；不影响录制）
+avatar_cache_size = 2000       # uid -> face_url 内存 LRU 缓存容量
+
+# 通道 A：实时展示流配置（服务于 / OBS 挂件与 /list 网页监看）
+[feed]
+max_history = 300              # Snapshot 环形缓冲区最大保留条数
+show_enter = true              # 是否在前端主题中推送/渲染观众进场提示
+show_medal = true              # 是否携带/展示粉丝牌名称与等级
+
+# 通道 B：面向 robao 中控的水坝聚合流（ws://localhost:3838/ws/dam）
+[dam]
+window_ms = 2500               # 蓄水池聚合时间窗口（毫秒）
+dedup_enabled = true           # 窗口内相同文本弹幕是否去重计数
+buffer_capacity = 512          # 入口有界队列容量（背压保护）
+
+[server]
+host = "localhost"             # 局域网访问（如 iPad/手机打开 /list）可改为 "0.0.0.0"
+port = 3838                    # 与 robabel 默认端口 3737 相邻
+html_dir = "static/themes"     # OBS 与网页主题根目录
+theme = "default"              # GET / 当前激活的 OBS 挂件主题
+
+[log]
+level = "info"                 # off | error | warn | info | debug | trace（也支持 RUST_LOG 覆盖）
+path = "./logs"                # 桌面端在此目录写入轮转日志（单文件 5 MB，保留 5 份）
+
+[record]
+enabled = true                 # 开启全量事件无损 JSONL 录制（前置旁路，不受过滤影响）
+dir = "./rec"
+# 可用占位符：{room_name}（已清洗的主播名）、{room_id} 及 chrono strftime 时间格式
+# 切换房间或收到 LIVE 开播信令时自动轮转新文件并重置 offset_ms = 0
+filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
+```
+
+---
+
+## HTTP 端点与数据契约
+
+### 服务端路由（`http://<host>:<port>`）
+
+| 路径 | 协议 | 说明 |
+| --- | --- | --- |
+| `GET /` | HTTP | 返回 `static/themes/<theme>/index.html`（当前激活 OBS 挂件，支持运行时热切换） |
+| `GET /list` | HTTP | 返回 `static/themes/list/index.html`（交互式网页弹幕监看台） |
+| `GET /static/themes/*` | HTTP | 静态资源托管，统一注入 `Cache-Control: no-store, no-cache, must-revalidate` |
+| `GET /ws` | WebSocket | **通道 A**：面向 `/` 与 `/list` 的实时直通流（`Snapshot`、`Event`、`RoomState`） |
+| `GET /ws/dam` | WebSocket | **通道 B**：面向 `robao` 中控大脑的常驻水坝聚合流（`DamBatch`） |
+
+### 1. 本地全量录制格式（`./rec/dambo_<room_name>_YYYYMMDD_HHMMSS.jsonl`）
+
+在下游过滤前按行追加写入 `RawBiliEvent`；可选字段（`face`、`medal_name`、`medal_level`、`emoticon`、`emots`）在为空时自动省略：
+
+```json
+{"offset_ms":0,"timestamp":1763280000000,"room_id":21452505,"room_uname":"主播A","kind":"live","uid":0,"uname":"","content":"直播开始","price":0,"raw_cmd":"LIVE"}
+{"offset_ms":1234,"timestamp":1763280001234,"room_id":21452505,"room_uname":"主播A","kind":"chat","uid":3829104,"uname":"观众甲","face":"https://i0.hdslb.com/bfs/face/example.jpg","medal_name":"星光","medal_level":12,"content":"这波操作太细节了","price":0,"raw_cmd":"DANMU_MSG"}
+{"offset_ms":5420,"timestamp":1763280005420,"room_id":21452505,"room_uname":"主播A","kind":"like","uid":9918273,"uname":"老粉丁","content":"为主播点赞了","price":0,"raw_cmd":"LIKE_INFO_V3_CLICK"}
+```
+
+覆盖的 `kind` 类型：`live`、`preparing`、`room_change`、`room_block`、`warning`、`cut_off`、`chat`、`super_chat`、`gift`、`guard`、`enter`、`follow`、`share`、`like`。
+
+### 2. 通道 A（`ws://<host>:3838/ws`）
+
+建立连接后立即推送首帧 `Snapshot`（含房间元信息与最近历史，若客户端消费滞后也会自动补发 `Snapshot`），后续增量变更以 `Event` 或 `RoomState` 帧广播：
+
+```json
+{
+  "type": "Snapshot",
+  "data": {
+    "room_id": 21452505,
+    "room_uname": "主播A",
+    "room_title": "深夜杂谈",
+    "is_live": true,
+    "connected": true,
+    "items": [
+      {
+        "id": 1024,
+        "kind": "chat",
+        "uid": 3829104,
+        "uname": "观众甲",
+        "face": "https://i0.hdslb.com/bfs/face/example.jpg",
+        "medal_name": "星光",
+        "medal_level": 12,
+        "content": "这波操作太细节了",
+        "price": 0,
+        "timestamp": 1763280001234
+      }
+    ]
+  }
+}
+```
+
+实时增量帧沿用 `{ "type": "...", "data": ... }` 封装格式：
+- `Event`：单条 `SnapshotItem`
+- `RoomState`：`{ "room_id", "room_uname", "room_title", "is_live", "connected" }`
+
+### 3. 通道 B（`ws://<host>:3838/ws/dam`）
+
+向中控推送剔除 `face` 头像字段后的 `DamBatch` 批次：
+- `priority = 0`：蓄水池定时冲刷（`window_ms`），对重复弹幕内容去重计数（`count` 与最多 5 名 `sample_users`），并按用户归并进场事件。
+- `priority = 1`：高价值礼物立即泄洪。
+- `priority = 2`：高优先级关键事件零延迟泄洪（`super_chat`、`guard`、`live`、`preparing`、`room_change`、`warning`、`cut_off`）。
+
+当弹幕风暴导致入口有界队列（`buffer_capacity`）打满时，`DamEngine` 按严格优先级逐级丢弃低价值事件——优先丢弃无粉丝牌 `enter`，其次 `chat`，再其次有粉丝牌 `enter`/`follow`/`share`/`room_block` 与 `gift`——**绝不丢弃** Tier-4 级别的 `super_chat`、`guard` 与直播间状态变更事件。
+
+```json
+{
+  "type": "DamBatch",
+  "data": {
+    "batch_id": 88,
+    "room_id": 21452505,
+    "room_uname": "主播A",
+    "priority": 0,
+    "timestamp": 1763280002500,
+    "events": [
+      {
+        "kind": "chat",
+        "uid": 3829104,
+        "uname": "观众甲",
+        "medal_level": 12,
+        "content": "666",
+        "count": 14,
+        "sample_users": ["观众甲", "观众乙", "观众丙"],
+        "price": 0
+      },
+      {
+        "kind": "enter",
+        "uid": 9918273,
+        "uname": "老粉丁",
+        "medal_level": 18,
+        "content": "",
+        "count": 1,
+        "sample_users": ["老粉丁"],
+        "price": 0
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 自定义 OBS 主题
+
+位于 `static/themes/<theme-name>/` 且包含 `index.html` 的目录（`list` 为 `GET /list` 保留路径除外）会被 `dambo` 自动扫描识别，并可在悬浮舱或 `dambo_config.toml` 的 `[server].theme` 中直接切换：
+
+1. 新建 `static/themes/my-theme/index.html`，样式与脚本资源路径通过 `/static/themes/my-theme/...` 引用。
+2. 在 `<head>` 中加入 `<meta name="referrer" content="no-referrer">`，避免 B 站 CDN（`i0.hdslb.com`）头像与表情图片返回 HTTP `403`。
+3. 前端连接 `ws://${location.host}/ws`，处理 `Snapshot`、`Event` 与 `RoomState` 消息即可。
+4. 在悬浮舱切换为 `my-theme`（或修改 `theme = "my-theme"`）后刷新 OBS 浏览器源即可即时生效。
