@@ -33,6 +33,10 @@ jobs:
 
       - name: Cache Cargo dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+
 
       - name: Install NASM on Windows (for aws-lc-sys)
         if: matrix.os == 'windows-latest'
