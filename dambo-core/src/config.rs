@@ -219,6 +219,26 @@ impl Default for LogConfig {
     }
 }
 
+/// Parses a `[log].level` string into a `log::LevelFilter`, falling back to `Info` on invalid values.
+pub fn parse_log_level(raw: &str) -> log::LevelFilter {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => log::LevelFilter::Off,
+        "error" => log::LevelFilter::Error,
+        "warn" | "warning" => log::LevelFilter::Warn,
+        "info" => log::LevelFilter::Info,
+        "debug" => log::LevelFilter::Debug,
+        "trace" => log::LevelFilter::Trace,
+        _ => log::LevelFilter::Info,
+    }
+}
+
+impl LogConfig {
+    /// Returns the configured log level filter parsed from `self.level`.
+    pub fn level_filter(&self) -> log::LevelFilter {
+        parse_log_level(&self.level)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct RecordConfig {
     #[serde(default = "default_true")]
@@ -255,3 +275,28 @@ fn default_log_level() -> String { "info".to_string() }
 fn default_log_path() -> String { "./logs".to_string() }
 fn default_record_dir() -> String { "./rec".to_string() }
 fn default_filename_pattern() -> String { "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string() }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_log_level() {
+        assert_eq!(parse_log_level("off"), log::LevelFilter::Off);
+        assert_eq!(parse_log_level("OFF"), log::LevelFilter::Off);
+        assert_eq!(parse_log_level(" error "), log::LevelFilter::Error);
+        assert_eq!(parse_log_level("warn"), log::LevelFilter::Warn);
+        assert_eq!(parse_log_level("WARNING"), log::LevelFilter::Warn);
+        assert_eq!(parse_log_level("info"), log::LevelFilter::Info);
+        assert_eq!(parse_log_level("debug"), log::LevelFilter::Debug);
+        assert_eq!(parse_log_level("Trace"), log::LevelFilter::Trace);
+        assert_eq!(parse_log_level("unknown"), log::LevelFilter::Info);
+        assert_eq!(parse_log_level(""), log::LevelFilter::Info);
+
+        let cfg = LogConfig {
+            level: " Warn ".to_string(),
+            path: "./logs".to_string(),
+        };
+        assert_eq!(cfg.level_filter(), log::LevelFilter::Warn);
+    }
+}

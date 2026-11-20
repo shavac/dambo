@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>哔哩哔哩扫码登录</title>
+    <title>Bilibili QR Sign In</title>
     <style>
         :root {
             --bg-color: #18191c;
@@ -79,15 +79,15 @@
 </head>
 <body>
     <div class="header">
-        <span>Bilibili 账号登录</span>
+        <span>Bilibili Sign In</span>
     </div>
     <div class="qr-box">
         <div id="qr-container">
             <svg id="qr-svg" viewBox="0 0 100 100" fill="currentColor"></svg>
         </div>
     </div>
-    <div id="status-text" class="status-text">正在加载二维码...</div>
-    <button id="refresh-btn" class="refresh-btn" style="display:none;">刷新二维码</button>
+    <div id="status-text" class="status-text">Loading QR code...</div>
+    <button id="refresh-btn" class="refresh-btn" style="display:none;">Refresh QR Code</button>
 
     <script>
         const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
@@ -109,14 +109,14 @@
                     }
                 });
                 await listen('qr_login_success', () => {
-                    document.getElementById('status-text').innerText = "登录成功，正在关闭...";
+                    document.getElementById('status-text').innerText = "Signed in, closing...";
                     if (refreshBtn) refreshBtn.style.display = 'none';
                 });
             }
 
             refreshBtn?.addEventListener('click', () => {
                 refreshBtn.style.display = 'none';
-                document.getElementById('status-text').innerText = "正在刷新二维码...";
+                document.getElementById('status-text').innerText = "Refreshing QR code...";
                 invoke?.('refresh_qr_code').catch(console.error);
             });
 

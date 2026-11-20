@@ -1,14 +1,16 @@
 use dambo_core::auth::QrPollStatus;
+use dambo_core::config::parse_log_level;
 use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
 use dambo_core::DamboRuntime;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::menu::{MenuBuilder, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 use tokio_util::sync::CancellationToken;
 
 struct AppContext {
@@ -38,15 +40,15 @@ fn format_room_identity(state: &RoomStateSnapshot) -> String {
 
 fn format_tray_tooltip(state: &RoomStateSnapshot) -> String {
     if state.room_id == 0 {
-        return "Dambo · 未连接".to_string();
+        return "Dambo · Disconnected".to_string();
     }
     let identity = format_room_identity(state);
     if !state.connected {
-        format!("Dambo · {} · 未连接", identity)
+        format!("Dambo · {} · Disconnected", identity)
     } else if state.is_live {
-        format!("Dambo · {} · 直播中", identity)
+        format!("Dambo · {} · Live", identity)
     } else {
-        format!("Dambo · {} · 未开播", identity)
+        format!("Dambo · {} · Offline", identity)
     }
 }
 
@@ -128,6 +130,43 @@ fn open_dir_in_os(dir: &PathBuf) {
     open_in_os(&target.to_string_lossy());
 }
 
+fn open_file_in_os(path: &Path) {
+    let resolved = if path.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let target = resolved.to_string_lossy().into_owned();
+
+    #[cfg(target_os = "macos")]
+    {
+        let opened = Command::new("open")
+            .arg(&target)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !opened {
+            let _ = Command::new("open").args(["-t", &target]).spawn();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        open_in_os(&target);
+    }
+}
+
+fn open_config_file_in_os(runtime: &DamboRuntime) {
+    if runtime.config_manager.path.exists() {
+        open_file_in_os(&runtime.config_manager.path);
+    } else {
+        open_dir_in_os(&runtime.base_dir);
+    }
+}
+
 fn ensure_qr_window(app: &AppHandle) -> Result<bool, String> {
     if let Some(win) = app.get_webview_window("bili-qr-login") {
         let _ = win.show();
@@ -136,7 +175,7 @@ fn ensure_qr_window(app: &AppHandle) -> Result<bool, String> {
     }
 
     WebviewWindowBuilder::new(app, "bili-qr-login", WebviewUrl::App("login.html".into()))
-        .title("哔哩哔哩扫码登录")
+        .title("Bilibili QR Sign In")
         .inner_size(320.0, 380.0)
         .resizable(false)
         .always_on_top(true)
@@ -169,7 +208,7 @@ async fn start_qr_poll_flow(
                 "qr_code_updated",
                 QrCodePayload {
                     svg: String::new(),
-                    message: format!("获取二维码失败: {}", e),
+                    message: format!("Failed to load QR code: {}", e),
                     show_refresh: true,
                 },
             );
@@ -182,7 +221,7 @@ async fn start_qr_poll_flow(
         "qr_code_updated",
         QrCodePayload {
             svg: qr.svg.clone(),
-            message: "请使用哔哩哔哩手机客户端扫码".to_string(),
+            message: "Scan with the Bilibili mobile app".to_string(),
             show_refresh: false,
         },
     );
@@ -206,7 +245,7 @@ async fn start_qr_poll_flow(
                         "qr_code_updated",
                         QrCodePayload {
                             svg: String::new(),
-                            message: "已扫码，请在手机端确认登录".to_string(),
+                            message: "Scanned — please confirm on your phone".to_string(),
                             show_refresh: false,
                         },
                     );
@@ -219,7 +258,7 @@ async fn start_qr_poll_flow(
                             "qr_code_updated",
                             QrCodePayload {
                                 svg: qr.svg.clone(),
-                                message: "二维码已过期，已自动刷新".to_string(),
+                                message: "QR code expired — refreshed automatically".to_string(),
                                 show_refresh: false,
                             },
                         );
@@ -230,7 +269,7 @@ async fn start_qr_poll_flow(
                             "qr_code_updated",
                             QrCodePayload {
                                 svg: String::new(),
-                                message: format!("刷新二维码失败: {}", e),
+                                message: format!("Failed to refresh QR code: {}", e),
                                 show_refresh: true,
                             },
                         );
@@ -263,7 +302,7 @@ async fn start_qr_poll_flow(
                         "qr_code_updated",
                         QrCodePayload {
                             svg: String::new(),
-                            message: format!("轮询状态失败: {}", e),
+                            message: format!("Failed to check login status: {}", e),
                             show_refresh: true,
                         },
                     );
@@ -319,10 +358,54 @@ async fn remove_history_room(
 
 #[tauri::command]
 async fn set_dropdown_expanded(window: tauri::WebviewWindow, expanded: bool) -> Result<(), String> {
-    let height = if expanded { 310.0 } else { 56.0 };
+    let height = if expanded { 380.0 } else { 56.0 };
     window
         .set_size(Size::Logical(LogicalSize::new(740.0, height)))
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn open_obs_overlay(ctx: State<'_, AppContext>) -> Result<(), String> {
+    let cfg = ctx.runtime.config_snapshot();
+    let url = format!("http://{}:{}/", cfg.server.host, cfg.server.port);
+    open_in_os(&url);
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_web_list(ctx: State<'_, AppContext>) -> Result<(), String> {
+    let cfg = ctx.runtime.config_snapshot();
+    let url = format!("http://{}:{}/list", cfg.server.host, cfg.server.port);
+    open_in_os(&url);
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_config_file(ctx: State<'_, AppContext>) -> Result<(), String> {
+    open_config_file_in_os(&ctx.runtime);
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_folder(kind: String, ctx: State<'_, AppContext>) -> Result<(), String> {
+    match kind.as_str() {
+        "config" => open_config_file_in_os(&ctx.runtime),
+        "record" => open_dir_in_os(&ctx.runtime.rec_dir),
+        "log" => open_dir_in_os(&ctx.runtime.log_dir),
+        _ => return Err(format!("Unknown folder kind: {}", kind)),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_always_on_top(
+    window: tauri::WebviewWindow,
+    always_on_top: bool,
+) -> Result<bool, String> {
+    window
+        .set_always_on_top(always_on_top)
+        .map_err(|e| e.to_string())?;
+    Ok(always_on_top)
 }
 
 #[tauri::command]
@@ -362,15 +445,62 @@ async fn close_window(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(), 
     Ok(())
 }
 
+fn build_log_plugin(
+    log_level: log::LevelFilter,
+    log_dir: &Path,
+) -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    let dep_level = log_level.min(log::LevelFilter::Warn);
+    let mut builder = tauri_plugin_log::Builder::new().level(dep_level);
+
+    match std::env::var("RUST_LOG") {
+        Ok(val) if !val.trim().is_empty() => {
+            for directive in val.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some((target, lvl)) = directive.split_once('=') {
+                    builder = builder.level_for(target.trim().to_string(), parse_log_level(lvl));
+                } else {
+                    builder = builder.level(parse_log_level(directive));
+                }
+            }
+        }
+        _ => {
+            builder = builder
+                .level_for("dambo_core", log_level)
+                .level_for("dambo_ui", log_level)
+                .level_for("dambo", log_level);
+        }
+    }
+
+    let file_target = if std::fs::create_dir_all(log_dir).is_ok() {
+        Target::new(TargetKind::Folder {
+            path: log_dir.to_path_buf(),
+            file_name: Some("dambo".to_string()),
+        })
+    } else {
+        Target::new(TargetKind::LogDir {
+            file_name: Some("dambo".to_string()),
+        })
+    };
+
+    builder
+        .clear_targets()
+        .target(Target::new(TargetKind::Stdout))
+        .target(file_target)
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .max_file_size(5 * 1024 * 1024)
+        .rotation_strategy(RotationStrategy::KeepSome(5))
+        .build()
+}
+
 pub fn run(config_path: &str) {
     let runtime = Arc::new(
         DamboRuntime::from_config_path(config_path)
             .expect("Failed to initialize DamboRuntime from config"),
     );
+    let log_level = runtime.config_snapshot().log.level_filter();
     let qr_poll_cancel = Arc::new(tokio::sync::Mutex::new(None::<CancellationToken>));
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::default().build())
+        .plugin(build_log_plugin(log_level, &runtime.log_dir))
         .manage(AppContext {
             runtime: runtime.clone(),
             qr_poll_cancel: qr_poll_cancel.clone(),
@@ -383,6 +513,11 @@ pub fn run(config_path: &str) {
             fetch_room_options,
             remove_history_room,
             set_dropdown_expanded,
+            open_obs_overlay,
+            open_web_list,
+            open_config_file,
+            open_folder,
+            set_always_on_top,
             open_qr_login,
             refresh_qr_code,
             logout,
@@ -400,7 +535,7 @@ pub fn run(config_path: &str) {
                 }
             });
 
-            // 2. Startup silent Bilibili cookie check; pop up QR window if missing or expired
+            // 2. Startup silent Bilibili cookie check with retries; pop up QR window if missing or expired
             let rt_auth_init = runtime.clone();
             let app_auth_init = app_handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -408,13 +543,31 @@ pub fn run(config_path: &str) {
                     let _ = ensure_qr_window(&app_auth_init);
                     return;
                 }
-                match rt_auth_init.auth.validate_session().await {
-                    Ok(state) if !state.is_login => {
-                        let _ = ensure_qr_window(&app_auth_init);
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::warn!("Startup Bilibili session validation skipped: {}", e);
+                let retry_delays_secs = [2u64, 5, 10];
+                for attempt in 0..=retry_delays_secs.len() {
+                    match rt_auth_init.auth.validate_session().await {
+                        Ok(state) => {
+                            if !state.is_login {
+                                let _ = ensure_qr_window(&app_auth_init);
+                            }
+                            return;
+                        }
+                        Err(e) => {
+                            if let Some(&delay) = retry_delays_secs.get(attempt) {
+                                log::warn!(
+                                    "Startup Bilibili session validation attempt {} failed ({:#}); retrying in {}s",
+                                    attempt + 1,
+                                    e,
+                                    delay
+                                );
+                                tokio::time::sleep(Duration::from_secs(delay)).await;
+                            } else {
+                                log::warn!(
+                                    "Startup Bilibili session validation skipped after retries: {:#}",
+                                    e
+                                );
+                            }
+                        }
                     }
                 }
             });
@@ -449,17 +602,21 @@ pub fn run(config_path: &str) {
             });
 
             // 5. Build system tray icon & context menu
+            let server_port = runtime.config_snapshot().server.port;
             let menu = MenuBuilder::new(app)
-                .text("toggle_panel", "显示/隐藏面板")
-                .text("copy_obs_url", "复制 OBS 挂件地址 (:3838)")
-                .text("open_web_list", "打开网页弹幕列表 (:3838/list)")
+                .text("toggle_panel", "Show / Hide Panel")
                 .item(&PredefinedMenuItem::separator(app)?)
-                .text("relogin", "重新登录 B 站")
-                .text("open_config_dir", "打开配置目录")
-                .text("open_rec_dir", "打开录制目录")
-                .text("open_log_dir", "打开日志目录")
+                .text("open_obs_overlay", &format!("Open OBS Overlay (:{})", server_port))
+                .text("copy_obs_url", &format!("Copy OBS Overlay URL (:{})", server_port))
+                .text("open_web_list", &format!("Open Danmaku Monitor (:{}/list)", server_port))
+                .text("copy_list_url", &format!("Copy Danmaku Monitor URL (:{}/list)", server_port))
                 .item(&PredefinedMenuItem::separator(app)?)
-                .text("quit", "退出 dambo")
+                .text("relogin", "Re-login")
+                .text("open_config_file", "Open Config File")
+                .text("open_rec_dir", "Open Recordings Folder")
+                .text("open_log_dir", "Open Logs Folder")
+                .item(&PredefinedMenuItem::separator(app)?)
+                .text("quit", "Quit Dambo")
                 .build()?;
 
             let rt_menu = runtime.clone();
@@ -467,7 +624,7 @@ pub fn run(config_path: &str) {
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .tooltip("Dambo · 未连接")
+                .tooltip("Dambo · Disconnected")
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -482,6 +639,10 @@ pub fn run(config_path: &str) {
                     let cfg = rt_menu.config_snapshot();
                     match event.id().as_ref() {
                         "toggle_panel" => toggle_main_window(app),
+                        "open_obs_overlay" => {
+                            let url = format!("http://{}:{}/", cfg.server.host, cfg.server.port);
+                            open_in_os(&url);
+                        }
                         "copy_obs_url" => {
                             let url = format!("http://{}:{}", cfg.server.host, cfg.server.port);
                             copy_to_clipboard(&url);
@@ -489,6 +650,10 @@ pub fn run(config_path: &str) {
                         "open_web_list" => {
                             let url = format!("http://{}:{}/list", cfg.server.host, cfg.server.port);
                             open_in_os(&url);
+                        }
+                        "copy_list_url" => {
+                            let url = format!("http://{}:{}/list", cfg.server.host, cfg.server.port);
+                            copy_to_clipboard(&url);
                         }
                         "relogin" => {
                             if rt_menu.auth.current_state().is_login {
@@ -503,7 +668,7 @@ pub fn run(config_path: &str) {
                                 });
                             }
                         }
-                        "open_config_dir" => open_dir_in_os(&rt_menu.base_dir),
+                        "open_config_file" => open_config_file_in_os(&rt_menu),
                         "open_rec_dir" => open_dir_in_os(&rt_menu.rec_dir),
                         "open_log_dir" => open_dir_in_os(&rt_menu.log_dir),
                         "quit" => {

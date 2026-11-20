@@ -12,13 +12,105 @@ html, body {
     overflow: hidden;
 }
 
+.overlay-layout {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    padding: 12px;
+    gap: 8px;
+    overflow: hidden;
+}
+
+/* Top pinned SuperChat & Guard bar */
+.sc-pin-bar {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    width: 100%;
+    max-width: 92%;
+}
+.sc-pin-bar.hidden {
+    display: none;
+}
+
+.sc-pin-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 240px;
+    max-width: 100%;
+    padding: 7px 11px 9px;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    overflow: hidden;
+    color: #ffffff;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    animation: slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.sc-pin-card.kind-sc {
+    background: linear-gradient(135deg, rgba(220, 38, 38, 0.92), rgba(153, 27, 27, 0.92));
+    border-color: rgba(254, 202, 202, 0.52);
+}
+.sc-pin-card.kind-guard {
+    background: linear-gradient(135deg, rgba(109, 40, 217, 0.92), rgba(67, 56, 202, 0.92));
+    border-color: rgba(221, 214, 254, 0.52);
+}
+.sc-pin-card.fade-out {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+    transition: opacity 0.28s ease, transform 0.28s ease;
+    pointer-events: none;
+}
+.sc-pin-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+}
+.sc-pin-header .avatar {
+    width: 20px;
+    height: 20px;
+}
+.sc-pin-header .sender-name {
+    color: #fef08a;
+    font-weight: 700;
+}
+.sc-pin-body {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.35;
+    color: #ffffff;
+    word-break: break-word;
+}
+.sc-pin-progress-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.16);
+}
+.sc-pin-progress-bar {
+    width: 100%;
+    height: 100%;
+    background: rgba(254, 240, 138, 0.9);
+    transform-origin: left center;
+    transform: scaleX(1);
+}
+
+/* Main danmaku scroll stream (never jumps when enter dock updates) */
 .danmaku-container {
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     justify-content: flex-end;
     align-items: flex-start;
-    height: 100%;
-    padding: 12px;
+    padding: 0;
     gap: 8px;
     overflow: hidden;
 }
@@ -50,6 +142,28 @@ html, body {
         opacity: 1;
         transform: translateY(0) scale(1);
     }
+}
+
+@keyframes enterIn {
+    from {
+        opacity: 0;
+        transform: translateX(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+/* Fixed-height bottom dock for room-enter notifications so danmaku never shifts down */
+.enter-dock {
+    flex-shrink: 0;
+    height: 34px;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    overflow: hidden;
 }
 
 .avatar {
@@ -101,24 +215,181 @@ html, body {
     margin-top: 2px;
 }
 
-/* SuperChat message special styling */
-.item-sc {
-    background: rgba(220, 38, 38, 0.85);
-    border-color: rgba(254, 202, 202, 0.4);
+/* Shared badges & inline helpers */
+.event-icon {
+    font-size: 13px;
+    line-height: 1;
+    flex-shrink: 0;
 }
+
+.event-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 999px;
+    flex-shrink: 0;
+}
+
+.event-action {
+    color: rgba(226, 232, 240, 0.85);
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.event-highlight {
+    color: #ffffff;
+    font-weight: 700;
+}
+
+.price-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.28);
+    color: #fde68a;
+    border: 1px solid rgba(253, 224, 71, 0.35);
+    flex-shrink: 0;
+}
+
+/* Enter room notification pinned inside fixed .enter-dock */
+.item-enter {
+    padding: 4px 10px;
+    font-size: 12px;
+    height: 30px;
+    background: rgba(18, 20, 26, 0.56);
+    border-color: rgba(148, 163, 184, 0.22);
+    gap: 6px;
+    animation: enterIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    white-space: nowrap;
+}
+.item-enter.fade-out {
+    opacity: 0;
+    transition: opacity 0.28s ease;
+    pointer-events: none;
+}
+.item-enter .avatar {
+    width: 18px;
+    height: 18px;
+}
+.item-enter .sender-name {
+    color: #cbd5e1;
+    font-weight: 600;
+}
+.item-enter .event-action {
+    font-size: 12px;
+    color: rgba(148, 163, 184, 0.9);
+}
+
+/* SuperChat 2-row inline card */
+.item-super_chat,
+.item-sc {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 8px 12px;
+    background: linear-gradient(135deg, rgba(220, 38, 38, 0.88), rgba(153, 27, 27, 0.88));
+    border-color: rgba(254, 202, 202, 0.48);
+    box-shadow: 0 4px 14px rgba(185, 28, 28, 0.35);
+}
+.sc-header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    flex-wrap: wrap;
+}
+.item-super_chat .sender-name,
 .item-sc .sender-name {
     color: #fef08a;
     font-weight: 700;
 }
+.price-sc {
+    margin-left: auto;
+    background: rgba(254, 240, 138, 0.18);
+    color: #fef08a;
+    border-color: rgba(254, 240, 138, 0.45);
+}
+.sc-body {
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.4;
+}
 
 /* Guard / Captain buy message */
 .item-guard {
-    background: rgba(124, 58, 237, 0.85);
-    border-color: rgba(221, 214, 254, 0.4);
+    background: linear-gradient(135deg, rgba(109, 40, 217, 0.88), rgba(67, 56, 202, 0.88));
+    border-color: rgba(221, 214, 254, 0.5);
+    box-shadow: 0 3px 12px rgba(109, 40, 217, 0.35);
+}
+.badge-guard {
+    background: rgba(250, 204, 21, 0.2);
+    color: #fde047;
+    border: 1px solid rgba(250, 204, 21, 0.45);
+}
+.item-guard .sender-name {
+    color: #ede9fe;
+    font-weight: 700;
+}
+.item-guard .event-highlight {
+    color: #fef08a;
 }
 
 /* Gift message */
 .item-gift {
-    background: rgba(217, 119, 6, 0.82);
-    border-color: rgba(254, 215, 170, 0.4);
+    background: linear-gradient(135deg, rgba(217, 119, 6, 0.86), rgba(180, 83, 9, 0.86));
+    border-color: rgba(254, 215, 170, 0.45);
+    box-shadow: 0 3px 10px rgba(180, 83, 9, 0.3);
+}
+.badge-gift {
+    background: rgba(255, 255, 255, 0.16);
+    color: #fef3c7;
+    padding: 1px 5px;
+}
+.item-gift .sender-name {
+    color: #fef3c7;
+    font-weight: 600;
+}
+.item-gift .event-highlight {
+    color: #ffffff;
+}
+
+/* Follow / share / like interaction pills */
+.item-interaction {
+    background: rgba(18, 24, 34, 0.72);
+    border-color: rgba(56, 189, 248, 0.28);
+    padding: 5px 10px;
+    font-size: 13px;
+}
+.item-follow {
+    border-color: rgba(244, 114, 182, 0.38);
+}
+.item-interaction .sender-name {
+    color: #e2e8f0;
+    font-weight: 600;
+}
+.item-interaction .event-action {
+    color: rgba(203, 213, 225, 0.88);
+}
+
+/* System & moderation notices */
+.item-system {
+    background: rgba(30, 41, 59, 0.82);
+    border-color: rgba(148, 163, 184, 0.35);
+    padding: 5px 11px;
+    font-size: 13px;
+}
+.item-alert {
+    background: rgba(153, 27, 27, 0.85);
+    border-color: rgba(252, 165, 165, 0.45);
+}
+.system-text {
+    color: #f1f5f9;
+    font-weight: 500;
 }

@@ -1,14 +1,18 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="referrer" content="no-referrer">
-    <title>Dambo OBS Danmaku</title>
+    <title>Dambo OBS Overlay</title>
     <link rel="stylesheet" href="/static/themes/default/style.css">
 </head>
 <body>
-    <div id="danmaku-container" class="danmaku-container"></div>
+    <div class="overlay-layout">
+        <div id="sc-pin-bar" class="sc-pin-bar hidden"></div>
+        <div id="danmaku-container" class="danmaku-container"></div>
+        <div id="enter-dock" class="enter-dock"></div>
+    </div>
     <script src="/static/themes/default/danmu.js"></script>
 </body>
 </html>

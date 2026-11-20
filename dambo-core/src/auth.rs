@@ -71,6 +71,10 @@ pub struct SessionData {
     pub bili_jct: String,
     #[serde(rename = "DedeUserID", alias = "dede_user_id")]
     pub dede_user_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uname: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub face: String,
 }
 
 impl SessionData {
@@ -142,6 +146,8 @@ impl SessionData {
             sessdata,
             bili_jct,
             dede_user_id,
+            uname: String::new(),
+            face: String::new(),
         };
         if session.is_valid_format() {
             Some(session)
@@ -173,6 +179,8 @@ impl SessionData {
             sessdata,
             bili_jct,
             dede_user_id,
+            uname: String::new(),
+            face: String::new(),
         };
         if session.is_valid_format() {
             Some(session)
@@ -221,6 +229,52 @@ pub fn parse_qr_poll_code(code: i64, message: &str, set_cookies: &[String]) -> Q
     parse_qr_poll_response(code, message, set_cookies, None)
 }
 
+/// Parses `https://api.bilibili.com/x/web-interface/nav` JSON into an `AuthState`.
+/// Returns `None` on transient/risk-control errors (e.g. `-412`) so fallback APIs can run.
+pub fn parse_nav_response(resp: &Value, fallback_mid: u64) -> Option<AuthState> {
+    let code = resp["code"].as_i64().unwrap_or(-1);
+    let is_login = resp["data"]["isLogin"].as_bool();
+    if code == 0 && is_login == Some(true) {
+        let uname = resp["data"]["uname"].as_str().unwrap_or("").trim().to_string();
+        if uname.is_empty() {
+            return None;
+        }
+        return Some(AuthState {
+            is_login: true,
+            uname,
+            mid: value_as_u64(&resp["data"]["mid"]).unwrap_or(fallback_mid),
+            face: resp["data"]["face"].as_str().unwrap_or("").trim().to_string(),
+        });
+    }
+    if code == -101 || (code == 0 && is_login == Some(false)) {
+        return Some(AuthState::default());
+    }
+    None
+}
+
+/// Parses `https://api.live.bilibili.com/xlive/web-ucenter/user/get_user_info` JSON into an `AuthState`.
+/// Returns `None` on transient/risk-control errors so cached auth state is preserved.
+pub fn parse_live_user_info_response(resp: &Value, fallback_mid: u64) -> Option<AuthState> {
+    let code = resp["code"].as_i64().unwrap_or(-1);
+    if code == 0 {
+        let data = &resp["data"];
+        let uname = data["uname"].as_str().unwrap_or("").trim().to_string();
+        if uname.is_empty() {
+            return None;
+        }
+        return Some(AuthState {
+            is_login: true,
+            uname,
+            mid: value_as_u64(&data["uid"]).unwrap_or(fallback_mid),
+            face: data["face"].as_str().unwrap_or("").trim().to_string(),
+        });
+    }
+    if code == -101 {
+        return Some(AuthState::default());
+    }
+    None
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QrGenerateResult {
     pub url: String,
@@ -252,9 +306,13 @@ impl AuthManager {
         let initial_state = match &loaded {
             Some(s) => AuthState {
                 is_login: true,
-                uname: format!("UID:{}", s.dede_user_id),
+                uname: if s.uname.trim().is_empty() {
+                    format!("UID:{}", s.dede_user_id)
+                } else {
+                    s.uname.trim().to_string()
+                },
                 mid: s.dede_user_id.parse().unwrap_or(0),
-                face: String::new(),
+                face: s.face.clone(),
             },
             None => AuthState::default(),
         };
@@ -286,7 +344,15 @@ impl AuthManager {
         self.session.read().expect("AuthManager RwLock poisoned").clone()
     }
 
-    pub fn save_session(&self, session: SessionData, uname: String, face: String) -> Result<()> {
+    pub fn save_session(&self, mut session: SessionData, uname: String, face: String) -> Result<()> {
+        let trimmed_uname = uname.trim();
+        if !trimmed_uname.is_empty() && !trimmed_uname.starts_with("UID:") {
+            session.uname = trimmed_uname.to_string();
+        }
+        let trimmed_face = face.trim();
+        if !trimmed_face.is_empty() {
+            session.face = trimmed_face.to_string();
+        }
         session.save(&self.session_path)?;
         let mid = session.dede_user_id.parse().unwrap_or(0);
         *self.session.write().expect("AuthManager RwLock poisoned") = Some(session);
@@ -299,6 +365,47 @@ impl AuthManager {
         Ok(())
     }
 
+    fn persist_profile_cache(&self, uname: &str, face: &str) {
+        let trimmed_uname = uname.trim();
+        let trimmed_face = face.trim();
+        if trimmed_uname.is_empty() || trimmed_uname.starts_with("UID:") {
+            return;
+        }
+        let snapshot_to_save = {
+            let mut guard = self.session.write().expect("AuthManager RwLock poisoned");
+            if let Some(ref mut sess) = *guard {
+                if sess.uname == trimmed_uname && (trimmed_face.is_empty() || sess.face == trimmed_face) {
+                    return;
+                }
+                sess.uname = trimmed_uname.to_string();
+                if !trimmed_face.is_empty() {
+                    sess.face = trimmed_face.to_string();
+                }
+                Some(sess.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(sess) = snapshot_to_save {
+            if let Err(e) = sess.save(&self.session_path) {
+                log::warn!("Failed to persist cached profile name to {:?}: {:#}", self.session_path, e);
+            }
+        }
+    }
+
+    fn apply_validated_auth(&self, state: AuthState) -> AuthState {
+        if state.is_login {
+            self.persist_profile_cache(&state.uname, &state.face);
+            self.state_tx.send_replace(state.clone());
+            log::info!("✅ Bilibili session validated: @{} ({})", state.uname, state.mid);
+            state
+        } else {
+            log::warn!("⚠️ Bilibili stored session expired or invalid");
+            self.state_tx.send_replace(AuthState::default());
+            AuthState::default()
+        }
+    }
+
     pub fn logout(&self) -> Result<()> {
         SessionData::remove(&self.session_path)?;
         *self.session.write().expect("AuthManager RwLock poisoned") = None;
@@ -307,7 +414,8 @@ impl AuthManager {
         Ok(())
     }
 
-    /// Validate stored cookies against `https://api.bilibili.com/x/web-interface/nav`.
+    /// Validate stored cookies against `https://api.bilibili.com/x/web-interface/nav`,
+    /// falling back to `https://api.live.bilibili.com/xlive/web-ucenter/user/get_user_info`.
     pub async fn validate_session(&self) -> Result<AuthState> {
         let Some(session) = self.current_session() else {
             self.state_tx.send_replace(AuthState::default());
@@ -318,36 +426,62 @@ impl AuthManager {
             return Ok(AuthState::default());
         }
 
-        let resp: Value = self
+        let cookie = session.to_cookie_header();
+        let fallback_mid = session.dede_user_id.parse().unwrap_or(0);
+
+        let nav_err: String = match self
             .http
             .get("https://api.bilibili.com/x/web-interface/nav")
-            .header(COOKIE, session.to_cookie_header())
+            .header(COOKIE, &cookie)
             .header(REFERER, "https://www.bilibili.com/")
             .send()
             .await
-            .context("Failed to request Bilibili nav API")?
-            .json()
-            .await
-            .context("Failed to decode Bilibili nav JSON")?;
+        {
+            Ok(resp) => match resp.json::<Value>().await {
+                Ok(json) => {
+                    if let Some(state) = parse_nav_response(&json, fallback_mid) {
+                        return Ok(self.apply_validated_auth(state));
+                    }
+                    format!(
+                        "unexpected nav payload (code={})",
+                        json["code"].as_i64().unwrap_or(-1)
+                    )
+                }
+                Err(e) => format!("Failed to decode Bilibili nav JSON: {:#}", e),
+            },
+            Err(e) => format!("Failed to request Bilibili nav API: {:#}", e),
+        };
 
-        let code = resp["code"].as_i64().unwrap_or(-1);
-        let is_login = resp["data"]["isLogin"].as_bool().unwrap_or(false);
-        if code == 0 && is_login {
-            let state = AuthState {
-                is_login: true,
-                uname: resp["data"]["uname"].as_str().unwrap_or("").to_string(),
-                mid: value_as_u64(&resp["data"]["mid"])
-                    .unwrap_or_else(|| session.dede_user_id.parse().unwrap_or(0)),
-                face: resp["data"]["face"].as_str().unwrap_or("").to_string(),
-            };
-            self.state_tx.send_replace(state.clone());
-            log::info!("✅ Bilibili session validated: @{} ({})", state.uname, state.mid);
-            Ok(state)
-        } else {
-            log::warn!("⚠️ Bilibili stored session expired or invalid (code={})", code);
-            self.state_tx.send_replace(AuthState::default());
-            Ok(AuthState::default())
-        }
+        log::warn!(
+            "Primary Bilibili nav API unavailable ({}), falling back to live user info API",
+            nav_err
+        );
+
+        let live_res = self
+            .http
+            .get("https://api.live.bilibili.com/xlive/web-ucenter/user/get_user_info")
+            .header(COOKIE, &cookie)
+            .header(REFERER, "https://live.bilibili.com/")
+            .send()
+            .await;
+
+        let live_err: String = match live_res {
+            Ok(resp) => match resp.json::<Value>().await {
+                Ok(json) => {
+                    if let Some(state) = parse_live_user_info_response(&json, fallback_mid) {
+                        return Ok(self.apply_validated_auth(state));
+                    }
+                    format!(
+                        "unexpected live user_info payload (code={})",
+                        json["code"].as_i64().unwrap_or(-1)
+                    )
+                }
+                Err(e) => format!("Failed to decode Bilibili live user_info JSON: {:#}", e),
+            },
+            Err(e) => format!("Failed to request Bilibili live user_info API: {:#}", e),
+        };
+
+        Err(anyhow!("nav: {}; live_user_info: {}", nav_err, live_err))
     }
 
     /// Request a fresh QR login URL & key from `passport.bilibili.com`.
@@ -424,7 +558,7 @@ impl AuthManager {
             let mid = session.dede_user_id.parse().unwrap_or(0);
             self.save_session(session.clone(), format!("UID:{}", session.dede_user_id), String::new())?;
             if let Err(e) = self.validate_session().await {
-                log::warn!("Post-login nav validation failed transiently: {}", e);
+                log::warn!("Post-login nav validation failed transiently: {:#}", e);
                 self.state_tx.send_replace(AuthState {
                     is_login: true,
                     uname: format!("UID:{}", mid),
@@ -583,6 +717,8 @@ mod tests {
             sessdata: "abc%2Cdef".to_string(),
             bili_jct: "csrf123".to_string(),
             dede_user_id: "3829104".to_string(),
+            uname: String::new(),
+            face: String::new(),
         };
         assert!(session.is_valid_format());
         assert_eq!(
@@ -597,10 +733,67 @@ mod tests {
         let mgr = AuthManager::new(&path);
         assert!(mgr.current_state().is_login);
         assert_eq!(mgr.current_state().mid, 3829104);
+        assert_eq!(mgr.current_state().uname, "UID:3829104");
 
-        mgr.logout().unwrap();
-        assert!(!mgr.current_state().is_login);
+        // Legacy JSON without `uname`/`face` deserializes cleanly; cached uname restores directly
+        let legacy_json = r#"{"SESSDATA":"s_legacy","bili_jct":"j_legacy","DedeUserID":"778899"}"#;
+        fs::write(&path, legacy_json).unwrap();
+        let legacy_mgr = AuthManager::new(&path);
+        assert_eq!(legacy_mgr.current_state().uname, "UID:778899");
+
+        legacy_mgr.persist_profile_cache("测试主播", "https://example.com/face.jpg");
+        let cached_mgr = AuthManager::new(&path);
+        assert!(cached_mgr.current_state().is_login);
+        assert_eq!(cached_mgr.current_state().uname, "测试主播");
+        assert_eq!(cached_mgr.current_state().face, "https://example.com/face.jpg");
+
+        cached_mgr.logout().unwrap();
+        assert!(!cached_mgr.current_state().is_login);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_parse_nav_and_live_user_info_responses() {
+        let nav_ok = serde_json::json!({
+            "code": 0,
+            "data": {
+                "isLogin": true,
+                "uname": "主播A",
+                "mid": 123456,
+                "face": "https://i0.hdslb.com/a.jpg"
+            }
+        });
+        let parsed = parse_nav_response(&nav_ok, 999).unwrap();
+        assert!(parsed.is_login);
+        assert_eq!(parsed.uname, "主播A");
+        assert_eq!(parsed.mid, 123456);
+        assert_eq!(parsed.face, "https://i0.hdslb.com/a.jpg");
+
+        let nav_logged_out = serde_json::json!({"code": 0, "data": {"isLogin": false}});
+        assert!(!parse_nav_response(&nav_logged_out, 999).unwrap().is_login);
+        let nav_expired = serde_json::json!({"code": -101});
+        assert!(!parse_nav_response(&nav_expired, 999).unwrap().is_login);
+        let nav_risk = serde_json::json!({"code": -412, "message": "risk"});
+        assert!(parse_nav_response(&nav_risk, 999).is_none());
+
+        let live_ok = serde_json::json!({
+            "code": 0,
+            "data": {
+                "uid": 123456,
+                "uname": "主播B",
+                "face": "https://i0.hdslb.com/b.jpg"
+            }
+        });
+        let live_parsed = parse_live_user_info_response(&live_ok, 999).unwrap();
+        assert!(live_parsed.is_login);
+        assert_eq!(live_parsed.uname, "主播B");
+        assert_eq!(live_parsed.mid, 123456);
+        assert_eq!(live_parsed.face, "https://i0.hdslb.com/b.jpg");
+
+        let live_expired = serde_json::json!({"code": -101});
+        assert!(!parse_live_user_info_response(&live_expired, 999).unwrap().is_login);
+        let live_risk = serde_json::json!({"code": -412});
+        assert!(parse_live_user_info_response(&live_risk, 999).is_none());
     }
 
     #[test]

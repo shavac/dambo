@@ -59,7 +59,7 @@
             const sticker = document.createElement('img');
             sticker.className = 'feed-sticker';
             sticker.src = item.emoticon;
-            sticker.alt = item.content || '表情';
+            sticker.alt = item.content || 'Sticker';
             sticker.loading = 'lazy';
             sticker.onerror = () => {
                 sticker.replaceWith(document.createTextNode(item.content || ''));
@@ -108,11 +108,11 @@
     }
 
     function formatRoomBadge(state) {
-        if (!state || !state.room_id) return '未连接';
+        if (!state || !state.room_id) return 'Disconnected';
         const head = state.room_uname ? `${state.room_id}(${state.room_uname})` : `${state.room_id}`;
         const label = state.room_title ? `${head}: ${state.room_title}` : head;
-        if (!state.connected) return `${label} · 未连接`;
-        return state.is_live ? label : `${label} · 未开播`;
+        if (!state.connected) return `${label} · Disconnected`;
+        return state.is_live ? label : `${label} · Offline`;
     }
 
     function createFeedRow(item) {
@@ -142,7 +142,7 @@
 
         const name = document.createElement('span');
         name.className = 'feed-name';
-        name.innerText = item.uname || '观众';
+        name.innerText = item.uname || 'Viewer';
         meta.appendChild(name);
 
         body.appendChild(meta);
@@ -152,9 +152,9 @@
         if (item.kind === 'super_chat') {
             text.innerText = `[SC ￥${(item.price || 0) / 1000}] ${item.content}`;
         } else if (item.kind === 'gift') {
-            text.innerText = `[送出礼物] ${item.content}`;
+            text.innerText = `[Gift] ${item.content}`;
         } else if (item.kind === 'guard') {
-            text.innerText = `[大航海] ${item.content}`;
+            text.innerText = `[Guard] ${item.content}`;
         } else {
             appendChatWithEmotes(text, item);
         }
@@ -250,7 +250,7 @@
         };
 
         ws.onclose = () => {
-            roomStatusBadge.innerText = "已断开，正在重连...";
+            roomStatusBadge.innerText = "Disconnected, reconnecting...";
             setTimeout(connect, 2000);
         };
     }

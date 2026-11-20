@@ -12,6 +12,7 @@ let currentRoomState = {
 let serverHost = "localhost";
 let serverPort = 3838;
 let activeRoomLabel = "";
+let isAlwaysOnTop = true;
 
 function formatRoomLabel(state) {
     if (!state || state.room_id <= 0) return "";
@@ -28,13 +29,13 @@ function updateRoomDisplay(state) {
     roomDot.className = 'status-dot';
     if (!state.connected) {
         roomDot.classList.add('dot-gray');
-        roomSwitchBtn.innerText = state.room_id > 0 ? "切换" : "连接";
+        roomSwitchBtn.innerText = state.room_id > 0 ? "Switch" : "Connect";
     } else if (!state.is_live) {
         roomDot.classList.add('dot-yellow');
-        roomSwitchBtn.innerText = "断开";
+        roomSwitchBtn.innerText = "Disconnect";
     } else {
         roomDot.classList.add('dot-green');
-        roomSwitchBtn.innerText = "断开";
+        roomSwitchBtn.innerText = "Disconnect";
     }
 
     activeRoomLabel = formatRoomLabel(state);
@@ -54,7 +55,12 @@ function updateAccountDisplay(auth) {
         accountName.innerText = auth.uname ? `@${auth.uname}` : `@${auth.mid}`;
     } else {
         accountDot.classList.add('dot-gray');
-        accountName.innerText = "未登录";
+        accountName.innerText = "Sign In";
+    }
+
+    const logoutBtn = document.getElementById('more-logout-btn');
+    if (logoutBtn) {
+        logoutBtn.disabled = !(auth && auth.is_login);
     }
 }
 
@@ -72,17 +78,58 @@ function populateThemes(themes, activeTheme) {
     });
 }
 
+function syncWindowExpanded() {
+    const roomMenu = document.getElementById('room-dropdown-menu');
+    const moreMenu = document.getElementById('more-dropdown-menu');
+    const expanded =
+        (roomMenu && !roomMenu.classList.contains('hidden')) ||
+        (moreMenu && !moreMenu.classList.contains('hidden'));
+    if (invoke) {
+        invoke('set_dropdown_expanded', { expanded: Boolean(expanded) }).catch(console.error);
+    }
+}
+
 function setDropdownOpen(open) {
     const menu = document.getElementById('room-dropdown-menu');
     if (!menu) return;
     if (open) {
+        const moreMenu = document.getElementById('more-dropdown-menu');
+        const moreBtn = document.getElementById('more-btn');
+        moreMenu?.classList.add('hidden');
+        moreBtn?.classList.remove('active');
+        moreBtn?.setAttribute('aria-expanded', 'false');
         menu.classList.remove('hidden');
     } else {
         menu.classList.add('hidden');
     }
-    if (invoke) {
-        invoke('set_dropdown_expanded', { expanded: open }).catch(console.error);
+    syncWindowExpanded();
+}
+
+function setMoreMenuOpen(open) {
+    const moreMenu = document.getElementById('more-dropdown-menu');
+    const moreBtn = document.getElementById('more-btn');
+    if (!moreMenu) return;
+    if (open) {
+        document.getElementById('room-dropdown-menu')?.classList.add('hidden');
+        moreMenu.classList.remove('hidden');
+        moreBtn?.classList.add('active');
+        moreBtn?.setAttribute('aria-expanded', 'true');
+    } else {
+        moreMenu.classList.add('hidden');
+        moreBtn?.classList.remove('active');
+        moreBtn?.setAttribute('aria-expanded', 'false');
     }
+    syncWindowExpanded();
+}
+
+function closeAllMenus() {
+    document.getElementById('room-dropdown-menu')?.classList.add('hidden');
+    const moreMenu = document.getElementById('more-dropdown-menu');
+    const moreBtn = document.getElementById('more-btn');
+    moreMenu?.classList.add('hidden');
+    moreBtn?.classList.remove('active');
+    moreBtn?.setAttribute('aria-expanded', 'false');
+    syncWindowExpanded();
 }
 
 async function connectTarget(target) {
@@ -109,7 +156,7 @@ function renderRoomOptions(payload) {
             myRoomEl.onclick = () => connectTarget(payload.my_room.room_id);
         } else {
             myRoomEl.className = 'menu-item empty-hint';
-            myRoomEl.innerText = '未获取到直播间';
+            myRoomEl.innerText = 'No room found';
             myRoomEl.title = '';
             myRoomEl.onclick = null;
         }
@@ -121,7 +168,7 @@ function renderRoomOptions(payload) {
         if (list.length === 0) {
             const empty = document.createElement('div');
             empty.className = 'menu-item empty-hint';
-            empty.innerText = '暂无开播主播';
+            empty.innerText = 'No live channels';
             followingEl.appendChild(empty);
         } else {
             list.forEach((item) => {
@@ -149,7 +196,7 @@ function renderHistoryList(historyRooms) {
     if (!historyRooms || historyRooms.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'menu-item empty-hint';
-        empty.innerText = '暂无历史';
+        empty.innerText = 'No history';
         historyEl.appendChild(empty);
         return;
     }
@@ -165,7 +212,7 @@ function renderHistoryList(historyRooms) {
 
         const removeBtn = document.createElement('button');
         removeBtn.className = 'history-remove-btn';
-        removeBtn.title = '移除';
+        removeBtn.title = 'Remove';
         removeBtn.innerText = '×';
         removeBtn.onclick = async (e) => {
             e.stopPropagation();
@@ -195,6 +242,14 @@ async function hydrateInitialState() {
         const copyBtn = document.getElementById('copy-obs-btn');
         if (copyBtn) {
             copyBtn.innerText = `📋 OBS (:${serverPort})`;
+        }
+        const openObsLabel = document.getElementById('more-open-obs-label');
+        if (openObsLabel) {
+            openObsLabel.innerText = `Open OBS Overlay (:${serverPort})`;
+        }
+        const openListLabel = document.getElementById('more-open-list-label');
+        if (openListLabel) {
+            openListLabel.innerText = `Open Danmaku Monitor (:${serverPort}/list)`;
         }
 
         updateRoomDisplay(init.room_state);
@@ -226,7 +281,7 @@ document.getElementById('copy-obs-btn')?.addEventListener('click', async () => {
         await navigator.clipboard.writeText(`http://${serverHost}:${serverPort}`);
         const btn = document.getElementById('copy-obs-btn');
         const orig = btn.innerText;
-        btn.innerText = "已复制!";
+        btn.innerText = "Copied!";
         setTimeout(() => { btn.innerText = orig; }, 1500);
     } catch (e) {
         console.error("Failed to copy OBS url:", e);
@@ -285,12 +340,103 @@ document.getElementById('account-badge')?.addEventListener('click', () => {
     if (invoke) invoke('open_qr_login').catch(console.error);
 });
 
+document.getElementById('more-btn')?.addEventListener('click', () => {
+    const moreMenu = document.getElementById('more-dropdown-menu');
+    const willOpen = moreMenu ? moreMenu.classList.contains('hidden') : false;
+    setMoreMenuOpen(willOpen);
+});
+
+document.getElementById('more-open-obs-btn')?.addEventListener('click', () => {
+    setMoreMenuOpen(false);
+    if (invoke) invoke('open_obs_overlay').catch(console.error);
+});
+
+document.getElementById('more-copy-obs-btn')?.addEventListener('click', async () => {
+    setMoreMenuOpen(false);
+    try {
+        await navigator.clipboard.writeText(`http://${serverHost}:${serverPort}`);
+    } catch (e) {
+        console.error('Failed to copy OBS overlay url:', e);
+    }
+});
+
+document.getElementById('more-open-list-btn')?.addEventListener('click', () => {
+    setMoreMenuOpen(false);
+    if (invoke) invoke('open_web_list').catch(console.error);
+});
+
+document.getElementById('more-copy-list-btn')?.addEventListener('click', async () => {
+    setMoreMenuOpen(false);
+    try {
+        await navigator.clipboard.writeText(`http://${serverHost}:${serverPort}/list`);
+    } catch (e) {
+        console.error('Failed to copy web list url:', e);
+    }
+});
+
+document.getElementById('more-pin-btn')?.addEventListener('click', async () => {
+    if (!invoke) return;
+    try {
+        const nextState = await invoke('set_always_on_top', { alwaysOnTop: !isAlwaysOnTop });
+        isAlwaysOnTop = Boolean(nextState);
+        const check = document.getElementById('more-pin-check');
+        if (check) {
+            check.innerText = isAlwaysOnTop ? '✓' : '';
+        }
+    } catch (e) {
+        console.error('Failed to toggle always on top:', e);
+    } finally {
+        setMoreMenuOpen(false);
+    }
+});
+
+document.getElementById('more-open-config-btn')?.addEventListener('click', () => {
+    setMoreMenuOpen(false);
+    if (invoke) invoke('open_config_file').catch(console.error);
+});
+
+document.getElementById('more-open-rec-btn')?.addEventListener('click', () => {
+    setMoreMenuOpen(false);
+    if (invoke) invoke('open_folder', { kind: 'record' }).catch(console.error);
+});
+
+document.getElementById('more-open-log-btn')?.addEventListener('click', () => {
+    setMoreMenuOpen(false);
+    if (invoke) invoke('open_folder', { kind: 'log' }).catch(console.error);
+});
+
+document.getElementById('more-relogin-btn')?.addEventListener('click', () => {
+    setMoreMenuOpen(false);
+    if (invoke) invoke('open_qr_login').catch(console.error);
+});
+
+document.getElementById('more-logout-btn')?.addEventListener('click', () => {
+    setMoreMenuOpen(false);
+    if (invoke) invoke('logout').catch(console.error);
+});
+
 document.addEventListener('click', (e) => {
-    const menu = document.getElementById('room-dropdown-menu');
-    const group = document.querySelector('.room-selector-group');
-    if (menu && !menu.classList.contains('hidden') && group && !group.contains(e.target)) {
+    const roomMenu = document.getElementById('room-dropdown-menu');
+    const roomGroup = document.querySelector('.room-selector-group');
+    if (roomMenu && !roomMenu.classList.contains('hidden') && roomGroup && !roomGroup.contains(e.target)) {
         setDropdownOpen(false);
     }
+
+    const moreMenu = document.getElementById('more-dropdown-menu');
+    const moreGroup = document.querySelector('.more-menu-group');
+    if (moreMenu && !moreMenu.classList.contains('hidden') && moreGroup && !moreGroup.contains(e.target)) {
+        setMoreMenuOpen(false);
+    }
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        closeAllMenus();
+    }
+});
+
+window.addEventListener('blur', () => {
+    closeAllMenus();
 });
 
 document.addEventListener('DOMContentLoaded', hydrateInitialState);

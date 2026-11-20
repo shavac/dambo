@@ -328,6 +328,12 @@ impl DamboRuntime {
     }
 
     pub async fn fetch_room_options(&self) -> RoomOptionsPayload {
+        if self.auth.current_session().is_some() {
+            let auth_state = self.auth.current_state();
+            if auth_state.uname.trim().is_empty() || auth_state.uname.starts_with("UID:") {
+                let _ = self.auth.validate_session().await;
+            }
+        }
         let my_room = self.auth.fetch_my_room().await.ok().flatten();
         let following_live = self.auth.fetch_following_live().await.unwrap_or_default();
         let history_rooms = self
@@ -417,6 +423,15 @@ mod tests {
 
         let room_id = rt.switch_room("https://live.bilibili.com/21452505?from=test").await.unwrap();
         assert_eq!(room_id, 21452505);
+
+        // Cancel live collector network loop so internet-enabled CI runners never race synthetic assertions
+        rt.collector.disconnect(rt.hub.clone()).await;
+        rt.recorder.lock().unwrap().close().unwrap();
+        if rt.rec_dir.exists() {
+            let _ = fs::remove_dir_all(&rt.rec_dir);
+        }
+        rt.hub.reset_room(21452505, "主播A".to_string(), "测试".to_string(), true, true);
+        rt.dam_engine.set_room(21452505, "主播A".to_string());
 
         let mut dam_rx = rt.subscribe_dam();
 

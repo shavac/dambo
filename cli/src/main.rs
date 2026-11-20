@@ -89,9 +89,18 @@ async fn run_cli_qr_login(runtime: &DamboRuntime) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let runtime = Arc::new(DamboRuntime::from_config_path(&args.config)?);
+    let log_level = runtime.config_snapshot().log.level_filter();
+    let dep_level = log_level.min(log::LevelFilter::Warn);
+    let default_filter = format!(
+        "{},dambo_core={},dambo={}",
+        dep_level.as_str().to_ascii_lowercase(),
+        log_level.as_str().to_ascii_lowercase(),
+        log_level.as_str().to_ascii_lowercase()
+    );
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&default_filter))
+        .init();
 
     if !args.no_login {
         let should_prompt_qr = if runtime.auth.current_session().is_some() {
@@ -105,7 +114,7 @@ async fn main() -> Result<()> {
                     true
                 }
                 Err(e) => {
-                    log::warn!("⚠️ 启动校验登录态失败 ({}), 将直接尝试连接", e);
+                    log::warn!("⚠️ 启动校验登录态失败 ({:#}), 将直接尝试连接", e);
                     false
                 }
             }
@@ -131,10 +140,10 @@ async fn main() -> Result<()> {
     let base_ws = format!("ws://{}:{}", cfg.server.host, cfg.server.port);
 
     log::info!("🚀 dambo headless node started:");
-    log::info!("   • OBS Overlay : {}/", base_http);
-    log::info!("   • Web Feed    : {}/list", base_http);
-    log::info!("   • Channel A   : {}/ws", base_ws);
-    log::info!("   • Channel B   : {}/ws/dam", base_ws);
+    log::info!("   • OBS Overlay     : {}/", base_http);
+    log::info!("   • Danmaku Monitor : {}/list", base_http);
+    log::info!("   • Channel A       : {}/ws", base_ws);
+    log::info!("   • Channel B       : {}/ws/dam", base_ws);
 
     tokio::signal::ctrl_c().await?;
     log::info!("🛑 Shutting down dambo...");

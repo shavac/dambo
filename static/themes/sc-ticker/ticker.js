@@ -15,7 +15,7 @@
     function formatPrice(item) {
         const cny = (item.price || 0) / 1000;
         if (item.kind === 'guard') {
-            return cny > 0 ? `大航海 ¥${cny.toFixed(0)}` : '大航海';
+            return cny > 0 ? `Guard ¥${cny.toFixed(0)}` : 'Guard';
         }
         return `SC ¥${cny % 1 === 0 ? cny.toFixed(0) : cny.toFixed(1)}`;
     }
@@ -48,7 +48,7 @@
 
         const uname = document.createElement('span');
         uname.className = 'card-uname';
-        uname.innerText = item.uname || '热心观众';
+        uname.innerText = item.uname || 'Viewer';
         meta.appendChild(uname);
 
         if (item.medal_name) {
@@ -69,7 +69,7 @@
 
         const body = document.createElement('div');
         body.className = 'card-body';
-        body.innerText = item.content || (item.kind === 'guard' ? '开通了大航海守护' : '');
+        body.innerText = item.content || (item.kind === 'guard' ? 'Subscribed to Guard' : '');
         card.appendChild(body);
 
         const track = document.createElement('div');
