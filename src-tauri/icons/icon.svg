@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#F1F5FA" />
+    </linearGradient>
+
+    <linearGradient id="pill1Grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06B6D4" />
+      <stop offset="100%" stop-color="#3B82F6" />
+    </linearGradient>
+
+    <linearGradient id="pill2Grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#EC4899" />
+    </linearGradient>
+
+    <linearGradient id="pill3Grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#F59E0B" />
+      <stop offset="100%" stop-color="#F43F5E" />
+    </linearGradient>
+
+    <linearGradient id="badgeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FB7185" />
+      <stop offset="100%" stop-color="#EC4899" />
+    </linearGradient>
+
+    <linearGradient id="streakGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#6366F1" />
+    </linearGradient>
+
+    <filter id="cardShadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="18" result="blur" />
+      <feOffset dx="0" dy="18" in="blur" result="offsetBlur" />
+      <feColorMatrix in="offsetBlur" type="matrix"
+        values="0 0 0 0 0.05  0 0 0 0 0.09  0 0 0 0 0.18  0 0 0 0.14 0" result="shadow" />
+      <feMerge>
+        <feMergeNode in="shadow" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Light macOS rounded-square base -->
+  <g filter="url(#cardShadow)">
+    <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bgGrad)" stroke="#E2E8F0" stroke-width="4" />
+    <rect x="103" y="103" width="818" height="818" rx="183" fill="none" stroke="#FFFFFF" stroke-width="2" opacity="0.9" />
+  </g>
+
+  <!-- Top flying danmaku pill -->
+  <rect x="214" y="282" width="464" height="122" rx="61" fill="url(#pill1Grad)" />
+  <circle cx="276" cy="343" r="32" fill="#FFFFFF" />
+  <rect x="332" y="323" width="286" height="40" rx="20" fill="#FFFFFF" />
+
+  <!-- Top-right floating like reaction dot -->
+  <circle cx="754" cy="343" r="48" fill="url(#badgeGrad)" />
+  <path d="M 754,365 C 754,365 729,349 729,334 C 729,326 735,320 743,320 C 748,320 752,323 754,326 C 756,323 760,320 765,320 C 773,320 779,326 779,334 C 779,349 754,365 754,365 Z"
+        fill="#FFFFFF" />
+
+  <!-- Subtle kinetic trailing streak -->
+  <rect x="214" y="492" width="68" height="40" rx="20" fill="url(#streakGrad)" opacity="0.72" />
+
+  <!-- Middle flying danmaku pill (shifted right for kinetic motion) -->
+  <rect x="312" y="451" width="498" height="122" rx="61" fill="url(#pill2Grad)" />
+  <circle cx="374" cy="512" r="32" fill="#FFFFFF" />
+  <rect x="430" y="492" width="320" height="40" rx="20" fill="#FFFFFF" />
+
+  <!-- Bottom highlight / gift danmaku pill -->
+  <rect x="240" y="620" width="494" height="122" rx="61" fill="url(#pill3Grad)" />
+  <path d="M 304,645 C 308,671 314,677 340,681 C 314,685 308,691 304,717 C 300,691 294,685 268,681 C 294,677 300,671 304,645 Z"
+        fill="#FFFFFF" />
+  <rect x="364" y="661" width="310" height="40" rx="20" fill="#FFFFFF" />
+</svg>
