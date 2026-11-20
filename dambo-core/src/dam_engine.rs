@@ -269,7 +269,8 @@ impl DamEngine {
     /// Run the reservoir flush timer & spillway loop until cancelled.
     pub async fn run(&self, cancel: CancellationToken) {
         let mut reservoir = Reservoir::default();
-        let mut interval = tokio::time::interval(Duration::from_millis(self.window_ms.max(50)));
+        let window = Duration::from_millis(self.window_ms.max(50));
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + window, window);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut seen_gen = self.generation.load(Ordering::SeqCst);
 
@@ -290,7 +291,11 @@ impl DamEngine {
                     } else if ev.kind == "gift" {
                         self.emit_single(ev, 1);
                     } else {
+                        let was_empty = reservoir.is_empty();
                         reservoir.push(ev, self.dedup_enabled);
+                        if was_empty {
+                            interval.reset();
+                        }
                     }
                 }
                 _ = interval.tick() => {
@@ -430,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn test_dam_spillway_and_reservoir_aggregation() {
         let cfg = DamConfig {
-            window_ms: 80,
+            window_ms: 150,
             dedup_enabled: true,
             buffer_capacity: 512,
         };
