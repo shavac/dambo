@@ -11,6 +11,11 @@
     let isUserScrolledUp = false;
     let unreadCount = 0;
     let allItems = [];
+    const SHOW_LIKE = new URLSearchParams(window.location.search).get('show_like') === '1';
+
+    function isSuperChatKind(kind) {
+        return kind === 'superchat' || kind === 'super_chat';
+    }
 
     // Filter switching
     document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -45,7 +50,7 @@
 
     function matchFilter(item) {
         if (currentFilter === 'chat') return item.kind === 'chat';
-        if (currentFilter === 'gift_sc') return item.kind === 'gift' || item.kind === 'super_chat' || item.kind === 'guard';
+        if (currentFilter === 'gift_sc') return item.kind === 'gift' || isSuperChatKind(item.kind) || item.kind === 'guard';
         if (currentFilter === 'medal') return !!item.medal_name;
         return true;
     }
@@ -149,7 +154,7 @@
 
         const text = document.createElement('div');
         text.className = 'feed-text';
-        if (item.kind === 'super_chat') {
+        if (isSuperChatKind(item.kind)) {
             text.innerText = `[SC ￥${(item.price || 0) / 1000}] ${item.content}`;
         } else if (item.kind === 'gift') {
             text.innerText = `[Gift] ${item.content}`;
@@ -205,10 +210,14 @@
     }
 
     function appendItem(item) {
+        if (!item) return;
+        if (item.kind === 'like' && !SHOW_LIKE) return;
+        if (item.kind === 'room_info' || item.kind === 'session_end' || item.kind === 'combo_end') return;
+
         allItems.push(item);
         if (allItems.length > 500) allItems.shift();
 
-        if (item.kind === 'super_chat' || item.kind === 'guard') {
+        if (isSuperChatKind(item.kind) || item.kind === 'guard') {
             addStickySC(item);
         }
 
@@ -237,7 +246,9 @@
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'Snapshot' && msg.data) {
                     roomStatusBadge.innerText = formatRoomBadge(msg.data);
-                    allItems = msg.data.items || [];
+                    allItems = (msg.data.items || []).filter(
+                        (it) => it && (it.kind !== 'like' || SHOW_LIKE)
+                    );
                     reapplyFilter();
                 } else if (msg.type === 'Event' && msg.data) {
                     appendItem(msg.data);

@@ -1,16 +1,24 @@
 use crate::config::FeedConfig;
-use crate::model::{ChannelAMessage, RawBiliEvent, RoomStateSnapshot, SnapshotData, SnapshotItem};
+use crate::model::{
+    ChannelAMessage, RawBiliEvent, RoomInfoSnapshot, RoomStateSnapshot, SnapshotData, SnapshotItem,
+    now_unix_ms,
+};
 use std::collections::VecDeque;
 use std::sync::RwLock;
 use tokio::sync::{broadcast, watch};
 
 struct HubInner {
     room_state: RoomStateSnapshot,
+    room_info: RoomInfoSnapshot,
     history: VecDeque<SnapshotItem>,
     next_id: u64,
     max_history: usize,
     show_enter: bool,
     show_medal: bool,
+}
+
+fn is_snapshot_history_kind(kind: &str) -> bool {
+    matches!(kind, "chat" | "gift" | "superchat" | "super_chat" | "guard")
 }
 
 /// Channel A: Real-time state hub and ring buffer feeding `/ws` and Tauri IPC `room_state_changed`.
@@ -23,11 +31,13 @@ pub struct StateHub {
 impl StateHub {
     pub fn new(cfg: &FeedConfig) -> Self {
         let initial_state = RoomStateSnapshot::default();
+        let initial_info = RoomInfoSnapshot::default();
         let (ws_tx, _) = broadcast::channel(512);
         let (room_state_tx, _) = watch::channel(initial_state.clone());
         Self {
             inner: RwLock::new(HubInner {
                 room_state: initial_state,
+                room_info: initial_info,
                 history: VecDeque::with_capacity(cfg.max_history),
                 next_id: 1,
                 max_history: cfg.max_history,
@@ -59,12 +69,52 @@ impl StateHub {
             .clone()
     }
 
+    pub fn room_info(&self) -> RoomInfoSnapshot {
+        self.inner
+            .read()
+            .expect("StateHub RwLock poisoned")
+            .room_info
+            .clone()
+    }
+
+    pub fn room_info_event(&self) -> RawBiliEvent {
+        let info = self.room_info();
+        info.to_raw_event(now_unix_ms())
+    }
+
     pub fn subscribe_ws(&self) -> broadcast::Receiver<ChannelAMessage> {
         self.ws_tx.subscribe()
     }
 
     pub fn subscribe_room_state(&self) -> watch::Receiver<RoomStateSnapshot> {
         self.room_state_tx.subscribe()
+    }
+
+    /// Update full `RoomInfoSnapshot` and sync `RoomStateSnapshot` if changed.
+    pub fn set_room_info(&self, info: RoomInfoSnapshot, connected: bool) {
+        let changed_state = {
+            let mut guard = self.inner.write().expect("StateHub RwLock poisoned");
+            guard.room_info = info.clone();
+            let is_live = info.is_live();
+            let next = RoomStateSnapshot {
+                room_id: info.room_id,
+                room_uname: info.uname,
+                room_title: info.title,
+                is_live,
+                connected,
+            };
+            if next != guard.room_state {
+                guard.room_state = next.clone();
+                Some(next)
+            } else {
+                None
+            }
+        };
+
+        if let Some(state) = changed_state {
+            self.room_state_tx.send_replace(state.clone());
+            let _ = self.ws_tx.send(ChannelAMessage::RoomState(state));
+        }
     }
 
     /// Clear ring buffer history and switch room state, notifying both `/ws` and Tauri IPC watch.
@@ -79,6 +129,13 @@ impl StateHub {
         let snapshot = {
             let mut guard = self.inner.write().expect("StateHub RwLock poisoned");
             guard.history.clear();
+            guard.room_info = RoomInfoSnapshot {
+                room_id,
+                uname: room_uname.clone(),
+                title: room_title.clone(),
+                live_status: if is_live { 1 } else { 0 },
+                ..Default::default()
+            };
             guard.room_state = RoomStateSnapshot {
                 room_id,
                 room_uname,
@@ -118,18 +175,24 @@ impl StateHub {
     ) {
         let changed_state = {
             let mut guard = self.inner.write().expect("StateHub RwLock poisoned");
+            guard.room_info.live_status = if is_live { 1 } else { 0 };
+            if !is_live {
+                guard.room_info.start_time = None;
+            }
             let mut next = guard.room_state.clone();
             next.is_live = is_live;
             next.connected = connected;
             if let Some(uname) = room_uname
                 && !uname.is_empty()
             {
-                next.room_uname = uname;
+                next.room_uname = uname.clone();
+                guard.room_info.uname = uname;
             }
             if let Some(title) = room_title
                 && !title.is_empty()
             {
-                next.room_title = title;
+                next.room_title = title.clone();
+                guard.room_info.title = title;
             }
             if next != guard.room_state {
                 guard.room_state = next.clone();
@@ -153,6 +216,7 @@ impl StateHub {
         }
         let changed_state = {
             let mut guard = self.inner.write().expect("StateHub RwLock poisoned");
+            guard.room_info.title = trimmed.clone();
             if guard.room_state.room_title != trimmed {
                 guard.room_state.room_title = trimmed;
                 Some(guard.room_state.clone())
@@ -167,19 +231,37 @@ impl StateHub {
         }
     }
 
-    /// Push a filtered event into Channel A ring buffer and broadcast to `/ws` subscribers.
-    /// Also reacts immediately to `live` / `preparing` signals for `is_live` synchronization.
+    /// Broadcast an event in real time to `/ws` subscribers while keeping the `Snapshot`
+    /// ring buffer focused on core visual events (`chat`, `gift`, `superchat`, `guard`).
     pub fn push_event(&self, event: &RawBiliEvent) -> Option<SnapshotItem> {
+        if matches!(
+            event.kind.as_str(),
+            "combo_end" | "room_info" | "session_end"
+        ) {
+            return None;
+        }
+
         let (state_update, item_opt) = {
             let mut guard = self.inner.write().expect("StateHub RwLock poisoned");
 
             let mut next_state = guard.room_state.clone();
             if next_state.room_uname.is_empty() && !event.room_uname.is_empty() {
                 next_state.room_uname = event.room_uname.clone();
+                guard.room_info.uname = event.room_uname.clone();
             }
             match event.kind.as_str() {
-                "live" => next_state.is_live = true,
-                "preparing" => next_state.is_live = false,
+                "live" => {
+                    next_state.is_live = true;
+                    guard.room_info.live_status = 1;
+                    if event.start_time.is_some() {
+                        guard.room_info.start_time = event.start_time;
+                    }
+                }
+                "preparing" => {
+                    next_state.is_live = false;
+                    guard.room_info.live_status = 0;
+                    guard.room_info.start_time = None;
+                }
                 _ => {}
             }
             let state_update = if next_state != guard.room_state {
@@ -203,6 +285,7 @@ impl StateHub {
 
                 let item = SnapshotItem {
                     id,
+                    seq: event.seq,
                     kind: event.kind.clone(),
                     uid: event.uid,
                     uname: event.uname.clone(),
@@ -213,10 +296,13 @@ impl StateHub {
                     emoticon: event.emoticon.clone(),
                     emots: event.emots.clone(),
                     price: event.price,
+                    num: event.num,
+                    guard_level: event.guard_level,
+                    ids: event.ids.clone(),
                     timestamp: event.timestamp,
                 };
 
-                if guard.max_history > 0 {
+                if guard.max_history > 0 && is_snapshot_history_kind(&event.kind) {
                     if guard.history.len() >= guard.max_history {
                         guard.history.pop_front();
                     }
@@ -244,8 +330,9 @@ impl StateHub {
 mod tests {
     use super::*;
 
-    fn mk_raw(kind: &str, content: &str) -> RawBiliEvent {
+    fn mk_raw(seq: u64, kind: &str, content: &str) -> RawBiliEvent {
         RawBiliEvent {
+            seq,
             offset_ms: 0,
             timestamp: 1763280000000,
             room_id: 21452505,
@@ -264,13 +351,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ring_buffer_cap_and_reset() {
+    fn test_ring_buffer_protection_and_realtime_broadcast() {
         let cfg = FeedConfig {
             max_history: 2,
             show_enter: true,
             show_medal: true,
         };
         let hub = StateHub::new(&cfg);
+        let mut ws_rx = hub.subscribe_ws();
         hub.reset_room(
             21452505,
             "主播A".to_string(),
@@ -278,16 +366,29 @@ mod tests {
             false,
             true,
         );
+        assert!(matches!(ws_rx.try_recv(), Ok(ChannelAMessage::Snapshot(_))));
 
-        hub.push_event(&mk_raw("chat", "one"));
-        hub.push_event(&mk_raw("chat", "two"));
-        hub.push_event(&mk_raw("chat", "three"));
+        hub.push_event(&mk_raw(1, "chat", "one"));
+        // High-frequency `like` & `enter` MUST broadcast live over /ws, but NEVER enter Snapshot history!
+        hub.push_event(&mk_raw(2, "like", "为主播点赞了"));
+        hub.push_event(&mk_raw(3, "enter", ""));
+        hub.push_event(&mk_raw(4, "gift", "牛哇 x1"));
+        hub.push_event(&mk_raw(5, "superchat", "加油"));
 
+        // Verify all 5 events were pushed live over /ws
+        for expected_kind in ["chat", "like", "enter", "gift", "superchat"] {
+            assert!(matches!(
+                ws_rx.try_recv(),
+                Ok(ChannelAMessage::Event(item)) if item.kind == expected_kind
+            ));
+        }
+
+        // Snapshot ring buffer (cap 2) holds only the latest 2 core visual events (`gift`, `superchat`)
         let snap = hub.snapshot();
         assert_eq!(snap.room_title, "杂谈");
         assert_eq!(snap.items.len(), 2);
-        assert_eq!(snap.items[0].content, "two");
-        assert_eq!(snap.items[1].content, "three");
+        assert_eq!(snap.items[0].kind, "gift");
+        assert_eq!(snap.items[1].kind, "superchat");
 
         hub.reset_room(999, "主播B".to_string(), "歌回".to_string(), true, true);
         let snap2 = hub.snapshot();
@@ -313,7 +414,7 @@ mod tests {
         assert!(!rx.borrow().is_live);
         assert!(matches!(ws_rx.try_recv(), Ok(ChannelAMessage::Snapshot(_))));
 
-        hub.push_event(&mk_raw("live", "直播开始"));
+        hub.push_event(&mk_raw(1, "live", "直播开始"));
         assert!(rx.borrow().is_live);
         assert!(matches!(ws_rx.try_recv(), Ok(ChannelAMessage::RoomState(s)) if s.is_live));
         assert!(matches!(ws_rx.try_recv(), Ok(ChannelAMessage::Event(_))));
@@ -325,7 +426,7 @@ mod tests {
             Ok(ChannelAMessage::RoomState(s)) if s.room_title == "新标题"
         ));
 
-        hub.push_event(&mk_raw("preparing", "主播下播"));
+        hub.push_event(&mk_raw(2, "preparing", "直播结束"));
         assert!(!rx.borrow().is_live);
         assert!(matches!(ws_rx.try_recv(), Ok(ChannelAMessage::RoomState(s)) if !s.is_live));
     }
@@ -340,8 +441,8 @@ mod tests {
         let hub = StateHub::new(&cfg);
         hub.reset_room(21452505, "主播A".to_string(), String::new(), true, true);
 
-        assert!(hub.push_event(&mk_raw("enter", "")).is_none());
-        let chat = hub.push_event(&mk_raw("chat", "hello")).unwrap();
+        assert!(hub.push_event(&mk_raw(1, "enter", "")).is_none());
+        let chat = hub.push_event(&mk_raw(2, "chat", "hello")).unwrap();
         assert_eq!(chat.medal_name, None);
         assert_eq!(chat.medal_level, None);
     }

@@ -1,8 +1,7 @@
 pub mod auth;
 pub mod collector;
 pub mod config;
-pub mod dam_engine;
-pub mod filter;
+pub mod event_engine;
 pub mod hub;
 pub mod model;
 pub mod recorder;
@@ -11,11 +10,11 @@ pub mod server;
 use crate::auth::AuthManager;
 use crate::collector::{CollectorContext, CollectorManager, parse_room_input};
 use crate::config::{Config, ConfigManager};
-use crate::dam_engine::DamEngine;
-use crate::filter::EventFilter;
+use crate::event_engine::EventEngine;
 use crate::hub::StateHub;
 use crate::model::{
-    AuthState, ChannelBMessage, InitialUiState, RoomOptionsPayload, RoomStateSnapshot,
+    AuthState, ChannelBMessage, InitialUiState, RoomInfoSnapshot, RoomOptionsPayload,
+    RoomStateSnapshot,
 };
 use crate::recorder::Recorder;
 use crate::server::AppState;
@@ -62,9 +61,8 @@ pub struct DamboRuntime {
     pub auth: Arc<AuthManager>,
     pub collector: Arc<CollectorManager>,
     pub recorder: Arc<Mutex<Recorder>>,
-    pub filter: Arc<Mutex<EventFilter>>,
     pub hub: Arc<StateHub>,
-    pub dam_engine: Arc<DamEngine>,
+    pub event_engine: Arc<EventEngine>,
     cancel: CancellationToken,
 }
 
@@ -97,12 +95,12 @@ impl DamboRuntime {
         let collector = Arc::new(CollectorManager::new());
         let recorder = Arc::new(Mutex::new(Recorder::new(
             cfg.record.enabled,
+            cfg.record.record_raw,
             rec_dir.clone(),
             cfg.record.filename_pattern.clone(),
         )));
-        let filter = Arc::new(Mutex::new(EventFilter::from_config(&cfg.bilibili)));
         let hub = Arc::new(StateHub::new(&cfg.feed));
-        let dam_engine = Arc::new(DamEngine::new(&cfg.dam));
+        let event_engine = Arc::new(EventEngine::new(&cfg.event));
 
         Self {
             config_manager,
@@ -114,22 +112,31 @@ impl DamboRuntime {
             auth,
             collector,
             recorder,
-            filter,
             hub,
-            dam_engine,
+            event_engine,
             cancel: CancellationToken::new(),
         }
     }
 
-    /// Start pre-filter tap dispatcher, DamEngine loop, Axum HTTP/WS server,
+    /// Runtime override for `[record].record_raw` (e.g. CLI `--record-raw`).
+    pub fn set_record_raw(&self, enabled: bool) {
+        {
+            let mut cfg = self.config.write().expect("Config RwLock poisoned");
+            cfg.record.record_raw = enabled;
+        }
+        if let Ok(mut rec) = self.recorder.lock() {
+            rec.set_record_raw(enabled);
+        }
+    }
+
+    /// Start isomorphic dispatcher, `EventEngine` loop, Axum HTTP/WS server,
     /// and auto-connect configured `room_id` if non-zero.
     pub async fn start(&self) -> Result<()> {
-        // 1. Pre-Filter Tap dispatcher task: Collector -> Recorder (100%) -> Filter -> Hub + DamEngine
+        // 1. Isomorphic dispatcher: Collector -> Recorder + StateHub (/ws) + EventEngine (/ws/event)
         let mut raw_rx = self.collector.subscribe();
         let recorder = self.recorder.clone();
-        let filter = self.filter.clone();
         let hub = self.hub.clone();
-        let dam = self.dam_engine.clone();
+        let event_engine = self.event_engine.clone();
         let tap_cancel = self.cancel.child_token();
 
         tokio::spawn(async move {
@@ -138,29 +145,41 @@ impl DamboRuntime {
                     _ = tap_cancel.cancelled() => break,
                     recv = raw_rx.recv() => {
                         match recv {
-                            Ok(raw_ev) => {
-                                // Pre-Filter Tap: lossless recording of 100% raw events (including raw_data)
+                            Ok(ev) => {
+                                if ev.kind == "combo_end" {
+                                    event_engine.enqueue(ev);
+                                    continue;
+                                }
+
                                 if let Ok(mut rec) = recorder.lock()
-                                    && let Err(e) = rec.record_event(&raw_ev)
+                                    && let Err(e) = rec.record_event(&ev)
                                 {
                                     log::error!("Recorder write failed: {}", e);
                                 }
 
-                                // Real-time filter + guard payflow dedup + LRU avatar backfill
-                                let passed = {
-                                    let mut flt = filter.lock().expect("Filter Mutex poisoned");
-                                    flt.process(raw_ev)
-                                };
-
-                                if let Some(mut ev) = passed {
-                                    // Strip heavy raw_data payload before Channel A (/ws) & Channel B (/ws/dam)
-                                    ev.raw_data = None;
-                                    hub.push_event(&ev);
-                                    dam.enqueue(ev);
+                                if ev.kind == "room_info" {
+                                    let connected = hub.room_state().connected;
+                                    let snap = RoomInfoSnapshot {
+                                        room_id: ev.room_id,
+                                        short_id: ev.short_id.unwrap_or(0),
+                                        uid: ev.uid,
+                                        uname: ev.room_uname.clone(),
+                                        title: ev.title.clone().unwrap_or_else(|| ev.content.clone()),
+                                        area_name: ev.area_name.clone().unwrap_or_default(),
+                                        parent_area_name: ev.parent_area_name.clone().unwrap_or_default(),
+                                        live_status: ev.live_status.unwrap_or(0),
+                                        start_time: ev.start_time,
+                                    };
+                                    hub.set_room_info(snap, connected);
+                                    event_engine.emit_room_info(ev);
+                                    continue;
                                 }
+
+                                hub.push_event(&ev);
+                                event_engine.enqueue(ev);
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                log::warn!("Pre-filter tap lagged by {} raw events", n);
+                                log::warn!("Dispatcher lagged by {} collector events", n);
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
                         }
@@ -169,11 +188,11 @@ impl DamboRuntime {
             }
         });
 
-        // 2. Dam Engine loop
-        let dam_runner = self.dam_engine.clone();
-        let dam_cancel = self.cancel.child_token();
+        // 2. Event Engine loop
+        let event_runner = self.event_engine.clone();
+        let event_cancel = self.cancel.child_token();
         tokio::spawn(async move {
-            dam_runner.run(dam_cancel).await;
+            event_runner.run(event_cancel).await;
         });
 
         // 3. Axum HTTP & dual WS server
@@ -185,7 +204,7 @@ impl DamboRuntime {
         let app_state = Arc::new(AppState {
             config: self.config.clone(),
             hub: self.hub.clone(),
-            dam_tx: self.dam_engine.sender(),
+            event_tx: self.event_engine.sender(),
             html_dir: self.html_dir.clone(),
         });
         let srv_cancel = self.cancel.child_token();
@@ -217,7 +236,7 @@ impl DamboRuntime {
     }
 
     async fn connect_room_internal(&self, room_id: u64, persist: bool) -> Result<()> {
-        let history_snapshot = {
+        let (avatar_cache_size, history_snapshot) = {
             let mut cfg = self.config.write().expect("Config RwLock poisoned");
             cfg.bilibili.room_id = room_id;
             cfg.bilibili.history_rooms.retain(|&r| r != room_id);
@@ -225,7 +244,10 @@ impl DamboRuntime {
             if cfg.bilibili.history_rooms.len() > 20 {
                 cfg.bilibili.history_rooms.truncate(20);
             }
-            cfg.bilibili.history_rooms.clone()
+            (
+                cfg.bilibili.avatar_cache_size,
+                cfg.bilibili.history_rooms.clone(),
+            )
         };
 
         if persist && self.config_manager.path.exists() {
@@ -235,15 +257,16 @@ impl DamboRuntime {
         }
 
         if let Ok(mut rec) = self.recorder.lock() {
-            let _ = rec.close();
+            let _ = rec.finish_session();
         }
 
-        self.dam_engine.set_room(room_id, String::new());
+        self.event_engine.set_room(room_id, String::new());
         let ctx = CollectorContext {
             auth: self.auth.clone(),
             hub: self.hub.clone(),
             recorder: self.recorder.clone(),
-            dam_engine: self.dam_engine.clone(),
+            event_engine: self.event_engine.clone(),
+            avatar_cache_size,
         };
         self.collector.connect_room(room_id, ctx).await;
         Ok(())
@@ -251,9 +274,9 @@ impl DamboRuntime {
 
     pub async fn disconnect_room(&self) -> Result<()> {
         self.collector.disconnect(self.hub.clone()).await;
-        self.dam_engine.set_room(0, String::new());
+        self.event_engine.set_room(0, String::new());
         if let Ok(mut rec) = self.recorder.lock() {
-            rec.close()?;
+            rec.finish_session()?;
         }
 
         let history_snapshot = {
@@ -378,8 +401,8 @@ impl DamboRuntime {
         self.auth.subscribe()
     }
 
-    pub fn subscribe_dam(&self) -> broadcast::Receiver<ChannelBMessage> {
-        self.dam_engine.subscribe()
+    pub fn subscribe_event(&self) -> broadcast::Receiver<ChannelBMessage> {
+        self.event_engine.subscribe()
     }
 
     pub fn config_snapshot(&self) -> Config {
@@ -389,7 +412,7 @@ impl DamboRuntime {
     pub fn shutdown(&self) {
         self.cancel.cancel();
         if let Ok(mut rec) = self.recorder.lock() {
-            let _ = rec.close();
+            let _ = rec.finish_session();
         }
     }
 }
@@ -404,7 +427,7 @@ mod tests {
     static RT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
     #[tokio::test]
-    async fn test_runtime_pipeline_pre_filter_tap_and_dual_channels() {
+    async fn test_runtime_isomorphic_pipeline_and_snapshot_protection() {
         let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let temp_dir =
             std::env::temp_dir().join(format!("dambo_rt_test_{}_{}", std::process::id(), id));
@@ -431,7 +454,7 @@ mod tests {
         let cfg_path = temp_dir.join("dambo_config.toml");
         fs::write(
             &cfg_path,
-            "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\n[dam]\nwindow_ms = 60\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n",
+            "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\n[event]\nwindow_ms = 60\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n",
         )
         .unwrap();
 
@@ -445,26 +468,32 @@ mod tests {
             .unwrap();
         assert_eq!(room_id, 21452505);
 
-        // Cancel live collector network loop so internet-enabled CI runners never race synthetic assertions
+        // Cancel live collector network loop so tests never depend on external network
         rt.collector.disconnect(rt.hub.clone()).await;
         rt.recorder.lock().unwrap().close().unwrap();
         if rt.rec_dir.exists() {
             let _ = fs::remove_dir_all(&rt.rec_dir);
         }
-        rt.hub.reset_room(
-            21452505,
-            "主播A".to_string(),
-            "测试".to_string(),
-            true,
-            true,
-        );
-        rt.dam_engine.set_room(21452505, "主播A".to_string());
 
-        let mut dam_rx = rt.subscribe_dam();
+        let info = RoomInfoSnapshot {
+            room_id: 21452505,
+            short_id: 0,
+            uid: 100,
+            uname: "主播A".to_string(),
+            title: "测试".to_string(),
+            area_name: "虚拟日常".to_string(),
+            parent_area_name: "虚拟主播".to_string(),
+            live_status: 1,
+            start_time: Some(1763280000),
+        };
+        rt.event_engine.set_room(21452505, "主播A".to_string());
+        let mut ws_a_rx = rt.hub.subscribe_ws();
+        let mut event_rx = rt.subscribe_event();
 
-        // Inject a like (dropped by filter, MUST be recorded!) and a super_chat (passes filter + spillway)
+        rt.collector.inject_event(info.to_raw_event(1763280000500));
+
         let like_ev = RawBiliEvent {
-            offset_ms: 0,
+            seq: 1,
             timestamp: 1763280001000,
             room_id: 21452505,
             room_uname: "主播A".to_string(),
@@ -472,16 +501,15 @@ mod tests {
             uid: 11,
             uname: "点赞粉".to_string(),
             content: "点赞".to_string(),
-            price: 0,
             raw_cmd: "LIKE_INFO_V3_CLICK".to_string(),
             ..Default::default()
         };
         let sc_ev = RawBiliEvent {
-            offset_ms: 0,
+            seq: 2,
             timestamp: 1763280002000,
             room_id: 21452505,
             room_uname: "主播A".to_string(),
-            kind: "super_chat".to_string(),
+            kind: "superchat".to_string(),
             uid: 22,
             uname: "老板".to_string(),
             face: Some("https://face/22.jpg".to_string()),
@@ -496,44 +524,72 @@ mod tests {
         rt.collector.inject_event(like_ev);
         rt.collector.inject_event(sc_ev);
 
-        let ChannelBMessage::DamBatch(batch) =
-            tokio::time::timeout(Duration::from_secs(2), dam_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(batch.priority, 2);
-        assert_eq!(batch.events[0].kind, "super_chat");
+        // Channel B: RoomInfo first, then critical superchat EventBatch (priority 2), then Reservoir like batch (priority 0)
+        let msg0 = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(msg0, ChannelBMessage::RoomInfo(ref r) if r.seq == 0));
 
-        // Give dispatcher a brief moment to finish writing snapshot, then check Channel A + JSONL file
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        let msg1 = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(msg1, ChannelBMessage::EventBatch(ref b) if b.priority == 2 && b.events[0].kind == "superchat")
+        );
+
+        let msg2 = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(msg2, ChannelBMessage::EventBatch(ref b) if b.priority == 0 && b.events[0].kind == "like")
+        );
+
+        // Channel A received BOTH like and superchat live, while Snapshot ring buffer keeps ONLY superchat!
+        let mut seen_ws_kinds = Vec::new();
+        while let Ok(m) = ws_a_rx.try_recv() {
+            if let crate::model::ChannelAMessage::Event(item) = m {
+                seen_ws_kinds.push(item.kind);
+            }
+        }
+        assert_eq!(
+            seen_ws_kinds,
+            vec!["like".to_string(), "superchat".to_string()]
+        );
+
         let snap = rt.hub.snapshot();
         assert_eq!(snap.items.len(), 1);
-        assert_eq!(snap.items[0].kind, "super_chat");
+        assert_eq!(snap.items[0].kind, "superchat");
 
         rt.change_theme("sc-ticker").unwrap();
         assert_eq!(rt.config_snapshot().server.theme, "sc-ticker");
 
         rt.shutdown();
 
-        // Recorder should have captured BOTH `like` and `super_chat` pre-filter!
+        // Recorder captured room_info + like + superchat + session_end
         let rec_files: Vec<_> = fs::read_dir(&rt.rec_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
         assert_eq!(rec_files.len(), 1);
         let content = fs::read_to_string(rec_files[0].path()).unwrap();
-        assert_eq!(content.lines().count(), 2);
-        assert!(content.contains("\"kind\":\"like\""));
-        assert!(content.contains("\"kind\":\"super_chat\""));
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("\"kind\":\"room_info\""));
+        assert!(lines[1].contains("\"kind\":\"like\""));
+        assert!(lines[2].contains("\"kind\":\"superchat\""));
+        assert!(lines[3].contains("\"kind\":\"session_end\""));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[tokio::test]
-    async fn test_pipeline_lossless_guard_and_raw_strip() {
+    async fn test_combo_end_routes_only_to_event_engine() {
         let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let temp_dir =
-            std::env::temp_dir().join(format!("dambo_rt_guard_{}_{}", std::process::id(), id));
+            std::env::temp_dir().join(format!("dambo_rt_combo_{}_{}", std::process::id(), id));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(temp_dir.join("static/themes/default")).unwrap();
         fs::write(
@@ -545,7 +601,7 @@ mod tests {
         let cfg_path = temp_dir.join("dambo_config.toml");
         fs::write(
             &cfg_path,
-            "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\n[dam]\nwindow_ms = 60\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n",
+            "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\n[event]\nwindow_ms = 60\nmax_combo_wait_secs = 5\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n",
         )
         .unwrap();
 
@@ -558,113 +614,70 @@ mod tests {
             true,
             true,
         );
-        rt.dam_engine.set_room(21465419, "主播A".to_string());
+        rt.event_engine.set_room(21465419, "主播A".to_string());
+        let mut event_rx = rt.subscribe_event();
 
-        let mut dam_rx = rt.subscribe_dam();
-
-        let guard_buy = RawBiliEvent {
+        let gift1 = RawBiliEvent {
+            seq: 1,
             timestamp: 1763280001000,
             room_id: 21465419,
             room_uname: "主播A".to_string(),
-            kind: "guard".to_string(),
-            uid: 31839477,
-            uname: "舰长粉".to_string(),
-            content: "舰长".to_string(),
-            price: 198000,
-            num: Some(1),
-            guard_level: Some(3),
-            start_time: Some(1763280001),
-            raw_cmd: "GUARD_BUY".to_string(),
-            raw_data: Some(serde_json::json!({"cmd": "GUARD_BUY", "data": {"price": 198000}})),
+            kind: "gift".to_string(),
+            uid: 88,
+            uname: "连击侠".to_string(),
+            content: "小心心 x2".to_string(),
+            price: 200,
+            num: Some(2),
+            batch_combo_id: Some("combo:88".to_string()),
+            combo_stay_time: 5,
+            raw_cmd: "SEND_GIFT".to_string(),
             ..Default::default()
         };
-        let toast_v1 = RawBiliEvent {
-            timestamp: 1763280001000,
-            room_id: 21465419,
-            room_uname: "主播A".to_string(),
-            kind: "guard".to_string(),
-            uid: 31839477,
-            uname: "舰长粉".to_string(),
-            content: "在主播房间开通了舰长".to_string(),
-            price: 168000,
-            num: Some(1),
-            guard_level: Some(3),
-            payflow_id: Some("pf-100".to_string()),
-            start_time: Some(1763280001),
-            raw_cmd: "USER_TOAST_MSG".to_string(),
-            raw_data: Some(
-                serde_json::json!({"cmd": "USER_TOAST_MSG", "data": {"payflow_id": "pf-100"}}),
-            ),
-            ..Default::default()
+        let gift2 = RawBiliEvent {
+            seq: 2,
+            timestamp: 1763280001500,
+            num: Some(3),
+            price: 300,
+            content: "小心心 x3".to_string(),
+            ..gift1.clone()
         };
-        let toast_v2_dup = RawBiliEvent {
-            timestamp: 1763280001100,
-            raw_cmd: "USER_TOAST_MSG_V2".to_string(),
-            raw_data: Some(
-                serde_json::json!({"cmd": "USER_TOAST_MSG_V2", "data": {"payflow_id": "pf-100"}}),
-            ),
-            ..toast_v1.clone()
-        };
-        let raw_ev = RawBiliEvent {
-            timestamp: 1763280001200,
-            room_id: 21465419,
-            room_uname: "主播A".to_string(),
-            kind: "raw".to_string(),
-            raw_cmd: "ONLINE_RANK_COUNT".to_string(),
-            raw_data: Some(serde_json::json!({"cmd": "ONLINE_RANK_COUNT", "data": {"count": 42}})),
+        let combo_end = RawBiliEvent {
+            seq: 0,
+            kind: "combo_end".to_string(),
+            batch_combo_id: Some("combo:88".to_string()),
+            raw_cmd: "COMBO_SEND".to_string(),
             ..Default::default()
         };
 
-        rt.collector.inject_event(guard_buy);
-        rt.collector.inject_event(toast_v1);
-        rt.collector.inject_event(toast_v2_dup);
-        rt.collector.inject_event(raw_ev);
+        rt.collector.inject_event(gift1);
+        rt.collector.inject_event(gift2);
+        rt.collector.inject_event(combo_end);
 
-        let ChannelBMessage::DamBatch(batch) =
-            tokio::time::timeout(Duration::from_secs(2), dam_rx.recv())
+        let ChannelBMessage::EventBatch(batch) =
+            tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
                 .await
                 .unwrap()
-                .unwrap();
-        assert_eq!(batch.priority, 2);
-        assert_eq!(batch.events.len(), 1);
-        assert_eq!(batch.events[0].kind, "guard");
-        assert_eq!(batch.events[0].price, 168000);
+                .unwrap()
+        else {
+            panic!("expected EventBatch");
+        };
+        assert_eq!(batch.events[0].content, "小心心 x5");
+        assert_eq!(batch.events[0].count, 5);
+        assert_eq!(batch.events[0].price, 500);
 
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        // Verify no second DamBatch was emitted for GUARD_BUY, duplicate payflow_id, or raw
-        assert!(dam_rx.try_recv().is_err());
-
-        let dam_json = serde_json::to_string(&ChannelBMessage::DamBatch(batch)).unwrap();
-        assert!(!dam_json.contains("raw_data"));
-
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        // Channel A Snapshot contains the 2 gift frames, NOT combo_end
         let snap = rt.hub.snapshot();
-        assert_eq!(snap.items.len(), 1);
-        assert_eq!(snap.items[0].kind, "guard");
-        assert_eq!(snap.items[0].price, 168000);
-        let snap_json = serde_json::to_string(&snap).unwrap();
-        assert!(!snap_json.contains("raw_data"));
+        assert_eq!(snap.items.len(), 2);
 
         rt.shutdown();
-
-        // Recorder captures all 4 pre-filter events losslessly with raw_data and structured fields
         let rec_files: Vec<_> = fs::read_dir(&rt.rec_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
-        assert_eq!(rec_files.len(), 1);
-        let content = fs::read_to_string(rec_files[0].path()).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 4);
-        assert!(lines[0].contains("\"raw_cmd\":\"GUARD_BUY\""));
-        assert!(lines[0].contains("\"raw_data\""));
-        assert!(lines[1].contains("\"raw_cmd\":\"USER_TOAST_MSG\""));
-        assert!(lines[1].contains("\"payflow_id\":\"pf-100\""));
-        assert!(lines[1].contains("\"guard_level\":3"));
-        assert!(lines[1].contains("\"num\":1"));
-        assert!(lines[1].contains("\"start_time\":1763280001"));
-        assert!(lines[2].contains("\"raw_cmd\":\"USER_TOAST_MSG_V2\""));
-        assert!(lines[3].contains("\"raw_cmd\":\"ONLINE_RANK_COUNT\""));
-        assert!(lines[3].contains("\"kind\":\"raw\""));
+        let rec_content = fs::read_to_string(rec_files[0].path()).unwrap();
+        assert!(!rec_content.contains("combo_end"));
+        assert!(rec_content.contains("\"kind\":\"session_end\""));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

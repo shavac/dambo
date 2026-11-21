@@ -1,7 +1,7 @@
 use crate::auth::AuthManager;
-use crate::dam_engine::DamEngine;
+use crate::event_engine::EventEngine;
 use crate::hub::StateHub;
-use crate::model::{RawBiliEvent, now_unix_ms};
+use crate::model::{RawBiliEvent, RoomInfoSnapshot, now_unix_ms};
 use crate::recorder::Recorder;
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -9,19 +9,24 @@ use blivedm::websocket::{
     Operation, connect_result, decompress as brotli_decompress, get_msg_header, init_server,
     make_packet,
 };
+use chrono::{FixedOffset, NaiveDateTime, TimeZone};
+use clru::CLruCache;
 use flate2::read::ZlibDecoder;
 use prost::Message as _;
 use regex::Regex;
 use reqwest::header::{COOKIE, REFERER, SET_COOKIE};
-use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{Mutex, broadcast};
+use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const GUARD_DEDUP_CACHE_SIZE: usize = 256;
 
 #[derive(prost::Message)]
 struct InteractWordV2FansMedal {
@@ -86,6 +91,22 @@ pub fn backoff_delay_secs(attempt: u32) -> u64 {
     1u64.checked_shl(attempt).unwrap_or(60).min(60)
 }
 
+/// Parse Bilibili `live_time` (`"YYYY-MM-DD HH:MM:SS"` in Asia/Shanghai UTC+8) into Unix seconds
+/// ONLY when `live_status == 1` and `live_time` is not `"0000-00-00 00:00:00"`.
+pub fn parse_bili_live_time_to_unix_secs(live_status: u8, live_time: &str) -> Option<u64> {
+    if live_status != 1 {
+        return None;
+    }
+    let trimmed = live_time.trim();
+    if trimmed.is_empty() || trimmed == "0000-00-00 00:00:00" {
+        return None;
+    }
+    let naive = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S").ok()?;
+    let shanghai = FixedOffset::east_opt(8 * 3600)?;
+    let dt = shanghai.from_local_datetime(&naive).single()?;
+    u64::try_from(dt.timestamp()).ok().filter(|&t| t > 0)
+}
+
 fn value_as_u64(v: &Value) -> Option<u64> {
     v.as_u64()
         .or_else(|| v.as_i64().filter(|&n| n >= 0).map(|n| n as u64))
@@ -105,23 +126,6 @@ fn value_as_non_empty_string(v: &Value) -> Option<String> {
             .or_else(|| v.as_i64().filter(|&n| n > 0).map(|n| n as u64))
             .map(|n| n.to_string())
     })
-}
-
-fn make_raw_fallback(
-    raw_cmd: &str,
-    payload: &Value,
-    room_id: u64,
-    room_uname: &str,
-) -> RawBiliEvent {
-    RawBiliEvent {
-        timestamp: now_unix_ms(),
-        room_id,
-        room_uname: room_uname.to_string(),
-        kind: "raw".to_string(),
-        raw_cmd: raw_cmd.to_string(),
-        raw_data: Some(payload.clone()),
-        ..Default::default()
-    }
 }
 
 fn normalize_bili_url(url: &str) -> String {
@@ -191,7 +195,7 @@ fn extract_danmu_face(info: &[Value]) -> Option<String> {
         .and_then(|b| b.get("face"))
         .and_then(non_empty_str)
     {
-        return Some(face);
+        return Some(normalize_bili_url(&face));
     }
 
     if let Some(extra_str) = meta.get("extra").and_then(|e| e.as_str())
@@ -203,10 +207,10 @@ fn extract_danmu_face(info: &[Value]) -> Option<String> {
             .and_then(|b| b.get("face"))
             .and_then(non_empty_str)
         {
-            return Some(face);
+            return Some(normalize_bili_url(&face));
         }
         if let Some(face) = extra_val.get("face").and_then(non_empty_str) {
-            return Some(face);
+            return Some(normalize_bili_url(&face));
         }
     }
 
@@ -322,115 +326,102 @@ fn read_pb_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {
     None
 }
 
-fn inspect_pb_wire_summary(bytes: &[u8]) -> String {
-    inspect_pb_wire_summary_depth(bytes, 1, false).unwrap_or_default()
+fn push_pb_json_field(map: &mut Map<String, Value>, key: String, val: Value) {
+    match map.get_mut(&key) {
+        Some(Value::Array(arr)) => arr.push(val),
+        Some(existing) => {
+            let prev = existing.take();
+            *existing = Value::Array(vec![prev, val]);
+        }
+        None => {
+            map.insert(key, val);
+        }
+    }
 }
 
-fn try_inspect_pb_exact(slice: &[u8], depth: u8) -> Option<String> {
-    if depth == 0 || slice.is_empty() {
+/// Decode raw Protobuf wire bytes into structured JSON (`tag_number -> value` / nested objects).
+pub fn decode_pb_to_json(bytes: &[u8], max_depth: u8) -> Option<Value> {
+    if bytes.is_empty() {
         return None;
     }
-    inspect_pb_wire_summary_depth(slice, depth - 1, true)
-}
-
-fn inspect_pb_wire_summary_depth(bytes: &[u8], depth: u8, require_exact: bool) -> Option<String> {
     let mut pos = 0usize;
-    let mut parts = Vec::new();
+    let mut map = Map::new();
     while pos < bytes.len() {
-        let Some(tag_wire) = read_pb_varint(bytes, &mut pos) else {
-            if require_exact {
-                return None;
-            }
-            break;
-        };
+        let tag_wire = read_pb_varint(bytes, &mut pos)?;
         let field = tag_wire >> 3;
         let wire = tag_wire & 0x07;
-        if require_exact && field == 0 {
+        if field == 0 {
             return None;
         }
-        if !require_exact && parts.len() >= 16 {
-            break;
-        }
-        let part = match wire {
-            0 => {
-                let Some(v) = read_pb_varint(bytes, &mut pos) else {
-                    if require_exact {
-                        return None;
-                    }
-                    break;
-                };
-                format!("{}:varint({})", field, v)
-            }
+        let val = match wire {
+            0 => Value::from(read_pb_varint(bytes, &mut pos)?),
             1 => {
                 if pos + 8 > bytes.len() {
-                    if require_exact {
-                        return None;
-                    }
-                    break;
+                    return None;
                 }
+                let n = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?);
                 pos += 8;
-                format!("{}:i64", field)
+                Value::from(n)
             }
             2 => {
-                let Some(len) =
-                    read_pb_varint(bytes, &mut pos).and_then(|n| usize::try_from(n).ok())
-                else {
-                    if require_exact {
-                        return None;
-                    }
-                    break;
-                };
+                let len = usize::try_from(read_pb_varint(bytes, &mut pos)?).ok()?;
                 if pos + len > bytes.len() {
-                    if require_exact {
-                        return None;
-                    }
-                    break;
+                    return None;
                 }
                 let slice = &bytes[pos..pos + len];
                 pos += len;
-                if let Ok(s) = std::str::from_utf8(slice) {
-                    if !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
-                        let preview: String = s.chars().take(24).collect();
-                        format!("{}:str(len={},{:?})", field, len, preview)
-                    } else if let Some(nested) = try_inspect_pb_exact(slice, depth) {
-                        format!("{}:{{{}}}", field, nested)
-                    } else {
-                        format!("{}:bytes({})", field, len)
-                    }
-                } else if let Some(nested) = try_inspect_pb_exact(slice, depth) {
-                    format!("{}:{{{}}}", field, nested)
+                if let Ok(s) = std::str::from_utf8(slice)
+                    && !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+                {
+                    Value::String(s.to_string())
+                } else if max_depth > 0
+                    && let Some(nested) = decode_pb_to_json(slice, max_depth - 1)
+                {
+                    nested
                 } else {
-                    format!("{}:bytes({})", field, len)
+                    Value::String(BASE64_STANDARD.encode(slice))
                 }
             }
             5 => {
                 if pos + 4 > bytes.len() {
-                    if require_exact {
-                        return None;
-                    }
-                    break;
-                }
-                pos += 4;
-                format!("{}:i32", field)
-            }
-            _ => {
-                if require_exact {
                     return None;
                 }
-                parts.push(format!("{}:wire({})", field, wire));
-                break;
+                let n = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?);
+                pos += 4;
+                Value::from(n)
             }
+            _ => return None,
         };
-        if parts.len() < 16 {
-            parts.push(part);
-        } else if !require_exact {
-            break;
+        push_pb_json_field(&mut map, field.to_string(), val);
+    }
+    Some(Value::Object(map))
+}
+
+/// Recursively decode Base64 `"pb"` and `"dm_v2"` fields into sibling `"pb_decoded"` / `"dm_v2_decoded"`
+/// JSON nodes for `*_raw.jsonl` capture when `record.record_raw == true`.
+pub fn enrich_raw_json_with_pb_decoded(val: &Value) -> Value {
+    match val {
+        Value::Object(obj) => {
+            let mut out = Map::with_capacity(obj.len() + 2);
+            for (k, v) in obj {
+                let enriched_v = enrich_raw_json_with_pb_decoded(v);
+                if (k == "pb" || k == "dm_v2")
+                    && let Some(b64) = enriched_v.as_str().map(str::trim).filter(|s| !s.is_empty())
+                    && let Ok(bytes) = BASE64_STANDARD.decode(b64)
+                    && let Some(decoded) = decode_pb_to_json(&bytes, 4)
+                {
+                    let decoded_key = format!("{}_decoded", k);
+                    out.insert(decoded_key, decoded);
+                }
+                out.insert(k.clone(), enriched_v);
+            }
+            Value::Object(out)
         }
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(enrich_raw_json_with_pb_decoded).collect())
+        }
+        _ => val.clone(),
     }
-    if require_exact && pos != bytes.len() {
-        return None;
-    }
-    Some(parts.join(", "))
 }
 
 fn parse_pb_fans_medal(bytes: &[u8]) -> (Option<String>, Option<u32>) {
@@ -548,6 +539,16 @@ fn parse_gift_data(data: &Value, ev: &mut RawBiliEvent) -> bool {
     ev.num = Some(u32::try_from(num).unwrap_or(u32::MAX));
     ev.content = format!("{} x{}", gift_name, num);
 
+    ev.batch_combo_id = data
+        .get("batch_combo_id")
+        .or_else(|| gift_info.and_then(|g| g.get("batch_combo_id")))
+        .and_then(non_empty_str);
+    ev.combo_stay_time = data
+        .get("combo_stay_time")
+        .or_else(|| gift_info.and_then(|g| g.get("combo_stay_time")))
+        .and_then(value_as_u64)
+        .unwrap_or(0);
+
     let coin_type = data
         .get("coin_type")
         .or_else(|| gift_info.and_then(|g| g.get("coin_type")))
@@ -583,67 +584,22 @@ fn parse_gift_data(data: &Value, ev: &mut RawBiliEvent) -> bool {
     true
 }
 
-fn parse_combo_gift_data(data: &Value, ev: &mut RawBiliEvent) -> bool {
-    populate_user_from_data(data, ev);
-    let gift_info = data.get("gift_info");
-    let Some(gift_name) = data
-        .get("gift_name")
-        .or_else(|| data.get("giftName"))
-        .or_else(|| gift_info.and_then(|g| g.get("gift_name").or_else(|| g.get("giftName"))))
-        .and_then(non_empty_str)
-    else {
+/// Convert `COMBO_SEND` / `GIFT_COMBO` into a lightweight internal `combo_end` settlement signal.
+fn parse_combo_end_data(data: &Value, ev: &mut RawBiliEvent) -> bool {
+    let combo_id = data
+        .get("batch_combo_id")
+        .or_else(|| data.get("combo_id"))
+        .and_then(non_empty_str);
+    let Some(batch_combo_id) = combo_id else {
         return false;
     };
-    let num = first_positive_u64(data, &["combo_num", "total_num", "num", "gift_num"]).unwrap_or(1);
-    ev.num = Some(u32::try_from(num).unwrap_or(u32::MAX));
-    ev.content = format!("{} x{}", gift_name, num);
-    let coin_type = data
-        .get("coin_type")
-        .or_else(|| gift_info.and_then(|g| g.get("coin_type")))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let unit_price = data
-        .get("price")
-        .or_else(|| gift_info.and_then(|g| g.get("price")))
-        .and_then(value_as_u64)
-        .unwrap_or(0);
-    ev.price = if coin_type.eq_ignore_ascii_case("silver") {
-        0
-    } else {
-        first_positive_u64(data, &["combo_total_coin", "total_coin"])
-            .unwrap_or_else(|| unit_price.saturating_mul(num))
-    };
-    true
-}
-
-fn parse_guard_buy_data(data: &Value, ev: &mut RawBiliEvent) -> bool {
     populate_user_from_data(data, ev);
-
-    let level = data.get("guard_level").and_then(value_as_u64).unwrap_or(0);
-    ev.guard_level = u8::try_from(level).ok().filter(|&l| l > 0);
-    let num = data.get("num").and_then(value_as_u64).unwrap_or(1).max(1);
-    ev.num = Some(u32::try_from(num).unwrap_or(u32::MAX));
-    ev.start_time = data
-        .get("start_time")
-        .and_then(value_as_u64)
-        .filter(|&t| t > 0);
-    ev.price = data.get("price").and_then(value_as_u64).unwrap_or(0);
-    ev.payflow_id = None;
-
-    if ev.uname.is_empty() && ev.price == 0 && ev.guard_level.is_none() {
-        return false;
-    }
-
-    let role_name = data
-        .get("gift_name")
-        .or_else(|| data.get("role_name"))
-        .and_then(non_empty_str)
-        .unwrap_or_else(|| guard_level_name(level).to_string());
-    ev.content = if num > 1 {
-        format!("{} x{}", role_name, num)
-    } else {
-        role_name
-    };
+    ev.kind = "combo_end".to_string();
+    ev.seq = 0;
+    ev.price = 0;
+    ev.num = None;
+    ev.content.clear();
+    ev.batch_combo_id = Some(batch_combo_id);
     true
 }
 
@@ -764,27 +720,14 @@ fn parse_user_toast_data(data: &Value, ev: &mut RawBiliEvent) -> bool {
     true
 }
 
-fn first_positive_u64(data: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|k| data.get(*k).and_then(value_as_u64).filter(|&v| v > 0))
-}
-
 fn parse_send_gift_v2_events(
     raw_cmd: &str,
     payload: &Value,
     room_id: u64,
     room_uname: &str,
 ) -> Vec<RawBiliEvent> {
-    let fallback_raw = || {
-        if raw_cmd.is_empty() {
-            Vec::new()
-        } else {
-            vec![make_raw_fallback(raw_cmd, payload, room_id, room_uname)]
-        }
-    };
-
     let Some(data) = payload.get("data") else {
-        return fallback_raw();
+        return Vec::new();
     };
     let now = now_unix_ms();
     let mut base_ev = RawBiliEvent {
@@ -793,7 +736,6 @@ fn parse_send_gift_v2_events(
         room_uname: room_uname.to_string(),
         kind: "gift".to_string(),
         raw_cmd: raw_cmd.to_string(),
-        raw_data: Some(payload.clone()),
         ..Default::default()
     };
 
@@ -811,6 +753,15 @@ fn parse_send_gift_v2_events(
                 if let Some(uinfo) = data.get("sender_uinfo") {
                     apply_extracted_user(&mut base_ev, extract_uinfo_fields(uinfo));
                 }
+                if base_ev.batch_combo_id.is_none() {
+                    base_ev.batch_combo_id = data.get("batch_combo_id").and_then(non_empty_str);
+                }
+                if base_ev.combo_stay_time == 0 {
+                    base_ev.combo_stay_time = data
+                        .get("combo_stay_time")
+                        .and_then(value_as_u64)
+                        .unwrap_or(0);
+                }
                 ok
             })
             .unwrap_or(false);
@@ -823,13 +774,13 @@ fn parse_send_gift_v2_events(
         .or_else(|| data.get("data").and_then(|d| d.get("pb")))
         .and_then(|v| v.as_str())
     else {
-        return fallback_raw();
+        return Vec::new();
     };
     let Ok(bytes) = BASE64_STANDARD.decode(pb_b64) else {
-        return fallback_raw();
+        return Vec::new();
     };
     let Ok(decoded) = SendGiftV2Pb::decode(bytes.as_slice()) else {
-        return fallback_raw();
+        return Vec::new();
     };
 
     let uid = decoded.uid;
@@ -840,6 +791,11 @@ fn parse_send_gift_v2_events(
         None
     };
     let (medal_name, medal_level) = parse_pb_fans_medal(&decoded.medal_raw);
+    let outer_combo_id = data.get("batch_combo_id").and_then(non_empty_str);
+    let outer_stay = data
+        .get("combo_stay_time")
+        .and_then(value_as_u64)
+        .unwrap_or(0);
 
     let mut out = Vec::with_capacity(decoded.gift_list_raw.len());
     for raw_item in decoded.gift_list_raw {
@@ -869,15 +825,40 @@ fn parse_send_gift_v2_events(
             content: format!("{} x{}", gift_name, num),
             price,
             num: Some(u32::try_from(num).unwrap_or(u32::MAX)),
+            batch_combo_id: outer_combo_id.clone(),
+            combo_stay_time: outer_stay,
             raw_cmd: raw_cmd.to_string(),
-            raw_data: Some(payload.clone()),
             ..Default::default()
         });
     }
-    if out.is_empty() { fallback_raw() } else { out }
+    out
 }
 
-/// Anti-corruption normalizer converting a Bilibili command packet into zero or more internal `RawBiliEvent`s.
+fn parse_interact_msg_type(msg_type: u64) -> Option<(&'static str, &'static str)> {
+    match msg_type {
+        1 => Some(("enter", "")),
+        2 | 4 => Some(("follow", "关注了直播间")),
+        3 => Some(("share", "分享了直播间")),
+        _ => None,
+    }
+}
+
+fn extract_entry_effect_copy(raw: &str) -> (Option<String>, String) {
+    let mut uname = None;
+    if let Some(start) = raw.find("<%") {
+        let after = &raw[start + 2..];
+        if let Some(end) = after.find("%>") {
+            let extracted = after[..end].trim();
+            if !extracted.is_empty() {
+                uname = Some(extracted.to_string());
+            }
+        }
+    }
+    let clean = raw.replace("<%", "").replace("%>", "").trim().to_string();
+    (uname, clean)
+}
+
+/// Convert a Bilibili command packet into zero or more canonical `RawBiliEvent`s.
 pub fn parse_bili_cmd_events(
     cmd: &str,
     payload: &Value,
@@ -894,8 +875,7 @@ pub fn parse_bili_cmd_events(
         .collect()
 }
 
-/// Anti-corruption normalizer converting Bilibili JSON command packets into internal `RawBiliEvent`.
-/// Covers all 14 PRD event kinds (including `INTERACT_WORD_V2` protobuf) plus raw fallback preservation.
+/// Convenience wrapper returning the first event produced by `parse_bili_cmd_events`.
 pub fn parse_bili_cmd_json(
     cmd: &str,
     payload: &Value,
@@ -905,15 +885,6 @@ pub fn parse_bili_cmd_json(
     parse_bili_cmd_events(cmd, payload, room_id, room_uname)
         .into_iter()
         .next()
-}
-
-fn parse_interact_msg_type(msg_type: u64) -> Option<(&'static str, &'static str)> {
-    match msg_type {
-        1 => Some(("enter", "")),
-        2 => Some(("follow", "关注了直播间")),
-        3 => Some(("share", "分享了直播间")),
-        _ => None,
-    }
 }
 
 fn parse_single_bili_cmd_json(
@@ -939,7 +910,6 @@ fn parse_single_bili_cmd_json(
         room_id,
         room_uname: room_uname.to_string(),
         raw_cmd: raw_cmd.clone(),
-        raw_data: Some(payload.clone()),
         ..Default::default()
     };
 
@@ -947,6 +917,17 @@ fn parse_single_bili_cmd_json(
         "LIVE" => {
             ev.kind = "live".to_string();
             ev.content = "直播开始".to_string();
+            ev.start_time = payload
+                .get("live_time")
+                .or_else(|| payload.get("data").and_then(|d| d.get("live_time")))
+                .and_then(|v| {
+                    value_as_u64(v).or_else(|| {
+                        v.as_str()
+                            .and_then(|s| parse_bili_live_time_to_unix_secs(1, s))
+                    })
+                })
+                .filter(|&t| t > 0)
+                .or(Some(now / 1000));
         }
         "PREPARING" => {
             ev.kind = "preparing".to_string();
@@ -967,20 +948,41 @@ fn parse_single_bili_cmd_json(
             let title = data
                 .get("title")
                 .or_else(|| payload.get("title"))
-                .and_then(non_empty_str)
-                .unwrap_or_default();
+                .and_then(non_empty_str);
             let area = data
                 .get("area_name")
-                .or_else(|| data.get("parent_area_name"))
                 .or_else(|| payload.get("area_name"))
+                .and_then(non_empty_str);
+            let parent_area = data
+                .get("parent_area_name")
                 .or_else(|| payload.get("parent_area_name"))
-                .and_then(non_empty_str)
-                .unwrap_or_default();
-            ev.content = match (title.is_empty(), area.is_empty()) {
-                (false, false) => format!("{} [{}]", title, area),
-                (false, true) => title,
-                (true, false) => area,
+                .and_then(non_empty_str);
+            ev.title = title.clone();
+            ev.area_name = area.clone();
+            ev.parent_area_name = parent_area.clone();
+            let area_label = area.or(parent_area).unwrap_or_default();
+            let title_str = title.unwrap_or_default();
+            ev.content = match (title_str.is_empty(), area_label.is_empty()) {
+                (false, false) => format!("{} [{}]", title_str, area_label),
+                (false, true) => title_str,
+                (true, false) => area_label,
                 (true, true) => "房间信息变更".to_string(),
+            };
+        }
+        "ROOM_SILENT_ON" | "ROOM_SILENT_OFF" => {
+            ev.kind = "room_silent".to_string();
+            let data = payload.get("data").unwrap_or(payload);
+            let stype = data.get("type").and_then(non_empty_str).unwrap_or_default();
+            let level = data.get("level").and_then(value_as_u64).unwrap_or(0);
+            let second = data.get("second").and_then(value_as_u64).unwrap_or(0);
+            ev.content = if base_cmd == "ROOM_SILENT_OFF" || stype == "off" {
+                "关闭房间禁言".to_string()
+            } else if level > 0 {
+                format!("开启房间禁言 (类型:{} 等级:{})", stype, level)
+            } else if second > 0 {
+                format!("开启房间禁言 ({}s)", second)
+            } else {
+                "开启房间禁言".to_string()
             };
         }
         "ROOM_BLOCK_MSG" => {
@@ -1015,182 +1017,314 @@ fn parse_single_bili_cmd_json(
                 .unwrap_or_else(|| "超管切断直播".to_string());
         }
         "DANMU_MSG" => {
-            if let Some(info) = payload.get("info").and_then(|v| v.as_array()) {
-                ev.kind = "chat".to_string();
-                if let Some(ts) = info.first().and_then(|v| v.get(4)).and_then(value_as_u64)
-                    && ts > 1_000_000_000_000
-                {
-                    ev.timestamp = ts;
-                }
-                ev.content = info
-                    .get(1)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(user_arr) = info.get(2).and_then(|v| v.as_array()) {
-                    ev.uid = user_arr.first().and_then(value_as_u64).unwrap_or(0);
-                    ev.uname = user_arr.get(1).and_then(non_empty_str).unwrap_or_default();
-                }
-                if let Some(medal_arr) = info.get(3).and_then(|v| v.as_array())
-                    && medal_arr.len() >= 2
-                {
-                    let level = medal_arr.first().and_then(value_as_u64).map(|l| l as u32);
-                    let name = medal_arr.get(1).and_then(non_empty_str);
-                    if name.is_some() {
-                        ev.medal_name = name;
-                        ev.medal_level = level;
-                    }
-                }
-                ev.face = extract_danmu_face(info);
-                ev.emoticon = extract_danmu_emoticon(info);
-                ev.emots = extract_danmu_emots(info);
-            } else {
-                ev.kind = "raw".to_string();
+            let info = payload.get("info")?.as_array()?;
+            ev.kind = "chat".to_string();
+            if let Some(ts) = info.first().and_then(|v| v.get(4)).and_then(value_as_u64)
+                && ts > 1_000_000_000_000
+            {
+                ev.timestamp = ts;
             }
+            ev.content = info
+                .get(1)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(user_arr) = info.get(2).and_then(|v| v.as_array()) {
+                ev.uid = user_arr.first().and_then(value_as_u64).unwrap_or(0);
+                ev.uname = user_arr.get(1).and_then(non_empty_str).unwrap_or_default();
+            }
+            if let Some(medal_arr) = info.get(3).and_then(|v| v.as_array())
+                && medal_arr.len() >= 2
+            {
+                let level = medal_arr.first().and_then(value_as_u64).map(|l| l as u32);
+                let name = medal_arr.get(1).and_then(non_empty_str);
+                if name.is_some() {
+                    ev.medal_name = name;
+                    ev.medal_level = level;
+                }
+            }
+            ev.face = extract_danmu_face(info);
+            ev.emoticon = extract_danmu_emoticon(info);
+            ev.emots = extract_danmu_emots(info);
+            let raw_dm_type = info
+                .first()
+                .and_then(|v| v.get(12))
+                .and_then(value_as_u64)
+                .and_then(|n| u8::try_from(n).ok());
+            ev.dm_type = Some(if ev.emoticon.is_some() {
+                1
+            } else {
+                raw_dm_type.unwrap_or(0)
+            });
         }
         "SUPER_CHAT_MESSAGE" => {
-            if let Some(data) = payload.get("data") {
-                ev.kind = "super_chat".to_string();
-                ev.uid = data.get("uid").and_then(value_as_u64).unwrap_or(0);
-                if let Some(u) = data.get("user_info") {
-                    ev.uname = u.get("uname").and_then(non_empty_str).unwrap_or_default();
-                    ev.face = u
-                        .get("face")
-                        .and_then(non_empty_str)
-                        .map(|f| normalize_bili_url(&f));
-                }
-                if let Some(m) = data.get("medal_info") {
-                    let (mn, ml) = extract_medal_from_obj(m);
-                    ev.medal_name = mn;
-                    ev.medal_level = ml;
-                }
-                if let Some(uinfo) = data.get("uinfo").or_else(|| data.get("sender_uinfo")) {
-                    apply_extracted_user(&mut ev, extract_uinfo_fields(uinfo));
-                }
-                ev.content = data
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let cny = data.get("price").and_then(value_as_u64).unwrap_or(0);
-                ev.price = cny.saturating_mul(1000);
-            } else {
-                ev.kind = "raw".to_string();
+            let data = payload.get("data")?;
+            ev.kind = "superchat".to_string();
+            ev.uid = data.get("uid").and_then(value_as_u64).unwrap_or(0);
+            if let Some(u) = data.get("user_info") {
+                ev.uname = u.get("uname").and_then(non_empty_str).unwrap_or_default();
+                ev.face = u
+                    .get("face")
+                    .and_then(non_empty_str)
+                    .map(|f| normalize_bili_url(&f));
             }
+            if let Some(m) = data.get("medal_info") {
+                let (mn, ml) = extract_medal_from_obj(m);
+                ev.medal_name = mn;
+                ev.medal_level = ml;
+            }
+            if let Some(uinfo) = data.get("uinfo").or_else(|| data.get("sender_uinfo")) {
+                apply_extracted_user(&mut ev, extract_uinfo_fields(uinfo));
+            }
+            ev.content = data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cny = data.get("price").and_then(value_as_u64).unwrap_or(0);
+            ev.price = cny.saturating_mul(1000);
+            ev.start_time = data
+                .get("start_time")
+                .and_then(value_as_u64)
+                .filter(|&t| t > 0);
+        }
+        "SUPER_CHAT_MESSAGE_DELETE" => {
+            let data = payload.get("data")?;
+            let ids: Vec<u64> = data
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(value_as_u64).collect())
+                .unwrap_or_default();
+            if ids.is_empty() {
+                return None;
+            }
+            ev.kind = "superchat_delete".to_string();
+            ev.ids = Some(ids);
+            ev.content = "撤回醒目留言".to_string();
         }
         "SEND_GIFT" => {
-            if let Some(data) = payload.get("data")
-                && parse_gift_data(data, &mut ev)
-            {
-                ev.kind = "gift".to_string();
-            } else {
-                ev = make_raw_fallback(&raw_cmd, payload, room_id, room_uname);
+            let data = payload.get("data")?;
+            ev.kind = "gift".to_string();
+            if !parse_gift_data(data, &mut ev) {
+                return None;
             }
         }
         "COMBO_SEND" | "GIFT_COMBO" => {
-            if let Some(data) = payload.get("data")
-                && parse_combo_gift_data(data, &mut ev)
-            {
-                ev.kind = "gift".to_string();
-            } else {
-                ev = make_raw_fallback(&raw_cmd, payload, room_id, room_uname);
+            let data = payload.get("data")?;
+            if !parse_combo_end_data(data, &mut ev) {
+                return None;
             }
         }
         "GUARD_BUY" => {
-            if let Some(data) = payload.get("data")
-                && parse_guard_buy_data(data, &mut ev)
-            {
-                ev.kind = "guard".to_string();
-            } else {
-                ev = make_raw_fallback(&raw_cmd, payload, room_id, room_uname);
-            }
+            // Single-source guard dedup: ignore redundant GUARD_BUY in collector; rely on USER_TOAST_MSG(/V2)
+            return None;
         }
         "USER_TOAST_MSG" | "USER_TOAST_MSG_V2" => {
-            if let Some(data) = payload.get("data")
-                && parse_user_toast_data(data, &mut ev)
-            {
-                ev.kind = "guard".to_string();
-            } else {
-                ev = make_raw_fallback(&raw_cmd, payload, room_id, room_uname);
+            let data = payload.get("data")?;
+            if !parse_user_toast_data(data, &mut ev) {
+                return None;
             }
+            ev.kind = "guard".to_string();
         }
         "INTERACT_WORD" => {
-            if let Some(data) = payload.get("data")
-                && let Some((kind, content)) = parse_interact_msg_type(
-                    data.get("msg_type").and_then(value_as_u64).unwrap_or(1),
-                )
-            {
-                ev.uid = data.get("uid").and_then(value_as_u64).unwrap_or(0);
-                ev.uname = data
-                    .get("uname")
-                    .and_then(non_empty_str)
-                    .unwrap_or_default();
-                if let Some(m) = data.get("fans_medal") {
-                    let (mn, ml) = extract_medal_from_obj(m);
-                    ev.medal_name = mn;
-                    ev.medal_level = ml;
-                }
-                ev.kind = kind.to_string();
-                ev.content = content.to_string();
-            } else {
-                ev.kind = "raw".to_string();
+            let data = payload.get("data")?;
+            let msg_type = data.get("msg_type").and_then(value_as_u64).unwrap_or(1);
+            let (kind, content) = parse_interact_msg_type(msg_type)?;
+            ev.uid = data.get("uid").and_then(value_as_u64).unwrap_or(0);
+            ev.uname = data
+                .get("uname")
+                .and_then(non_empty_str)
+                .unwrap_or_default();
+            if let Some(m) = data.get("fans_medal") {
+                let (mn, ml) = extract_medal_from_obj(m);
+                ev.medal_name = mn;
+                ev.medal_level = ml;
             }
+            if let Some(uinfo) = data.get("uinfo") {
+                apply_extracted_user(&mut ev, extract_uinfo_fields(uinfo));
+            }
+            ev.kind = kind.to_string();
+            ev.content = content.to_string();
         }
         "INTERACT_WORD_V2" => {
-            if let Some(pb_b64) = payload
-                .get("data")
-                .and_then(|d| d.get("pb"))
-                .and_then(|v| v.as_str())
-                && let Ok(bytes) = BASE64_STANDARD.decode(pb_b64)
-                && let Ok(decoded) = InteractWordV2::decode(bytes.as_slice())
-                && let Some((kind, content)) = parse_interact_msg_type(u64::from(decoded.msg_type))
-            {
-                ev.uid = decoded.uid;
-                ev.uname = decoded.uname.trim().to_string();
-                if let Some(m) = decoded.fans_medal {
-                    let mn = m.medal_name.trim().to_string();
-                    if !mn.is_empty() {
-                        ev.medal_name = Some(mn);
-                        ev.medal_level = if m.medal_level > 0 {
-                            Some(m.medal_level)
-                        } else {
-                            None
-                        };
-                    }
+            let pb_b64 = payload.get("data")?.get("pb")?.as_str()?;
+            let bytes = BASE64_STANDARD.decode(pb_b64).ok()?;
+            let decoded = InteractWordV2::decode(bytes.as_slice()).ok()?;
+            let (kind, content) = parse_interact_msg_type(u64::from(decoded.msg_type))?;
+            ev.uid = decoded.uid;
+            ev.uname = decoded.uname.trim().to_string();
+            if let Some(m) = decoded.fans_medal {
+                let mn = m.medal_name.trim().to_string();
+                if !mn.is_empty() {
+                    ev.medal_name = Some(mn);
+                    ev.medal_level = if m.medal_level > 0 {
+                        Some(m.medal_level)
+                    } else {
+                        None
+                    };
                 }
-                ev.kind = kind.to_string();
-                ev.content = content.to_string();
-            } else {
-                ev.kind = "raw".to_string();
             }
+            ev.kind = kind.to_string();
+            ev.content = content.to_string();
+        }
+        "ENTRY_EFFECT" => {
+            let data = payload.get("data")?;
+            ev.kind = "guard_enter".to_string();
+            ev.uid = data.get("uid").and_then(value_as_u64).unwrap_or(0);
+            ev.face = data
+                .get("face")
+                .and_then(non_empty_str)
+                .map(|u| normalize_bili_url(&u));
+            ev.guard_level = data
+                .get("privilege_type")
+                .and_then(value_as_u64)
+                .filter(|&p| p > 0)
+                .and_then(|p| u8::try_from(p).ok());
+            if let Some(uinfo) = data.get("uinfo") {
+                apply_extracted_user(&mut ev, extract_uinfo_fields(uinfo));
+            }
+            let copy = data
+                .get("copy_writing")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let (parsed_uname, clean_copy) = extract_entry_effect_copy(copy);
+            if ev.uname.is_empty()
+                && let Some(name) = parsed_uname
+            {
+                ev.uname = name;
+            }
+            ev.content = if clean_copy.is_empty() {
+                format!("欢迎 {} 进入直播间", ev.uname)
+            } else {
+                clean_copy
+            };
         }
         "LIKE_INFO_V3_CLICK" => {
-            if let Some(data) = payload.get("data") {
-                ev.kind = "like".to_string();
-                ev.uid = data.get("uid").and_then(value_as_u64).unwrap_or(0);
-                ev.uname = data
-                    .get("uname")
-                    .and_then(non_empty_str)
-                    .unwrap_or_default();
-                ev.content = data
-                    .get("like_text")
-                    .and_then(non_empty_str)
-                    .unwrap_or_else(|| "为主播点赞了".to_string());
-                if let Some(m) = data.get("fans_medal") {
-                    let (mn, ml) = extract_medal_from_obj(m);
-                    ev.medal_name = mn;
-                    ev.medal_level = ml;
-                }
-            } else {
-                ev.kind = "raw".to_string();
+            let data = payload.get("data")?;
+            ev.kind = "like".to_string();
+            ev.uid = data.get("uid").and_then(value_as_u64).unwrap_or(0);
+            ev.uname = data
+                .get("uname")
+                .and_then(non_empty_str)
+                .unwrap_or_default();
+            ev.content = data
+                .get("like_text")
+                .and_then(non_empty_str)
+                .unwrap_or_else(|| "为主播点赞了".to_string());
+            if let Some(m) = data.get("fans_medal") {
+                let (mn, ml) = extract_medal_from_obj(m);
+                ev.medal_name = mn;
+                ev.medal_level = ml;
+            }
+            if let Some(uinfo) = data.get("uinfo") {
+                apply_extracted_user(&mut ev, extract_uinfo_fields(uinfo));
             }
         }
-        _ => {
-            ev.kind = "raw".to_string();
-        }
+        _ => return None,
     }
 
     Some(ev)
+}
+
+/// Stateful per-session normalizer inside `collector`:
+/// assigns monotonic `seq`, caches & backfills avatars zero-risk, skips `GUARD_BUY`,
+/// and deduplicates `USER_TOAST_MSG(/V2)` by `payflow_id`.
+pub struct CollectorNormalizer {
+    seq: u64,
+    guard_payflow_cache: CLruCache<String, ()>,
+    avatar_cache: CLruCache<u64, String>,
+}
+
+impl CollectorNormalizer {
+    pub fn new(avatar_cache_size: usize) -> Self {
+        let avatar_cap = NonZeroUsize::new(avatar_cache_size.max(1)).expect("non-zero capacity");
+        let guard_cap = NonZeroUsize::new(GUARD_DEDUP_CACHE_SIZE).expect("non-zero capacity");
+        Self {
+            seq: 0,
+            guard_payflow_cache: CLruCache::new(guard_cap),
+            avatar_cache: CLruCache::new(avatar_cap),
+        }
+    }
+
+    pub fn current_seq(&self) -> u64 {
+        self.seq
+    }
+
+    pub fn reset_session(&mut self) {
+        self.seq = 0;
+    }
+
+    pub fn next_seq(&mut self) -> u64 {
+        self.seq = self.seq.saturating_add(1);
+        self.seq
+    }
+
+    fn warm_or_backfill_avatar(&mut self, uid: u64, face: &mut Option<String>) {
+        if uid == 0 {
+            return;
+        }
+        if let Some(existing) = face.as_ref().filter(|s| !s.is_empty()) {
+            self.avatar_cache.put(uid, existing.clone());
+        } else if let Some(cached) = self.avatar_cache.get(&uid) {
+            *face = Some(cached.clone());
+        } else {
+            *face = None;
+        }
+    }
+
+    pub fn process_payload(
+        &mut self,
+        cmd: &str,
+        payload: &Value,
+        room_id: u64,
+        room_uname: &str,
+    ) -> Vec<RawBiliEvent> {
+        let raw_cmd = payload.get("cmd").and_then(|c| c.as_str()).unwrap_or(cmd);
+        let base_cmd = raw_cmd.split(':').next().unwrap_or(raw_cmd);
+
+        // Warm avatar cache from GUARD_BUY even though GUARD_BUY itself is skipped downstream
+        if base_cmd == "GUARD_BUY" {
+            if let Some(data) = payload.get("data") {
+                let mut temp = RawBiliEvent::default();
+                populate_user_from_data(data, &mut temp);
+                self.warm_or_backfill_avatar(temp.uid, &mut temp.face);
+            }
+            return Vec::new();
+        }
+
+        let events = parse_bili_cmd_events(cmd, payload, room_id, room_uname);
+        let mut out = Vec::with_capacity(events.len());
+        for mut ev in events {
+            self.warm_or_backfill_avatar(ev.uid, &mut ev.face);
+
+            if ev.kind == "guard" {
+                if !matches!(base_cmd, "USER_TOAST_MSG" | "USER_TOAST_MSG_V2")
+                    || ev.guard_level.unwrap_or(0) == 0
+                {
+                    continue;
+                }
+                if let Some(pf) = ev
+                    .payflow_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    if self.guard_payflow_cache.get(pf).is_some() {
+                        continue;
+                    }
+                    self.guard_payflow_cache.put(pf.to_string(), ());
+                }
+            }
+
+            if ev.kind == "combo_end" {
+                ev.seq = 0;
+            } else {
+                ev.seq = self.next_seq();
+            }
+            out.push(ev);
+        }
+        out
+    }
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -1263,20 +1397,128 @@ pub fn decode_bili_frames(buf: &[u8], out_jsons: &mut Vec<Value>) -> FrameDecode
     result
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RoomMeta {
-    pub room_id: u64,
-    pub room_uname: String,
-    pub room_title: String,
-    pub is_live: bool,
+/// Parse `https://api.live.bilibili.com/room/v1/Room/get_info` JSON response into `RoomInfoSnapshot`.
+pub fn parse_room_get_info_json(
+    json: &Value,
+    uname_override: Option<&str>,
+) -> Option<RoomInfoSnapshot> {
+    if json["code"].as_i64() != Some(0) {
+        return None;
+    }
+    let data = &json["data"];
+    let room_id = value_as_u64(&data["room_id"]).filter(|&id| id > 0)?;
+    let short_id = value_as_u64(&data["short_id"]).unwrap_or(0);
+    let uid = value_as_u64(&data["uid"]).unwrap_or(0);
+    let title = data["title"].as_str().unwrap_or("").trim().to_string();
+    let area_name = data["area_name"].as_str().unwrap_or("").trim().to_string();
+    let parent_area_name = data["parent_area_name"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let live_status = value_as_u64(&data["live_status"])
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(0);
+    let start_time = data["live_time"]
+        .as_str()
+        .and_then(|s| parse_bili_live_time_to_unix_secs(live_status, s));
+    let uname = uname_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            data["uname"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+
+    Some(RoomInfoSnapshot {
+        room_id,
+        short_id,
+        uid,
+        uname,
+        title,
+        area_name,
+        parent_area_name,
+        live_status,
+        start_time,
+    })
 }
 
-/// Resolve short room ID -> canonical long room ID, initial `live_status`, streamer name, and room title.
+async fn fetch_anchor_uname(
+    client: &reqwest::Client,
+    uid: u64,
+    room_id: u64,
+    cookie: Option<&str>,
+) -> String {
+    if uid > 0 {
+        let mut req = client
+            .get("https://api.live.bilibili.com/live_user/v1/Master/info")
+            .query(&[("uid", uid.to_string())])
+            .header(REFERER, "https://live.bilibili.com/");
+        if let Some(c) = cookie.filter(|s| !s.trim().is_empty()) {
+            req = req.header(COOKIE, c);
+        }
+        if let Ok(resp) = req.send().await
+            && let Ok(json) = resp.json::<Value>().await
+            && json["code"].as_i64() == Some(0)
+            && let Some(uname) = json["data"]["info"]["uname"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            return uname.to_string();
+        }
+    }
+
+    let mut fallback_req = client
+        .get("https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom")
+        .query(&[("room_id", room_id.to_string())])
+        .header(REFERER, "https://live.bilibili.com/");
+    if let Some(c) = cookie.filter(|s| !s.trim().is_empty()) {
+        fallback_req = fallback_req.header(COOKIE, c);
+    }
+    if let Ok(resp) = fallback_req.send().await
+        && let Ok(json) = resp.json::<Value>().await
+        && json["code"].as_i64() == Some(0)
+        && let Some(uname) = json["data"]["anchor_info"]["base_info"]["uname"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        return uname.to_string();
+    }
+
+    String::new()
+}
+
+/// Resolve room metadata via `Room/get_info` + anchor `uname` (with `getInfoByRoom` / `room_init` fallback).
 pub async fn fetch_room_meta(
     client: &reqwest::Client,
     input_room_id: u64,
     cookie: Option<&str>,
-) -> Result<RoomMeta> {
+) -> Result<RoomInfoSnapshot> {
+    let mut info_req = client
+        .get("https://api.live.bilibili.com/room/v1/Room/get_info")
+        .query(&[("room_id", input_room_id.to_string())])
+        .header(REFERER, "https://live.bilibili.com/");
+    if let Some(c) = cookie.filter(|s| !s.trim().is_empty()) {
+        info_req = info_req.header(COOKIE, c);
+    }
+
+    if let Ok(resp) = info_req.send().await
+        && let Ok(json) = resp.json::<Value>().await
+        && let Some(mut snap) = parse_room_get_info_json(&json, None)
+    {
+        if snap.uname.is_empty() {
+            snap.uname = fetch_anchor_uname(client, snap.uid, snap.room_id, cookie).await;
+        }
+        return Ok(snap);
+    }
+
     let mut req = client
         .get("https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom")
         .query(&[("room_id", input_room_id.to_string())])
@@ -1292,24 +1534,44 @@ pub async fn fetch_room_meta(
         let data = &json["data"];
         let room_info = &data["room_info"];
         let long_id = value_as_u64(&room_info["room_id"]).unwrap_or(input_room_id);
-        let is_live = room_info["live_status"].as_i64() == Some(1);
-        let room_title = room_info["title"].as_str().unwrap_or("").trim().to_string();
-        let room_uname = data["anchor_info"]["base_info"]["uname"]
+        let short_id = value_as_u64(&room_info["short_id"]).unwrap_or(0);
+        let uid = value_as_u64(&room_info["uid"]).unwrap_or(0);
+        let live_status = value_as_u64(&room_info["live_status"])
+            .and_then(|v| u8::try_from(v).ok())
+            .unwrap_or(0);
+        let start_time =
+            value_as_u64(&room_info["live_start_time"]).filter(|&t| live_status == 1 && t > 0);
+        let title = room_info["title"].as_str().unwrap_or("").trim().to_string();
+        let area_name = room_info["area_name"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let parent_area_name = room_info["parent_area_name"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let uname = data["anchor_info"]["base_info"]["uname"]
             .as_str()
             .unwrap_or("")
             .trim()
             .to_string();
         if long_id > 0 {
-            return Ok(RoomMeta {
+            return Ok(RoomInfoSnapshot {
                 room_id: long_id,
-                room_uname,
-                room_title,
-                is_live,
+                short_id,
+                uid,
+                uname,
+                title,
+                area_name,
+                parent_area_name,
+                live_status,
+                start_time,
             });
         }
     }
 
-    // Fallback to room_init API
     let mut init_req = client
         .get("https://api.live.bilibili.com/room/v1/Room/room_init")
         .query(&[("id", input_room_id.to_string())])
@@ -1336,12 +1598,19 @@ pub async fn fetch_room_meta(
 
     let data = &init_json["data"];
     let long_id = value_as_u64(&data["room_id"]).unwrap_or(input_room_id);
-    let is_live = data["live_status"].as_i64() == Some(1);
-    Ok(RoomMeta {
+    let short_id = value_as_u64(&data["short_id"]).unwrap_or(0);
+    let uid = value_as_u64(&data["uid"]).unwrap_or(0);
+    let live_status = value_as_u64(&data["live_status"])
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(0);
+    let start_time = value_as_u64(&data["live_time"]).filter(|&t| live_status == 1 && t > 0);
+    Ok(RoomInfoSnapshot {
         room_id: long_id,
-        room_uname: String::new(),
-        room_title: String::new(),
-        is_live,
+        short_id,
+        uid,
+        live_status,
+        start_time,
+        ..Default::default()
     })
 }
 
@@ -1461,7 +1730,7 @@ pub fn parse_active_super_chats_json(
             timestamp,
             room_id,
             room_uname: room_uname.to_string(),
-            kind: "super_chat".to_string(),
+            kind: "superchat".to_string(),
             uid: item.get("uid").and_then(value_as_u64).unwrap_or(0),
             content: message,
             price: item
@@ -1474,7 +1743,6 @@ pub fn parse_active_super_chats_json(
                 .and_then(value_as_u64)
                 .filter(|&t| t > 0),
             raw_cmd: "SUPER_CHAT_MESSAGE".to_string(),
-            raw_data: Some(item.clone()),
             ..Default::default()
         };
 
@@ -1536,7 +1804,8 @@ pub struct CollectorContext {
     pub auth: Arc<AuthManager>,
     pub hub: Arc<StateHub>,
     pub recorder: Arc<std::sync::Mutex<Recorder>>,
-    pub dam_engine: Arc<DamEngine>,
+    pub event_engine: Arc<EventEngine>,
+    pub avatar_cache_size: usize,
 }
 
 struct ActiveCollector {
@@ -1544,7 +1813,13 @@ struct ActiveCollector {
     cancel: CancellationToken,
 }
 
-/// Manages single-room live collection lifecycle and exponential backoff reconnection.
+struct CollectorSessionState {
+    meta: RoomInfoSnapshot,
+    normalizer: CollectorNormalizer,
+    active_live_start_time: Option<u64>,
+}
+
+/// Manages single-room live collection lifecycle, sequencing, and exponential backoff reconnection.
 /// Anti-corruption isolation: third-party `blivedm` integration stays strictly inside this module.
 pub struct CollectorManager {
     raw_tx: broadcast::Sender<RawBiliEvent>,
@@ -1577,7 +1852,7 @@ impl CollectorManager {
         self.raw_tx.subscribe()
     }
 
-    /// Inject a normalized event into the raw collector broadcast (used by tests & offline replay).
+    /// Inject a normalized event into the collector broadcast (used by tests).
     pub fn inject_event(&self, event: RawBiliEvent) {
         let _ = self.raw_tx.send(event);
     }
@@ -1599,7 +1874,7 @@ impl CollectorManager {
         }
 
         if let Ok(mut rec) = ctx.recorder.lock() {
-            let _ = rec.close();
+            let _ = rec.finish_session();
         }
 
         if input_room_id == 0 {
@@ -1620,6 +1895,7 @@ impl CollectorManager {
             let mut attempt: u32 = 0;
             let mut initialized_room = false;
             let mut cached_buvid3 = String::new();
+            let mut session_state: Option<CollectorSessionState> = None;
 
             while !task_cancel.is_cancelled() {
                 let cookie_str = ctx
@@ -1668,81 +1944,140 @@ impl CollectorManager {
 
                 if !initialized_room {
                     initialized_room = true;
+                    let now_ms = now_unix_ms();
                     if let Ok(mut rec) = ctx.recorder.lock()
-                        && let Err(e) = rec.rotate_for_room(
-                            meta.room_id,
-                            &meta.room_uname,
-                            now_unix_ms(),
-                            meta.is_live,
-                        )
+                        && let Err(e) = rec.open_or_continue_session(&meta, now_ms)
                     {
-                        log::error!("Failed to rotate recorder for room {}: {}", meta.room_id, e);
+                        log::error!("Failed to open recorder for room {}: {}", meta.room_id, e);
                     }
-                    ctx.dam_engine
-                        .set_room(meta.room_id, meta.room_uname.clone());
-                    ctx.hub.reset_room(
-                        meta.room_id,
-                        meta.room_uname.clone(),
-                        meta.room_title.clone(),
-                        meta.is_live,
-                        false,
-                    );
+                    ctx.event_engine.set_room(meta.room_id, meta.uname.clone());
+                    ctx.hub.set_room_info(meta.clone(), false);
+                    let room_info_ev = meta.to_raw_event(now_ms);
+                    let _ = raw_tx.send(room_info_ev);
 
-                    // Best-effort seed currently active SuperChats into Hub (not Recorder/DamEngine)
+                    let active_live_start_time = if meta.is_live() {
+                        meta.start_time
+                    } else {
+                        None
+                    };
+                    session_state = Some(CollectorSessionState {
+                        meta: meta.clone(),
+                        normalizer: CollectorNormalizer::new(ctx.avatar_cache_size),
+                        active_live_start_time,
+                    });
+
+                    // Best-effort seed currently active SuperChats into Hub (Channel A history)
                     let active_scs = tokio::select! {
                         _ = task_cancel.cancelled() => break,
-                        scs = fetch_active_super_chats(&http, meta.room_id, &meta.room_uname, opt_cookie) => scs,
+                        scs = fetch_active_super_chats(&http, meta.room_id, &meta.uname, opt_cookie) => scs,
                     };
                     for sc_ev in active_scs {
                         ctx.hub.push_event(&sc_ev);
                     }
-                } else {
-                    ctx.hub.update_room_state(
-                        meta.is_live,
-                        false,
-                        Some(meta.room_uname.clone()),
-                        Some(meta.room_title.clone()),
-                    );
+                } else if let Some(ref mut state) = session_state {
+                    let now_ms = now_unix_ms();
+                    let same_live = meta.live_status == 1
+                        && meta.start_time.is_some()
+                        && meta.start_time == state.active_live_start_time;
+
+                    state.meta = meta.clone();
+                    ctx.hub.set_room_info(meta.clone(), false);
+
+                    if same_live {
+                        let reconnected_ev = RawBiliEvent {
+                            seq: state.normalizer.next_seq(),
+                            timestamp: now_ms,
+                            room_id: meta.room_id,
+                            room_uname: meta.uname.clone(),
+                            kind: "reconnected".to_string(),
+                            content: "网络重连恢复".to_string(),
+                            raw_cmd: "RECONNECTED".to_string(),
+                            ..Default::default()
+                        };
+                        let _ = raw_tx.send(reconnected_ev);
+                    } else if meta.live_status == 1 {
+                        state.active_live_start_time = meta.start_time;
+                        state.normalizer.reset_session();
+                        let info_ev = meta.to_raw_event(now_ms);
+                        let _ = raw_tx.send(info_ev);
+                    } else {
+                        state.active_live_start_time = None;
+                        let reconnected_ev = RawBiliEvent {
+                            seq: state.normalizer.next_seq(),
+                            timestamp: now_ms,
+                            room_id: meta.room_id,
+                            room_uname: meta.uname.clone(),
+                            kind: "reconnected".to_string(),
+                            content: "网络重连恢复".to_string(),
+                            raw_cmd: "RECONNECTED".to_string(),
+                            ..Default::default()
+                        };
+                        let _ = raw_tx.send(reconnected_ev);
+                    }
                 }
 
-                let meta_clone = meta.clone();
+                let state_for_blocking = session_state
+                    .take()
+                    .expect("session_state initialized above");
                 let cookie_clone = effective_cookie.clone();
                 let buvid_clone = buvid3.clone();
                 let cancel_blocking = task_cancel.clone();
                 let hub_blocking = ctx.hub.clone();
+                let recorder_blocking = ctx.recorder.clone();
                 let tx_blocking = raw_tx.clone();
 
                 let session_outcome = tokio::task::spawn_blocking(move || {
                     run_blocking_blivedm_session(
-                        &meta_clone,
+                        state_for_blocking,
                         &cookie_clone,
                         &buvid_clone,
                         cancel_blocking,
                         hub_blocking,
+                        recorder_blocking,
                         tx_blocking,
                     )
                 })
                 .await;
 
-                if task_cancel.is_cancelled() {
-                    break;
-                }
-
                 match session_outcome {
-                    Ok(Ok(was_connected)) => {
-                        log::info!("Bilibili WS stream ended for room {}", meta.room_id);
-                        if was_connected {
-                            attempt = 0;
+                    Ok((outcome, returned_state)) => {
+                        session_state = Some(returned_state);
+                        if task_cancel.is_cancelled() {
+                            break;
                         }
-                    }
-                    Ok(Err((err_msg, was_connected))) => {
-                        log::warn!("Bilibili WS error for room {}: {}", meta.room_id, err_msg);
-                        if was_connected {
-                            attempt = 0;
+                        match outcome {
+                            Ok(was_connected) => {
+                                log::info!("Bilibili WS stream ended for room {}", meta.room_id);
+                                if was_connected {
+                                    attempt = 0;
+                                }
+                            }
+                            Err((err_msg, was_connected)) => {
+                                log::warn!(
+                                    "Bilibili WS error for room {}: {}",
+                                    meta.room_id,
+                                    err_msg
+                                );
+                                if was_connected {
+                                    attempt = 0;
+                                }
+                            }
                         }
                     }
                     Err(join_err) => {
                         log::error!("Collector blocking task join error: {}", join_err);
+                        if task_cancel.is_cancelled() {
+                            break;
+                        }
+                        session_state = Some(CollectorSessionState {
+                            meta: meta.clone(),
+                            normalizer: CollectorNormalizer::new(ctx.avatar_cache_size),
+                            active_live_start_time: if meta.is_live() {
+                                meta.start_time
+                            } else {
+                                None
+                            },
+                        });
                     }
                 }
 
@@ -1784,14 +2119,18 @@ impl CollectorManager {
 }
 
 fn run_blocking_blivedm_session(
-    meta: &RoomMeta,
+    mut state: CollectorSessionState,
     cookie_str: &str,
     buvid3: &str,
     cancel: CancellationToken,
     hub: Arc<StateHub>,
+    recorder: Arc<std::sync::Mutex<Recorder>>,
     raw_tx: broadcast::Sender<RawBiliEvent>,
-) -> std::result::Result<bool, (String, bool)> {
-    let room_id_str = meta.room_id.to_string();
+) -> (
+    std::result::Result<bool, (String, bool)>,
+    CollectorSessionState,
+) {
+    let room_id_str = state.meta.room_id.to_string();
     let resolved_buvid = if buvid3.trim().is_empty() {
         std::panic::catch_unwind(|| blivedm::auth::init_buvid(Default::default()))
             .ok()
@@ -1803,17 +2142,23 @@ fn run_blocking_blivedm_session(
     let effective_cookie = append_cookie_kv(cookie_str, "buvid3", &resolved_buvid);
 
     let (server_info, auth_msg) =
-        std::panic::catch_unwind(|| init_server(&effective_cookie, &room_id_str)).map_err(
-            |_| {
-                (
-                    "blivedm init_server panicked (network or API failure)".to_string(),
-                    false,
-                )
-            },
-        )?;
+        match std::panic::catch_unwind(|| init_server(&effective_cookie, &room_id_str)) {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    Err((
+                        "blivedm init_server panicked (network or API failure)".to_string(),
+                        false,
+                    )),
+                    state,
+                );
+            }
+        };
 
-    let (mut ws, _resp) = connect_result(server_info["host_list"].clone())
-        .map_err(|e| (format!("WS connect failed: {}", e), false))?;
+    let (mut ws, _resp) = match connect_result(server_info["host_list"].clone()) {
+        Ok(c) => c,
+        Err(e) => return (Err((format!("WS connect failed: {}", e), false)), state),
+    };
 
     if let Err(e) = ws
         .get_ref()
@@ -1834,52 +2179,49 @@ fn run_blocking_blivedm_session(
     if !resolved_buvid.is_empty()
         && let Some(obj) = auth_payload.as_object_mut()
     {
-        obj.insert(
-            "buvid".to_string(),
-            serde_json::Value::String(resolved_buvid.clone()),
-        );
+        obj.insert("buvid".to_string(), Value::String(resolved_buvid.clone()));
     }
     let auth_json = auth_payload.to_string();
 
-    ws.send(tungstenite::Message::Binary(make_packet(
+    if let Err(e) = ws.send(tungstenite::Message::Binary(make_packet(
         &auth_json,
         Operation::AUTH,
-    )))
-    .map_err(|e| (format!("Send AUTH failed: {}", e), false))?;
+    ))) {
+        return (Err((format!("Send AUTH failed: {}", e), false)), state);
+    }
 
-    ws.send(tungstenite::Message::Binary(make_packet(
+    if let Err(e) = ws.send(tungstenite::Message::Binary(make_packet(
         "{}",
         Operation::HEARTBEAT,
-    )))
-    .map_err(|e| (format!("Send initial HEARTBEAT failed: {}", e), false))?;
+    ))) {
+        return (
+            Err((format!("Send initial HEARTBEAT failed: {}", e), false)),
+            state,
+        );
+    }
 
-    hub.update_room_state(
-        meta.is_live,
-        true,
-        Some(meta.room_uname.clone()),
-        Some(meta.room_title.clone()),
-    );
+    hub.set_room_info(state.meta.clone(), true);
     log::info!(
-        "🟢 Connected to Bilibili live room {}({}) live={} buvid={}",
-        meta.room_id,
-        meta.room_uname,
-        meta.is_live,
+        "🟢 Connected to Bilibili live room {}({}) live={} seq={} buvid={}",
+        state.meta.room_id,
+        state.meta.uname,
+        state.meta.is_live(),
+        state.normalizer.current_seq(),
         !resolved_buvid.is_empty()
     );
 
-    let mut last_heartbeat = Instant::now();
+    let mut last_heartbeat = TokioInstant::now();
     let mut jsons = Vec::new();
-    let mut seen_unhandled_cmds: HashSet<String> = HashSet::new();
-    let mut recent_direct_gifts: Vec<(u64, String, Instant)> = Vec::new();
 
     while !cancel.is_cancelled() {
         if last_heartbeat.elapsed() >= Duration::from_secs(30) {
-            ws.send(tungstenite::Message::Binary(make_packet(
+            if let Err(e) = ws.send(tungstenite::Message::Binary(make_packet(
                 "{}",
                 Operation::HEARTBEAT,
-            )))
-            .map_err(|e| (format!("Send HEARTBEAT failed: {}", e), true))?;
-            last_heartbeat = Instant::now();
+            ))) {
+                return (Err((format!("Send HEARTBEAT failed: {}", e), true)), state);
+            }
+            last_heartbeat = TokioInstant::now();
         }
 
         match ws.read() {
@@ -1891,82 +2233,92 @@ fn run_blocking_blivedm_session(
                         "{}",
                         Operation::HEARTBEAT,
                     )));
-                    last_heartbeat = Instant::now();
+                    last_heartbeat = TokioInstant::now();
                 }
+
+                let record_raw_enabled = recorder
+                    .lock()
+                    .map(|r| r.is_record_raw_enabled())
+                    .unwrap_or(false);
+
                 for val in &jsons {
+                    if record_raw_enabled {
+                        let enriched = enrich_raw_json_with_pb_decoded(val);
+                        if let Ok(mut rec) = recorder.lock()
+                            && let Err(e) = rec.record_raw_json(&enriched)
+                        {
+                            log::error!("Raw packet capture write failed: {}", e);
+                        }
+                    }
+
                     let cmd = val.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
                     let base_cmd = cmd.split(':').next().unwrap_or(cmd);
                     match base_cmd {
-                        "LIVE" => hub.update_room_state(true, true, None, None),
-                        "PREPARING" => hub.update_room_state(false, true, None, None),
+                        "LIVE" => {
+                            let now_ms = now_unix_ms();
+                            let start_sec = val
+                                .get("live_time")
+                                .or_else(|| val.get("data").and_then(|d| d.get("live_time")))
+                                .and_then(|v| {
+                                    value_as_u64(v).or_else(|| {
+                                        v.as_str()
+                                            .and_then(|s| parse_bili_live_time_to_unix_secs(1, s))
+                                    })
+                                })
+                                .filter(|&t| t > 0)
+                                .unwrap_or(now_ms / 1000);
+                            state.meta.live_status = 1;
+                            state.meta.start_time = Some(start_sec);
+                            state.active_live_start_time = Some(start_sec);
+                            state.normalizer.reset_session();
+                            hub.set_room_info(state.meta.clone(), true);
+                            let _ = raw_tx.send(state.meta.to_raw_event(now_ms));
+                        }
+                        "PREPARING" => {
+                            let is_round = val
+                                .get("round")
+                                .or_else(|| val.get("data").and_then(|d| d.get("round")))
+                                .and_then(value_as_u64)
+                                == Some(1);
+                            state.meta.live_status = if is_round { 2 } else { 0 };
+                            state.meta.start_time = None;
+                            state.active_live_start_time = None;
+                            hub.set_room_info(state.meta.clone(), true);
+                        }
                         "ROOM_CHANGE" => {
-                            if let Some(new_title) = val
-                                .get("data")
-                                .and_then(|d| d.get("title"))
-                                .and_then(non_empty_str)
-                            {
-                                hub.update_room_title(new_title);
+                            let data = val.get("data").unwrap_or(val);
+                            if let Some(new_title) = data.get("title").and_then(non_empty_str) {
+                                state.meta.title = new_title;
                             }
+                            if let Some(area) = data.get("area_name").and_then(non_empty_str) {
+                                state.meta.area_name = area;
+                            }
+                            if let Some(parent_area) =
+                                data.get("parent_area_name").and_then(non_empty_str)
+                            {
+                                state.meta.parent_area_name = parent_area;
+                            }
+                            hub.set_room_info(state.meta.clone(), true);
                         }
                         _ => {}
                     }
-                    let events = parse_bili_cmd_events(cmd, val, meta.room_id, &meta.room_uname);
-                    let is_unmapped = events.is_empty() || events.iter().all(|e| e.kind == "raw");
-                    if is_unmapped
-                        && !base_cmd.is_empty()
-                        && base_cmd != "SUPER_CHAT_MESSAGE_JPN"
-                        && base_cmd != "SUPER_CHAT_MESSAGE_DELETE"
-                        && !base_cmd.starts_with("WIDGET_")
-                        && (base_cmd.contains("GIFT")
-                            || base_cmd.contains("GUARD")
-                            || base_cmd.contains("TOAST")
-                            || base_cmd.contains("SUPER_CHAT")
-                            || base_cmd.contains("COMBO"))
-                        && seen_unhandled_cmds.insert(base_cmd.to_string())
-                    {
-                        let data = val.get("data");
-                        let keys = data
-                            .and_then(|d| d.as_object())
-                            .map(|m| m.keys().cloned().collect::<Vec<_>>())
-                            .unwrap_or_default();
-                        let pb_info = data
-                            .and_then(|d| {
-                                d.get("pb")
-                                    .or_else(|| d.get("data").and_then(|x| x.get("pb")))
-                            })
-                            .and_then(|v| v.as_str())
-                            .and_then(|b64| BASE64_STANDARD.decode(b64).ok())
-                            .map(|bytes| inspect_pb_wire_summary(&bytes))
-                            .unwrap_or_default();
-                        log::info!(
-                            "Unhandled Bilibili event cmd='{}' data_keys={:?} pb=[{}]",
-                            base_cmd,
-                            keys,
-                            pb_info
-                        );
-                    }
-                    for ev in events {
-                        if ev.kind == "gift" {
-                            let now_inst = Instant::now();
-                            recent_direct_gifts.retain(|(_, _, t)| {
-                                now_inst.duration_since(*t) < Duration::from_secs(3)
-                            });
-                            if matches!(base_cmd, "SEND_GIFT" | "SEND_GIFT_V2") {
-                                recent_direct_gifts.push((ev.uid, ev.content.clone(), now_inst));
-                            } else if matches!(base_cmd, "COMBO_SEND" | "GIFT_COMBO")
-                                && recent_direct_gifts.iter().any(|(uid, content, _)| {
-                                    *uid == ev.uid && *content == ev.content
-                                })
-                            {
-                                continue;
-                            }
+
+                    let events = state.normalizer.process_payload(
+                        cmd,
+                        val,
+                        state.meta.room_id,
+                        &state.meta.uname,
+                    );
+                    for mut ev in events {
+                        if ev.kind == "live" && ev.start_time.is_none() {
+                            ev.start_time = state.meta.start_time;
                         }
                         let _ = raw_tx.send(ev);
                     }
                 }
             }
             Ok(tungstenite::Message::Close(_)) => {
-                return Ok(true);
+                return (Ok(true), state);
             }
             Ok(_) => {}
             Err(tungstenite::Error::Io(ref e))
@@ -1975,13 +2327,13 @@ fn run_blocking_blivedm_session(
                 continue;
             }
             Err(e) => {
-                return Err((format!("WS read error: {}", e), true));
+                return (Err((format!("WS read error: {}", e), true)), state);
             }
         }
     }
 
     let _ = ws.close(None);
-    Ok(true)
+    (Ok(true), state)
 }
 
 #[cfg(test)]
@@ -2005,7 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_room_input_variants() {
+    fn test_parse_room_input_and_live_time_variants() {
         assert_eq!(parse_room_input("21452505"), Some(21452505));
         assert_eq!(parse_room_input("  21452505 (主播A) "), Some(21452505));
         assert_eq!(parse_room_input("21452505（主播A）"), Some(21452505));
@@ -2019,6 +2371,50 @@ mod tests {
         );
         assert_eq!(parse_room_input("0"), None);
         assert_eq!(parse_room_input("not a room"), None);
+
+        // Shanghai UTC+8 timestamp check
+        assert_eq!(
+            parse_bili_live_time_to_unix_secs(0, "2026-11-21 14:00:00"),
+            None
+        );
+        assert_eq!(
+            parse_bili_live_time_to_unix_secs(1, "0000-00-00 00:00:00"),
+            None
+        );
+        let ts = parse_bili_live_time_to_unix_secs(1, "2026-11-21 08:00:00").unwrap();
+        assert_eq!(ts, 1795219200);
+    }
+
+    #[test]
+    fn test_parse_room_get_info_json() {
+        let resp = json!({
+            "code": 0,
+            "data": {
+                "uid": 123456,
+                "room_id": 21465419,
+                "short_id": 512,
+                "title": "歌杂试播",
+                "area_name": "虚拟日常",
+                "parent_area_name": "虚拟主播",
+                "live_status": 1,
+                "live_time": "2026-11-21 08:00:00"
+            }
+        });
+        let snap = parse_room_get_info_json(&resp, Some("主播A")).unwrap();
+        assert_eq!(snap.room_id, 21465419);
+        assert_eq!(snap.short_id, 512);
+        assert_eq!(snap.uid, 123456);
+        assert_eq!(snap.uname, "主播A");
+        assert_eq!(snap.title, "歌杂试播");
+        assert_eq!(snap.area_name, "虚拟日常");
+        assert_eq!(snap.parent_area_name, "虚拟主播");
+        assert_eq!(snap.live_status, 1);
+        assert_eq!(snap.start_time, Some(1795219200));
+
+        let ev = snap.to_raw_event(1795219205000);
+        assert_eq!(ev.seq, 0);
+        assert_eq!(ev.kind, "room_info");
+        assert_eq!(ev.offset_ms, 0);
     }
 
     #[test]
@@ -2031,195 +2427,193 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_all_14_bili_cmd_kinds() {
-        // 1. LIVE
-        let ev = parse_bili_cmd_json("LIVE", &json!({"cmd": "LIVE"}), 21452505, "主播A").unwrap();
-        assert_eq!(ev.kind, "live");
+    fn test_normalizer_seq_guard_dedup_and_avatar_backfill() {
+        let mut norm = CollectorNormalizer::new(2000);
 
-        // 2. PREPARING (normal vs round == 1)
-        let ev = parse_bili_cmd_json("PREPARING", &json!({"cmd": "PREPARING"}), 21452505, "主播A")
-            .unwrap();
-        assert_eq!(ev.kind, "preparing");
-        assert_eq!(ev.content, "直播结束");
-        assert!(ev.raw_data.is_some());
-
-        let ev_round = parse_bili_cmd_json(
-            "PREPARING",
-            &json!({"cmd": "PREPARING", "round": 1}),
-            21452505,
-            "主播A",
-        )
-        .unwrap();
-        assert_eq!(ev_round.kind, "preparing");
-        assert_eq!(ev_round.content, "直播结束（进入轮播）");
-
-        // 3. ROOM_CHANGE
-        let ev = parse_bili_cmd_json(
-            "ROOM_CHANGE",
-            &json!({"cmd": "ROOM_CHANGE", "data": {"title": "杂谈", "area_name": "虚拟日常"}}),
-            21452505,
-            "主播A",
-        )
-        .unwrap();
-        assert_eq!(ev.kind, "room_change");
-        assert_eq!(ev.content, "杂谈 [虚拟日常]");
-
-        // 4. ROOM_BLOCK_MSG
-        let ev = parse_bili_cmd_json(
-            "ROOM_BLOCK_MSG",
-            &json!({"cmd": "ROOM_BLOCK_MSG", "data": {"uid": 77, "uname": "捣乱者"}}),
-            21452505,
-            "主播A",
-        )
-        .unwrap();
-        assert_eq!(ev.kind, "room_block");
-        assert_eq!(ev.uid, 77);
-
-        // 5. WARNING & 6. CUT_OFF
-        let ev = parse_bili_cmd_json(
-            "WARNING",
-            &json!({"cmd": "WARNING", "msg": "注意仪表"}),
-            21452505,
-            "主播A",
-        )
-        .unwrap();
-        assert_eq!(ev.kind, "warning");
-        assert_eq!(ev.content, "注意仪表");
-
-        let ev = parse_bili_cmd_json(
-            "CUT_OFF",
-            &json!({"cmd": "CUT_OFF", "msg": "切断"}),
-            21452505,
-            "主播A",
-        )
-        .unwrap();
-        assert_eq!(ev.kind, "cut_off");
-        assert_eq!(ev.content, "切断");
-
-        // 7. DANMU_MSG with dm_v2 face extraction
-        let danmu = json!({
-            "cmd": "DANMU_MSG:4:0:2:2:2:0",
-            "info": [
-                [0, 1, 25, 16777215, 1763280001234u64, 0, 0, "", 0, 0, 0, "", 0, "{}", "{}", {
-                    "user": { "base": { "face": "https://i0.hdslb.com/bfs/face/example.jpg" } }
-                }],
-                "这波操作太细节了",
-                [3829104, "观众甲", 0],
-                [12, "星光", "主播A", 21452505]
-            ]
-        });
-        let ev = parse_bili_cmd_json("DANMU_MSG", &danmu, 21452505, "主播A").unwrap();
-        assert_eq!(ev.kind, "chat");
-        assert_eq!(ev.uid, 3829104);
-        assert_eq!(ev.uname, "观众甲");
-        assert_eq!(
-            ev.face.as_deref(),
-            Some("https://i0.hdslb.com/bfs/face/example.jpg")
-        );
-        assert_eq!(ev.medal_name.as_deref(), Some("星光"));
-        assert_eq!(ev.medal_level, Some(12));
-        assert_eq!(ev.timestamp, 1763280001234);
-
-        // 8. SUPER_CHAT_MESSAGE
-        let sc = json!({
-            "cmd": "SUPER_CHAT_MESSAGE",
-            "data": {
-                "uid": 888,
-                "price": 30,
-                "message": "主播加油",
-                "user_info": { "uname": "老板", "face": "https://face/sc.jpg" },
-                "medal_info": { "medal_name": "星光", "medal_level": 20 }
-            }
-        });
-        let ev = parse_bili_cmd_json("SUPER_CHAT_MESSAGE", &sc, 21452505, "主播A").unwrap();
-        assert_eq!(ev.kind, "super_chat");
-        assert_eq!(ev.price, 30000);
-        assert_eq!(ev.face.as_deref(), Some("https://face/sc.jpg"));
-
-        // 9. SEND_GIFT (gold vs silver)
-        let gift = json!({
-            "cmd": "SEND_GIFT",
-            "data": {
-                "uid": 999,
-                "uname": "送礼人",
-                "face": "https://face/gift.jpg",
-                "giftName": "小心心",
-                "num": 5,
-                "coin_type": "silver",
-                "total_coin": 500
-            }
-        });
-        let ev = parse_bili_cmd_json("SEND_GIFT", &gift, 21452505, "主播A").unwrap();
-        assert_eq!(ev.kind, "gift");
-        assert_eq!(ev.price, 0);
-        assert_eq!(ev.content, "小心心 x5");
-
-        // 10. GUARD_BUY
-        let guard = json!({
+        // 1. GUARD_BUY is skipped in output, but still warms avatar_cache
+        let guard_buy = json!({
             "cmd": "GUARD_BUY",
             "data": {
-                "uid": 555,
-                "username": "舰长大人",
+                "uid": 31839477,
+                "username": "清风蓝云KUANG",
+                "guard_level": 3,
+                "num": 1,
+                "price": 198000,
                 "gift_name": "舰长",
-                "price": 198000
+                "sender_uinfo": {
+                    "uid": 31839477,
+                    "base": { "face": "http://i0.hdslb.com/bfs/face/guard.jpg" }
+                }
             }
         });
-        let ev = parse_bili_cmd_json("GUARD_BUY", &guard, 21452505, "主播A").unwrap();
-        assert_eq!(ev.kind, "guard");
-        assert_eq!(ev.price, 198000);
+        assert!(
+            norm.process_payload("GUARD_BUY", &guard_buy, 21465419, "主播A")
+                .is_empty()
+        );
+        assert_eq!(norm.current_seq(), 0);
 
-        // 11. enter / 12. follow / 13. share via INTERACT_WORD
-        for (msg_type, expected_kind) in [(1, "enter"), (2, "follow"), (3, "share")] {
-            let iw = json!({
-                "cmd": "INTERACT_WORD",
-                "data": {
-                    "msg_type": msg_type,
-                    "uid": 9918273,
-                    "uname": "老粉丁",
-                    "fans_medal": { "medal_name": "星光", "medal_level": 18 }
-                }
-            });
-            let ev = parse_bili_cmd_json("INTERACT_WORD", &iw, 21452505, "主播A").unwrap();
-            assert_eq!(ev.kind, expected_kind);
-            assert_eq!(ev.medal_level, Some(18));
-        }
+        // 2. USER_TOAST_MSG passes with seq=1, backfilled avatar, and actual price
+        let toast1 = json!({
+            "cmd": "USER_TOAST_MSG",
+            "data": {
+                "uid": 31839477,
+                "username": "清风蓝云KUANG",
+                "guard_level": 3,
+                "num": 1,
+                "price": 168000,
+                "payflow_id": "pf-100",
+                "start_time": 1795156560u64,
+                "toast_msg": "在主播房间开通了舰长"
+            }
+        });
+        let out1 = norm.process_payload("USER_TOAST_MSG", &toast1, 21465419, "主播A");
+        assert_eq!(out1.len(), 1);
+        assert_eq!(out1[0].seq, 1);
+        assert_eq!(out1[0].kind, "guard");
+        assert_eq!(out1[0].price, 168000);
+        assert_eq!(
+            out1[0].face.as_deref(),
+            Some("https://i0.hdslb.com/bfs/face/guard.jpg")
+        );
 
-        // 14. LIKE_INFO_V3_CLICK
+        // 3. Duplicate payflow_id via USER_TOAST_MSG_V2 is dropped without incrementing seq
+        let toast2_dup = json!({
+            "cmd": "USER_TOAST_MSG_V2",
+            "data": {
+                "guard_info": { "uid": 31839477, "username": "清风蓝云KUANG", "guard_level": 3 },
+                "pay_info": { "num": 1, "price": 198000, "payflow_id": "pf-100" }
+            }
+        });
+        assert!(
+            norm.process_payload("USER_TOAST_MSG_V2", &toast2_dup, 21465419, "主播A")
+                .is_empty()
+        );
+        assert_eq!(norm.current_seq(), 1);
+
+        // 4. COMBO_SEND becomes combo_end with seq=0 (does NOT advance seq)
+        let combo = json!({
+            "cmd": "COMBO_SEND",
+            "data": {
+                "uid": 777,
+                "uname": "连击侠",
+                "gift_name": "小心心",
+                "batch_combo_id": "batch:combo:1"
+            }
+        });
+        let out_combo = norm.process_payload("COMBO_SEND", &combo, 21465419, "主播A");
+        assert_eq!(out_combo.len(), 1);
+        assert_eq!(out_combo[0].kind, "combo_end");
+        assert_eq!(out_combo[0].seq, 0);
+        assert_eq!(
+            out_combo[0].batch_combo_id.as_deref(),
+            Some("batch:combo:1")
+        );
+        assert_eq!(norm.current_seq(), 1);
+
+        // 5. Next standard event (like) gets seq=2
         let like = json!({
             "cmd": "LIKE_INFO_V3_CLICK",
-            "data": {
-                "uid": 9918273,
-                "uname": "老粉丁",
-                "like_text": "为主播点赞了"
-            }
+            "data": { "uid": 31839477, "uname": "清风蓝云KUANG", "like_text": "为主播点赞了" }
         });
-        let ev = parse_bili_cmd_json("LIKE_INFO_V3_CLICK", &like, 21452505, "主播A").unwrap();
-        assert_eq!(ev.kind, "like");
-        assert_eq!(ev.content, "为主播点赞了");
+        let out_like = norm.process_payload("LIKE_INFO_V3_CLICK", &like, 21465419, "主播A");
+        assert_eq!(out_like[0].seq, 2);
+        assert_eq!(out_like[0].kind, "like");
     }
 
     #[test]
-    fn test_interact_word_v2_protobuf_decode() {
-        let msg = InteractWordV2 {
+    fn test_parse_extended_commands_and_pb_raw_enrichment() {
+        // ENTRY_EFFECT -> guard_enter
+        let entry_eff = json!({
+            "cmd": "ENTRY_EFFECT",
+            "data": {
+                "uid": 999,
+                "privilege_type": 3,
+                "copy_writing": "欢迎 <%舰长甲%> 进入直播间",
+                "face": "http://i0.hdslb.com/bfs/face/cap.jpg"
+            }
+        });
+        let ev_ge = parse_bili_cmd_json("ENTRY_EFFECT", &entry_eff, 21465419, "主播A").unwrap();
+        assert_eq!(ev_ge.kind, "guard_enter");
+        assert_eq!(ev_ge.uid, 999);
+        assert_eq!(ev_ge.uname, "舰长甲");
+        assert_eq!(ev_ge.guard_level, Some(3));
+        assert_eq!(ev_ge.content, "欢迎 舰长甲 进入直播间");
+
+        // ROOM_SILENT_ON & SUPER_CHAT_MESSAGE_DELETE
+        let silent = parse_bili_cmd_json(
+            "ROOM_SILENT_ON",
+            &json!({"cmd": "ROOM_SILENT_ON", "data": {"type": "medal", "level": 5}}),
+            21465419,
+            "主播A",
+        )
+        .unwrap();
+        assert_eq!(silent.kind, "room_silent");
+        assert!(silent.content.contains("5"));
+
+        let sc_del = parse_bili_cmd_json(
+            "SUPER_CHAT_MESSAGE_DELETE",
+            &json!({"cmd": "SUPER_CHAT_MESSAGE_DELETE", "data": {"ids": [101, 102]}}),
+            21465419,
+            "主播A",
+        )
+        .unwrap();
+        assert_eq!(sc_del.kind, "superchat_delete");
+        assert_eq!(sc_del.ids, Some(vec![101, 102]));
+
+        // SEND_GIFT combo fields
+        let gift_combo = json!({
+            "cmd": "SEND_GIFT",
+            "data": {
+                "uid": 55,
+                "uname": "送礼人",
+                "giftName": "牛哇牛哇",
+                "num": 3,
+                "coin_type": "gold",
+                "total_coin": 300,
+                "batch_combo_id": "combo:55:1",
+                "combo_stay_time": 4
+            }
+        });
+        let ev_g = parse_bili_cmd_json("SEND_GIFT", &gift_combo, 21465419, "主播A").unwrap();
+        assert_eq!(ev_g.kind, "gift");
+        assert_eq!(ev_g.num, Some(3));
+        assert_eq!(ev_g.batch_combo_id.as_deref(), Some("combo:55:1"));
+        assert_eq!(ev_g.combo_stay_time, 4);
+
+        // Protobuf raw enrichment adds pb_decoded
+        let iw_msg = InteractWordV2 {
             uid: 9918273,
             uname: "老粉丁".to_string(),
-            msg_type: 1,
+            msg_type: 4,
             fans_medal: Some(InteractWordV2FansMedal {
                 medal_level: 18,
                 medal_name: "星光".to_string(),
             }),
         };
-        let encoded = BASE64_STANDARD.encode(msg.encode_to_vec());
-        let payload = json!({
+        let raw_pb = json!({
             "cmd": "INTERACT_WORD_V2",
-            "data": { "pb": encoded }
+            "data": { "pb": BASE64_STANDARD.encode(iw_msg.encode_to_vec()) }
         });
-        let ev = parse_bili_cmd_json("INTERACT_WORD_V2", &payload, 21452505, "主播A").unwrap();
-        assert_eq!(ev.kind, "enter");
-        assert_eq!(ev.uid, 9918273);
-        assert_eq!(ev.uname, "老粉丁");
-        assert_eq!(ev.medal_name.as_deref(), Some("星光"));
-        assert_eq!(ev.medal_level, Some(18));
+        let enriched = enrich_raw_json_with_pb_decoded(&raw_pb);
+        assert_eq!(enriched["data"]["pb_decoded"]["1"], 9918273);
+        assert_eq!(enriched["data"]["pb_decoded"]["2"], "老粉丁");
+        assert_eq!(enriched["data"]["pb_decoded"]["9"]["3"], "星光");
+
+        // msg_type == 4 maps to follow
+        let ev_follow =
+            parse_bili_cmd_json("INTERACT_WORD_V2", &raw_pb, 21465419, "主播A").unwrap();
+        assert_eq!(ev_follow.kind, "follow");
+
+        // Unmapped command returns None from standard parser
+        assert!(
+            parse_bili_cmd_json(
+                "ONLINE_RANK_COUNT",
+                &json!({"cmd": "ONLINE_RANK_COUNT", "data": {"count": 12}}),
+                21465419,
+                "主播A",
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2252,20 +2646,12 @@ mod tests {
     }
 
     #[test]
-    fn test_danmu_emoticon_inline_emots_and_room_format_parsing() {
-        assert_eq!(
-            parse_room_input("22924075(薇Steria): 生日回歌杂！"),
-            Some(22924075)
-        );
-
-        // 1. Big sticker emote in info[0][13]
+    fn test_danmu_dm_type_emoticon_inline_emots_and_send_gift_v2() {
         let sticker_danmu = json!({
             "cmd": "DANMU_MSG",
             "info": [
                 [0, 1, 25, 16777215, 1795108929275u64, 0, 0, "", 0, 0, 0, "", 1, {
-                    "url": "http://i0.hdslb.com/bfs/garb/sticker.png",
-                    "width": 120,
-                    "height": 120
+                    "url": "http://i0.hdslb.com/bfs/garb/sticker.png"
                 }, "{}", {}],
                 "[薇Steria表情包_打call]",
                 [20395885, "可爱笨蛋布布居", 0],
@@ -2273,144 +2659,23 @@ mod tests {
             ]
         });
         let ev1 = parse_bili_cmd_json("DANMU_MSG", &sticker_danmu, 22924075, "薇Steria").unwrap();
+        assert_eq!(ev1.dm_type, Some(1));
         assert_eq!(
             ev1.emoticon.as_deref(),
             Some("https://i0.hdslb.com/bfs/garb/sticker.png")
         );
-        assert!(ev1.emots.is_none());
 
-        // 2. Inline emots map inside info[0][15].extra JSON string
-        let extra_json = json!({
-            "emots": {
-                "[喝彩]": {
-                    "url": "http://i0.hdslb.com/bfs/emote/cheer.png",
-                    "width": 20,
-                    "height": 20
-                }
-            }
-        })
-        .to_string();
-        let inline_danmu = json!({
-            "cmd": "DANMU_MSG",
-            "info": [
-                [0, 1, 25, 16777215, 1795108977039u64, 0, 0, "", 0, 0, 0, "", 0, "{}", "{}", {
-                    "extra": extra_json,
-                    "user": { "base": { "face": "https://i0.hdslb.com/bfs/face/example.jpg" } }
-                }],
-                "生日快乐！[喝彩]",
-                [162976890, "D-awn", 0],
-                [26, "薇她命", "薇Steria", 22924075]
-            ]
-        });
-        let ev2 = parse_bili_cmd_json("DANMU_MSG", &inline_danmu, 22924075, "薇Steria").unwrap();
-        assert!(ev2.emoticon.is_none());
-        let emots = ev2.emots.as_ref().unwrap();
-        assert_eq!(
-            emots.get("[喝彩]").map(String::as_str),
-            Some("https://i0.hdslb.com/bfs/emote/cheer.png")
-        );
-    }
-
-    #[test]
-    fn test_modern_gift_combo_toast_and_active_sc_parsing() {
-        // 1. SEND_GIFT with nested sender_uinfo
-        let gift_uinfo = json!({
-            "cmd": "SEND_GIFT",
-            "data": {
-                "giftName": "辣条",
-                "num": 3,
-                "coin_type": "gold",
-                "total_coin": 300,
-                "sender_uinfo": {
-                    "uid": 12345,
-                    "base": {
-                        "name": "礼物君",
-                        "face": "http://i0.hdslb.com/bfs/face/gift.jpg"
-                    },
-                    "medal": {
-                        "name": "星光",
-                        "level": 16
-                    }
-                }
-            }
-        });
-        let ev_gift = parse_bili_cmd_json("SEND_GIFT", &gift_uinfo, 22924075, "薇Steria").unwrap();
-        assert_eq!(ev_gift.kind, "gift");
-        assert_eq!(ev_gift.uid, 12345);
-        assert_eq!(ev_gift.uname, "礼物君");
-        assert_eq!(
-            ev_gift.face.as_deref(),
-            Some("https://i0.hdslb.com/bfs/face/gift.jpg")
-        );
-        assert_eq!(ev_gift.medal_name.as_deref(), Some("星光"));
-        assert_eq!(ev_gift.medal_level, Some(16));
-        assert_eq!(ev_gift.content, "辣条 x3");
-        assert_eq!(ev_gift.price, 300);
-
-        // 2. COMBO_SEND
-        let combo = json!({
-            "cmd": "COMBO_SEND",
-            "data": {
-                "uid": 777,
-                "uname": "连击侠",
-                "gift_name": "小花花",
-                "combo_num": 10,
-                "combo_total_coin": 1000,
-                "coin_type": "gold"
-            }
-        });
-        let ev_combo = parse_bili_cmd_json("COMBO_SEND", &combo, 22924075, "薇Steria").unwrap();
-        assert_eq!(ev_combo.kind, "gift");
-        assert_eq!(ev_combo.content, "小花花 x10");
-        assert_eq!(ev_combo.price, 1000);
-
-        // 3. USER_TOAST_MSG_V2 (nested guard_info + pay_info)
-        let toast_v2 = json!({
-            "cmd": "USER_TOAST_MSG_V2",
-            "data": {
-                "guard_info": {
-                    "uid": 206904044,
-                    "username": "舰长测试",
-                    "guard_level": 3,
-                    "role_name": "舰长"
-                },
-                "pay_info": {
-                    "num": 2,
-                    "price": 198000
-                }
-            }
-        });
-        let ev_toast =
-            parse_bili_cmd_json("USER_TOAST_MSG_V2", &toast_v2, 22924075, "薇Steria").unwrap();
-        assert_eq!(ev_toast.kind, "guard");
-        assert_eq!(ev_toast.uid, 206904044);
-        assert_eq!(ev_toast.uname, "舰长测试");
-        assert_eq!(ev_toast.content, "舰长 x2");
-        assert_eq!(ev_toast.price, 198000);
-
-        // 4. SEND_GIFT_V2 protobuf decode (real SendGiftBroadcast layout)
         let pb_item = SendGiftV2ItemPb {
             gift_name: "冰阔落".to_string(),
             num: 2,
             price: 5000,
             coin_type: "gold".to_string(),
         };
-        #[derive(prost::Message)]
-        struct TestFansMedal {
-            #[prost(uint32, tag = "2")]
-            level: u32,
-            #[prost(string, tag = "3")]
-            name: String,
-        }
         let pb_gift = SendGiftV2Pb {
             uid: 666888,
             uname: "盲盒大佬".to_string(),
             face: "http://i0.hdslb.com/bfs/face/boss.jpg".to_string(),
-            medal_raw: TestFansMedal {
-                level: 25,
-                name: "薇她命".to_string(),
-            }
-            .encode_to_vec(),
+            medal_raw: Vec::new(),
             gift_list_raw: vec![pb_item.encode_to_vec()],
         };
         let pb_payload = json!({
@@ -2419,421 +2684,7 @@ mod tests {
         });
         let ev_pb = parse_bili_cmd_json("SEND_GIFT_V2", &pb_payload, 22924075, "薇Steria").unwrap();
         assert_eq!(ev_pb.kind, "gift");
-        assert_eq!(ev_pb.uid, 666888);
-        assert_eq!(ev_pb.uname, "盲盒大佬");
-        assert_eq!(
-            ev_pb.face.as_deref(),
-            Some("https://i0.hdslb.com/bfs/face/boss.jpg")
-        );
-        assert_eq!(ev_pb.content, "冰阔落 x2");
+        assert_eq!(ev_pb.num, Some(2));
         assert_eq!(ev_pb.price, 10000);
-        assert_eq!(ev_pb.medal_name.as_deref(), Some("薇她命"));
-        assert_eq!(ev_pb.medal_level, Some(25));
-
-        // 5. SUPER_CHAT_MESSAGE_JPN preserved as kind="raw" for lossless recording (dropped by EventFilter)
-        let sc_jpn = json!({
-            "cmd": "SUPER_CHAT_MESSAGE_JPN",
-            "data": { "uid": 1, "price": 30, "message": "dup" }
-        });
-        let jpn_ev =
-            parse_bili_cmd_json("SUPER_CHAT_MESSAGE_JPN", &sc_jpn, 22924075, "薇Steria").unwrap();
-        assert_eq!(jpn_ev.kind, "raw");
-        assert_eq!(jpn_ev.raw_cmd, "SUPER_CHAT_MESSAGE_JPN");
-        assert_eq!(jpn_ev.raw_data, Some(sc_jpn));
-
-        // 6. Active SuperChats list parser skips expired items and preserves order
-        let sc_api = json!({
-            "code": 0,
-            "data": {
-                "list": [
-                    {
-                        "uid": 10,
-                        "price": 30,
-                        "message": "expired sc",
-                        "start_time": 1700000000,
-                        "end_time": 1700000060,
-                        "user_info": { "uname": "OldUser" }
-                    },
-                    {
-                        "uid": 20,
-                        "price": 50,
-                        "message": "active sc",
-                        "start_time": 1800000010,
-                        "end_time": 1800000120,
-                        "user_info": { "uname": "ActiveUser", "face": "http://face/a.jpg" },
-                        "medal_info": { "medal_name": "薇她命", "medal_level": 12 }
-                    }
-                ]
-            }
-        });
-        let active = parse_active_super_chats_json(&sc_api, 22924075, "薇Steria", 1800000050000);
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].kind, "super_chat");
-        assert_eq!(active[0].uname, "ActiveUser");
-        assert_eq!(active[0].price, 50000);
-        assert_eq!(active[0].face.as_deref(), Some("https://face/a.jpg"));
-
-        // 7. Cookie buvid helper
-        assert_eq!(
-            append_cookie_kv("SESSDATA=abc; bili_jct=xyz", "buvid3", "B3TEST"),
-            "SESSDATA=abc; bili_jct=xyz; buvid3=B3TEST"
-        );
-        assert_eq!(
-            append_cookie_kv("SESSDATA=abc; buvid3=EXISTING", "buvid3", "NEW"),
-            "SESSDATA=abc; buvid3=EXISTING"
-        );
-    }
-
-    #[test]
-    fn test_send_gift_v2_real_wire_format_and_gift_combo() {
-        #[derive(prost::Message)]
-        struct TestFansMedalWire {
-            #[prost(uint64, tag = "1")]
-            target_id: u64,
-            #[prost(uint32, tag = "2")]
-            medal_level: u32,
-            #[prost(string, tag = "3")]
-            medal_name: String,
-        }
-
-        #[derive(prost::Message)]
-        struct TestUinfoMedalWire {
-            #[prost(string, tag = "1")]
-            name: String,
-            #[prost(uint32, tag = "2")]
-            level: u32,
-        }
-
-        #[derive(prost::Message)]
-        struct TestWealthLevelWire {
-            #[prost(uint32, tag = "1")]
-            level: u32,
-        }
-
-        #[derive(prost::Message)]
-        struct TestGiftItemWire {
-            #[prost(uint64, tag = "1")]
-            gift_id: u64,
-            #[prost(string, tag = "2")]
-            gift_name: String,
-            #[prost(uint64, tag = "3")]
-            num: u64,
-            #[prost(uint64, tag = "5")]
-            price: u64,
-            #[prost(string, tag = "8")]
-            coin_type: String,
-        }
-
-        #[derive(prost::Message)]
-        struct TestOuterSendGiftV2Wire {
-            #[prost(uint64, tag = "1")]
-            uid: u64,
-            #[prost(string, tag = "2")]
-            uname: String,
-            #[prost(string, tag = "3")]
-            face: String,
-            #[prost(string, tag = "4")]
-            name_color: String,
-            #[prost(uint32, tag = "5")]
-            guard_level: u32,
-            #[prost(bytes = "vec", tag = "8")]
-            medal_raw: Vec<u8>,
-            #[prost(bytes = "vec", repeated, tag = "10")]
-            gift_list_raw: Vec<Vec<u8>>,
-            #[prost(uint64, tag = "11")]
-            batch_flag: u64,
-            #[prost(bytes = "vec", tag = "13")]
-            wealth_raw: Vec<u8>,
-        }
-
-        // 1. Gold SEND_GIFT_V2 with unknown outer fields (tags 4, 5, 11, 13) + FansMedal
-        let gold_wire = TestOuterSendGiftV2Wire {
-            uid: 107528046,
-            uname: "哭面笑脸".to_string(),
-            face: "http://i0.hdslb.com/bfs/face/real.jpg".to_string(),
-            name_color: "#00D1F1".to_string(),
-            guard_level: 3,
-            medal_raw: TestFansMedalWire {
-                target_id: 22924075,
-                medal_level: 28,
-                medal_name: "薇她命".to_string(),
-            }
-            .encode_to_vec(),
-            gift_list_raw: vec![
-                TestGiftItemWire {
-                    gift_id: 31039,
-                    gift_name: "牛哇牛哇".to_string(),
-                    num: 3,
-                    price: 100,
-                    coin_type: "gold".to_string(),
-                }
-                .encode_to_vec(),
-            ],
-            batch_flag: 1,
-            wealth_raw: TestWealthLevelWire { level: 34 }.encode_to_vec(),
-        };
-        let encoded_gold = gold_wire.encode_to_vec();
-        let gold_payload = json!({
-            "cmd": "SEND_GIFT_V2",
-            "data": { "dmscore": 3, "pb": BASE64_STANDARD.encode(&encoded_gold) }
-        });
-        let gold_events =
-            parse_bili_cmd_events("SEND_GIFT_V2", &gold_payload, 22924075, "薇Steria");
-        assert_eq!(gold_events.len(), 1);
-        assert_eq!(gold_events[0].kind, "gift");
-        assert_eq!(gold_events[0].uid, 107528046);
-        assert_eq!(gold_events[0].uname, "哭面笑脸");
-        assert_eq!(
-            gold_events[0].face.as_deref(),
-            Some("https://i0.hdslb.com/bfs/face/real.jpg")
-        );
-        assert_eq!(gold_events[0].medal_name.as_deref(), Some("薇她命"));
-        assert_eq!(gold_events[0].medal_level, Some(28));
-        assert_eq!(gold_events[0].content, "牛哇牛哇 x3");
-        assert_eq!(gold_events[0].price, 300);
-
-        // Verify upgraded nested wire inspector expands non-printable protobuf submessage
-        let summary = inspect_pb_wire_summary(&encoded_gold);
-        assert!(summary.contains("13:{1:varint(34)}"), "summary={}", summary);
-        assert!(
-            summary.contains("2:str(len=12,\"哭面笑脸\")"),
-            "summary={}",
-            summary
-        );
-
-        // 2. Silver SEND_GIFT_V2 with empty medal yields price == 0 and no medal
-        let silver_wire = TestOuterSendGiftV2Wire {
-            uid: 11676541,
-            uname: "榴莲菇".to_string(),
-            face: "https://i1.hdslb.com/bfs/face/s.jpg".to_string(),
-            name_color: String::new(),
-            guard_level: 0,
-            medal_raw: Vec::new(),
-            gift_list_raw: vec![
-                TestGiftItemWire {
-                    gift_id: 1,
-                    gift_name: "小心心".to_string(),
-                    num: 5,
-                    price: 100,
-                    coin_type: "silver".to_string(),
-                }
-                .encode_to_vec(),
-            ],
-            batch_flag: 1,
-            wealth_raw: Vec::new(),
-        };
-        let silver_payload = json!({
-            "cmd": "SEND_GIFT_V2",
-            "data": { "pb": BASE64_STANDARD.encode(silver_wire.encode_to_vec()) }
-        });
-        let silver_ev =
-            parse_bili_cmd_json("SEND_GIFT_V2", &silver_payload, 22924075, "薇Steria").unwrap();
-        assert_eq!(silver_ev.price, 0);
-        assert_eq!(silver_ev.content, "小心心 x5");
-        assert!(silver_ev.medal_name.is_none());
-        assert!(silver_ev.medal_level.is_none());
-
-        // 3. Multi-item blind box SEND_GIFT_V2 with UinfoMedal fallback (tag 1=name, tag 2=level)
-        let blindbox_wire = TestOuterSendGiftV2Wire {
-            uid: 383338398,
-            uname: "盲盒欧皇".to_string(),
-            face: "http://i0.hdslb.com/bfs/face/box.jpg".to_string(),
-            name_color: "#E17AFF".to_string(),
-            guard_level: 2,
-            medal_raw: TestUinfoMedalWire {
-                name: "星光".to_string(),
-                level: 19,
-            }
-            .encode_to_vec(),
-            gift_list_raw: vec![
-                TestGiftItemWire {
-                    gift_id: 32001,
-                    gift_name: "心情波波".to_string(),
-                    num: 2,
-                    price: 5000,
-                    coin_type: "gold".to_string(),
-                }
-                .encode_to_vec(),
-                TestGiftItemWire {
-                    gift_id: 32002,
-                    gift_name: "桃花岛".to_string(),
-                    num: 1,
-                    price: 52000,
-                    coin_type: "gold".to_string(),
-                }
-                .encode_to_vec(),
-            ],
-            batch_flag: 1,
-            wealth_raw: Vec::new(),
-        };
-        let blindbox_payload = json!({
-            "cmd": "SEND_GIFT_V2",
-            "data": { "pb": BASE64_STANDARD.encode(blindbox_wire.encode_to_vec()) }
-        });
-        let multi_events =
-            parse_bili_cmd_events("SEND_GIFT_V2", &blindbox_payload, 22924075, "薇Steria");
-        assert_eq!(multi_events.len(), 2);
-        assert_eq!(multi_events[0].content, "心情波波 x2");
-        assert_eq!(multi_events[0].price, 10000);
-        assert_eq!(multi_events[0].medal_name.as_deref(), Some("星光"));
-        assert_eq!(multi_events[0].medal_level, Some(19));
-        assert_eq!(multi_events[1].content, "桃花岛 x1");
-        assert_eq!(multi_events[1].price, 52000);
-        assert_eq!(multi_events[1].medal_name.as_deref(), Some("星光"));
-
-        // 4. GIFT_COMBO matching exact live Bilibili key schema from logs/dambo.log:44
-        let gift_combo_payload = json!({
-            "cmd": "GIFT_COMBO",
-            "data": {
-                "action": "投喂",
-                "batch_combo_id": "batch:gift:combo_id:22924075:12345:31036:1700000000.1",
-                "biz_type": 1,
-                "combo_resources_id": 1,
-                "combo_stay_time": 3,
-                "combo_total_coin": 1000,
-                "crit_prob": 0,
-                "demarcation": 1,
-                "discount_price": 100,
-                "face": "http://i0.hdslb.com/bfs/face/combo.jpg",
-                "giftId": 31036,
-                "giftName": "小花花",
-                "gift_info": { "effect_id": 0 },
-                "guard_level": 0,
-                "is_naming": false,
-                "is_special_batch": 0,
-                "magnification": 1,
-                "num": 10,
-                "price": 100,
-                "receiver_uinfo": {},
-                "send_master": null,
-                "sender_uinfo": {
-                    "uid": 998877,
-                    "base": {
-                        "name": "连击大侠",
-                        "face": "http://i0.hdslb.com/bfs/face/combo.jpg"
-                    },
-                    "medal": {
-                        "name": "薇她命",
-                        "level": 21
-                    }
-                },
-                "super_batch_gift_num": 1,
-                "tag_image": "",
-                "timestamp": 1700000000,
-                "total_coin": 1000,
-                "uid": 998877,
-                "uname": "连击大侠",
-                "unlock_benefit_url": ""
-            }
-        });
-        let combo_ev =
-            parse_bili_cmd_json("GIFT_COMBO", &gift_combo_payload, 22924075, "薇Steria").unwrap();
-        assert_eq!(combo_ev.kind, "gift");
-        assert_eq!(combo_ev.uid, 998877);
-        assert_eq!(combo_ev.uname, "连击大侠");
-        assert_eq!(
-            combo_ev.face.as_deref(),
-            Some("https://i0.hdslb.com/bfs/face/combo.jpg")
-        );
-        assert_eq!(combo_ev.medal_name.as_deref(), Some("薇她命"));
-        assert_eq!(combo_ev.medal_level, Some(21));
-        assert_eq!(combo_ev.content, "小花花 x10");
-        assert_eq!(combo_ev.price, 1000);
-    }
-
-    #[test]
-    fn test_guard_toast_fields_gift_num_and_raw_preservation() {
-        // 1. GUARD_BUY populates guard_level, num, start_time, official price, raw_data, and payflow_id=None
-        let guard_buy = json!({
-            "cmd": "GUARD_BUY",
-            "data": {
-                "uid": 31839477,
-                "username": "清风蓝云KUANG",
-                "guard_level": 3,
-                "num": 1,
-                "price": 198000,
-                "gift_name": "舰长",
-                "start_time": 1795156560u64,
-                "end_time": 1797834960u64
-            }
-        });
-        let ev_buy = parse_bili_cmd_json("GUARD_BUY", &guard_buy, 21465419, "主播A").unwrap();
-        assert_eq!(ev_buy.kind, "guard");
-        assert_eq!(ev_buy.raw_cmd, "GUARD_BUY");
-        assert_eq!(ev_buy.guard_level, Some(3));
-        assert_eq!(ev_buy.num, Some(1));
-        assert_eq!(ev_buy.start_time, Some(1795156560));
-        assert_eq!(ev_buy.price, 198000);
-        assert_eq!(ev_buy.payflow_id, None);
-        assert_eq!(ev_buy.raw_data, Some(guard_buy));
-
-        // 2. USER_TOAST_MSG populates payflow_id, actual paid price, toast_msg priority, and raw_data
-        let toast_v1 = json!({
-            "cmd": "USER_TOAST_MSG",
-            "data": {
-                "uid": 31839477,
-                "username": "清风蓝云KUANG",
-                "guard_level": 3,
-                "num": 1,
-                "price": 168000,
-                "role_name": "舰长",
-                "start_time": 1795156560u64,
-                "payflow_id": "2611210800123456",
-                "toast_msg": "<%清风蓝云KUANG%> 在主播的直播间开通了舰长"
-            }
-        });
-        let ev_toast1 =
-            parse_bili_cmd_json("USER_TOAST_MSG", &toast_v1, 21465419, "主播A").unwrap();
-        assert_eq!(ev_toast1.kind, "guard");
-        assert_eq!(ev_toast1.guard_level, Some(3));
-        assert_eq!(ev_toast1.num, Some(1));
-        assert_eq!(ev_toast1.start_time, Some(1795156560));
-        assert_eq!(ev_toast1.price, 168000);
-        assert_eq!(ev_toast1.payflow_id.as_deref(), Some("2611210800123456"));
-        assert_eq!(
-            ev_toast1.content,
-            "<%清风蓝云KUANG%> 在主播的直播间开通了舰长"
-        );
-        assert_eq!(ev_toast1.raw_data, Some(toast_v1));
-
-        // 3. USER_TOAST_MSG_V2 with guard_level == 0 falls back to kind="raw"
-        let toast_zero = json!({
-            "cmd": "USER_TOAST_MSG_V2",
-            "data": {
-                "guard_info": { "uid": 1, "username": "路人", "guard_level": 0 },
-                "pay_info": { "price": 1000, "payflow_id": "pf-0" }
-            }
-        });
-        let ev_zero =
-            parse_bili_cmd_json("USER_TOAST_MSG_V2", &toast_zero, 21465419, "主播A").unwrap();
-        assert_eq!(ev_zero.kind, "raw");
-        assert_eq!(ev_zero.raw_data, Some(toast_zero));
-
-        // 4. SEND_GIFT includes num and raw_data
-        let send_gift = json!({
-            "cmd": "SEND_GIFT",
-            "data": {
-                "uid": 999,
-                "uname": "送礼人",
-                "giftName": "牛哇牛哇",
-                "num": 7,
-                "coin_type": "gold",
-                "total_coin": 700
-            }
-        });
-        let ev_gift = parse_bili_cmd_json("SEND_GIFT", &send_gift, 21465419, "主播A").unwrap();
-        assert_eq!(ev_gift.kind, "gift");
-        assert_eq!(ev_gift.num, Some(7));
-        assert_eq!(ev_gift.raw_data, Some(send_gift));
-
-        // 5. Unknown Bilibili command preserved as kind="raw" with raw_cmd and raw_data
-        let unknown = json!({
-            "cmd": "ONLINE_RANK_COUNT",
-            "data": { "count": 42, "online_count": 108 }
-        });
-        let ev_raw = parse_bili_cmd_json("ONLINE_RANK_COUNT", &unknown, 21465419, "主播A").unwrap();
-        assert_eq!(ev_raw.kind, "raw");
-        assert_eq!(ev_raw.raw_cmd, "ONLINE_RANK_COUNT");
-        assert_eq!(ev_raw.raw_data, Some(unknown));
     }
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 #[command(
     author = "kshava",
     version = "0.1.0",
-    about = "Dambo Danmaku & Dam Controller"
+    about = "Dambo Danmaku & Event Controller"
 )]
 struct Args {
     #[arg(short, long, default_value = "dambo_config.toml")]

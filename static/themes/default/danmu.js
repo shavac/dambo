@@ -2,6 +2,11 @@
     const scPinBar = document.getElementById('sc-pin-bar');
     const container = document.getElementById('danmaku-container');
     const enterDock = document.getElementById('enter-dock');
+    const SHOW_LIKE = new URLSearchParams(window.location.search).get('show_like') === '1';
+
+    function isSuperChatKind(kind) {
+        return kind === 'superchat' || kind === 'super_chat';
+    }
 
     const MAX_ITEMS = 60;
     const MAX_PIN_CARDS = 4;
@@ -215,7 +220,7 @@
     }
 
     function addPinnedHighlight(item, options) {
-        if (!scPinBar || (item.kind !== 'super_chat' && item.kind !== 'guard')) return;
+        if (!scPinBar || (!isSuperChatKind(item.kind) && item.kind !== 'guard')) return;
         const key = pinnedHighlightKey(item);
         if (seenPinKeys.has(key)) return;
 
@@ -313,7 +318,7 @@
 
     function buildSuperChatItem(item) {
         const div = document.createElement('div');
-        div.className = 'danmaku-item item-super_chat';
+        div.className = 'danmaku-item item-superchat item-super_chat';
 
         const header = document.createElement('div');
         header.className = 'sc-header';
@@ -363,6 +368,9 @@
             icon = '🚫';
             const uname = item.uname ? `${item.uname} ` : '';
             text = `${uname}${text || '被禁言'}`;
+        } else if (kind === 'room_silent') {
+            icon = '🔇';
+            text = text || '房间禁言状态变更';
         } else if (kind === 'warning' || kind === 'cut_off') {
             icon = '⚠️';
             text = text || (kind === 'cut_off' ? '直播已切断' : '系统警告');
@@ -390,12 +398,23 @@
         if (!item) return;
         const kind = item.kind || 'chat';
 
+        if (kind === 'like' && !SHOW_LIKE) return;
+        if (
+            kind === 'room_info' ||
+            kind === 'session_end' ||
+            kind === 'reconnected' ||
+            kind === 'superchat_delete' ||
+            kind === 'combo_end'
+        ) {
+            return;
+        }
+
         if (kind === 'enter') {
             showEnterInDock(item, options);
             return;
         }
 
-        if (kind === 'super_chat' || kind === 'guard') {
+        if (isSuperChatKind(kind) || kind === 'guard') {
             addPinnedHighlight(item, options);
         }
 
@@ -419,8 +438,12 @@
                     fallbackContent: '大航海',
                 });
                 break;
+            case 'superchat':
             case 'super_chat':
                 div = buildSuperChatItem(item);
+                break;
+            case 'guard_enter':
+                div = buildInteractionItem(kind, item, '⚓', '进入直播间');
                 break;
             case 'follow':
                 div = buildInteractionItem(kind, item, '❤️', '关注了直播间');
@@ -434,6 +457,7 @@
             case 'live':
             case 'preparing':
             case 'room_change':
+            case 'room_silent':
             case 'room_block':
             case 'warning':
             case 'cut_off':

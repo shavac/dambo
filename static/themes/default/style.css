@@ -287,6 +287,7 @@ html, body {
 }
 
 /* SuperChat 2-row inline card */
+.item-superchat,
 .item-super_chat,
 .item-sc {
     flex-direction: column;
@@ -304,6 +305,7 @@ html, body {
     width: 100%;
     flex-wrap: wrap;
 }
+.item-superchat .sender-name,
 .item-super_chat .sender-name,
 .item-sc .sender-name {
     color: #fef08a;

@@ -10,11 +10,73 @@ pub fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Internal normalized event representing 100% of room events before filtering.
-/// Used directly by `recorder.rs` for lossless JSONL streaming.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+/// Complete room & anchor metadata snapshot (`kind: "room_info"`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoomInfoSnapshot {
+    pub room_id: u64,
+    pub short_id: u64,
+    pub uid: u64,
+    pub uname: String,
+    pub title: String,
+    pub area_name: String,
+    pub parent_area_name: String,
+    /// `1` = live, `0` = offline, `2` = loop/round
+    pub live_status: u8,
+    /// Unix timestamp in seconds when the current live session started (`None` if offline)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<u64>,
+}
+
+impl RoomInfoSnapshot {
+    pub fn is_live(&self) -> bool {
+        self.live_status == 1
+    }
+
+    /// Build the canonical `kind: "room_info"` event (`seq = 0`, `offset_ms = 0`).
+    pub fn to_raw_event(&self, timestamp_ms: u64) -> RawBiliEvent {
+        RawBiliEvent {
+            seq: 0,
+            offset_ms: 0,
+            timestamp: timestamp_ms,
+            room_id: self.room_id,
+            room_uname: self.uname.clone(),
+            kind: "room_info".to_string(),
+            uid: self.uid,
+            uname: self.uname.clone(),
+            content: self.title.clone(),
+            short_id: Some(self.short_id),
+            title: Some(self.title.clone()),
+            area_name: Some(self.area_name.clone()),
+            parent_area_name: Some(self.parent_area_name.clone()),
+            live_status: Some(self.live_status),
+            start_time: self.start_time,
+            raw_cmd: "ROOM_INFO".to_string(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Aggregated statistics written into the `session_end` summary event.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub chat_count: u64,
+    pub like_count: u64,
+    pub guard_count: u64,
+    pub gift_total_coin: u64,
+    pub superchat_total_coin: u64,
+}
+
+/// Canonical normalized event shared by `recorder.rs`, Channel A (`/ws`), and Channel B (`/ws/event`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RawBiliEvent {
-    /// Milliseconds elapsed since the current recording session started (for offline playback & ASR sync)
+    /// Monotonic per-session sequence number (`0` for `room_info`, `1, 2, ...` for live events)
+    #[serde(default)]
+    pub seq: u64,
+    /// Milliseconds elapsed since the session start anchor (for offline playback & ASR sync)
     pub offset_ms: u64,
     /// 13-digit Unix millisecond timestamp
     pub timestamp: u64,
@@ -22,14 +84,15 @@ pub struct RawBiliEvent {
     pub room_id: u64,
     /// Streamer username / room name
     pub room_uname: String,
-    /// Event category: live, preparing, room_change, room_block, warning, cut_off,
-    /// chat, super_chat, gift, guard, enter, follow, share, like, raw
+    /// Event category: room_info, live, preparing, room_change, room_silent, superchat_delete,
+    /// room_block, warning, cut_off, reconnected, session_end, chat, superchat, gift, guard,
+    /// guard_enter, enter, follow, share, like, combo_end
     pub kind: String,
     /// Sender user ID
     pub uid: u64,
     /// Sender nickname
     pub uname: String,
-    /// Avatar URL (if extracted directly or filled by LRU cache)
+    /// Avatar URL (extracted directly or filled by zero-risk LRU cache)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub face: Option<String>,
     /// Fan medal name
@@ -40,6 +103,9 @@ pub struct RawBiliEvent {
     pub medal_level: Option<u32>,
     /// Text content / message
     pub content: String,
+    /// Danmaku type (`0` = text, `1` = big sticker emote)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dm_type: Option<u8>,
     /// Optional big sticker emote URL (DANMU_MSG info[0][13])
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoticon: Option<String>,
@@ -57,20 +123,46 @@ pub struct RawBiliEvent {
     /// Unique order flow ID from `USER_TOAST_MSG` / `USER_TOAST_MSG_V2`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payflow_id: Option<String>,
-    /// Guard effective start timestamp (Unix seconds)
+    /// Gift combo batch ID (non-empty when part of a combo)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_combo_id: Option<String>,
+    /// Combo stay duration in seconds (`0` for non-combo gifts)
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub combo_stay_time: u64,
+    /// Guard or live-session effective start timestamp (Unix seconds)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<u64>,
+    /// Deleted SuperChat IDs (`SUPER_CHAT_MESSAGE_DELETE`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<u64>>,
+    /// Short room ID (`room_info`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_id: Option<u64>,
+    /// Room title (`room_info` / `room_change`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Room area name (`room_info` / `room_change`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area_name: Option<String>,
+    /// Room parent area name (`room_info` / `room_change`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_area_name: Option<String>,
+    /// Live status (`1` = live, `0` = offline, `2` = round)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_status: Option<u8>,
+    /// Session end summary statistics (`session_end`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SessionSummary>,
     /// Original Bilibili command opcode/string (DANMU_MSG, LIVE, SEND_GIFT, etc.)
     pub raw_cmd: String,
-    /// Full raw Bilibili event JSON node for lossless recording (stripped before WS Channel A/B)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_data: Option<serde_json::Value>,
 }
 
 /// Channel A Snapshot item (/ws)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotItem {
     pub id: u64,
+    #[serde(default)]
+    pub seq: u64,
     pub kind: String,
     pub uid: u64,
     pub uname: String,
@@ -86,6 +178,12 @@ pub struct SnapshotItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emots: Option<BTreeMap<String, String>>,
     pub price: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<u64>>,
     pub timestamp: u64,
 }
 
@@ -110,9 +208,11 @@ pub enum ChannelAMessage {
     RoomState(RoomStateSnapshot),
 }
 
-/// Channel B Aggregated or spillway event (/ws/dam)
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DamEvent {
+/// Channel B Aggregated, combo-settled, or passthrough event (/ws/event)
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventItem {
+    #[serde(default)]
+    pub seq: u64,
     pub kind: String,
     pub uid: u64,
     pub uname: String,
@@ -121,25 +221,32 @@ pub struct DamEvent {
     pub count: u32,
     pub sample_users: Vec<String>,
     pub price: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_combo_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<u64>>,
 }
 
-/// Channel B Batch payload (/ws/dam)
+/// Channel B Batch payload (/ws/event)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DamBatchData {
+pub struct EventBatchData {
     pub batch_id: u64,
     pub room_id: u64,
     pub room_uname: String,
-    /// 0 = Reservoir periodic batch, 1 = Gift spillway, 2 = High-priority spillway (SC/Guard/Status)
+    /// 0 = Reservoir periodic batch, 1 = Immediate signal / quality chat / gift / combo flush, 2 = Critical status / SC / Guard
     pub priority: u8,
     pub timestamp: u64,
-    pub events: Vec<DamEvent>,
+    pub events: Vec<EventItem>,
 }
 
-/// Channel B Envelope message (/ws/dam)
+/// Channel B Envelope message (/ws/event)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "data")]
 pub enum ChannelBMessage {
-    DamBatch(DamBatchData),
+    RoomInfo(Box<RawBiliEvent>),
+    EventBatch(EventBatchData),
 }
 
 /// Dedicated lightweight room state snapshot for Tauri IPC (`dambo-ui`)

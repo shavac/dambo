@@ -103,8 +103,8 @@ pub struct Config {
     pub bilibili: BilibiliConfig,
     #[serde(default)]
     pub feed: FeedConfig,
-    #[serde(default)]
-    pub dam: DamConfig,
+    #[serde(default, alias = "dam")]
+    pub event: EventConfig,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -121,12 +121,6 @@ pub struct BilibiliConfig {
     pub history_rooms: Vec<u64>,
     #[serde(default = "default_session_file")]
     pub session_file: String,
-    #[serde(default = "default_min_gift_coin")]
-    pub min_gift_coin: u64,
-    #[serde(default = "default_false")]
-    pub ignore_enter: bool,
-    #[serde(default = "default_true")]
-    pub ignore_like: bool,
     #[serde(default = "default_avatar_cache_size")]
     pub avatar_cache_size: usize,
 }
@@ -137,9 +131,6 @@ impl Default for BilibiliConfig {
             room_id: 0,
             history_rooms: Vec::new(),
             session_file: default_session_file(),
-            min_gift_coin: default_min_gift_coin(),
-            ignore_enter: false,
-            ignore_like: true,
             avatar_cache_size: default_avatar_cache_size(),
         }
     }
@@ -166,21 +157,27 @@ impl Default for FeedConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct DamConfig {
+pub struct EventConfig {
     #[serde(default = "default_window_ms")]
     pub window_ms: u64,
     #[serde(default = "default_true")]
     pub dedup_enabled: bool,
     #[serde(default = "default_buffer_capacity")]
     pub buffer_capacity: usize,
+    #[serde(default = "default_min_passthrough_chars")]
+    pub min_passthrough_chars: usize,
+    #[serde(default = "default_max_combo_wait_secs")]
+    pub max_combo_wait_secs: u64,
 }
 
-impl Default for DamConfig {
+impl Default for EventConfig {
     fn default() -> Self {
         Self {
             window_ms: default_window_ms(),
             dedup_enabled: true,
             buffer_capacity: default_buffer_capacity(),
+            min_passthrough_chars: default_min_passthrough_chars(),
+            max_combo_wait_secs: default_max_combo_wait_secs(),
         }
     }
 }
@@ -249,6 +246,8 @@ impl LogConfig {
 pub struct RecordConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default, alias = "dump_raw")]
+    pub record_raw: bool,
     #[serde(default = "default_record_dir")]
     pub dir: String,
     #[serde(default = "default_filename_pattern")]
@@ -259,23 +258,18 @@ impl Default for RecordConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            record_raw: false,
             dir: default_record_dir(),
             filename_pattern: default_filename_pattern(),
         }
     }
 }
 
-fn default_false() -> bool {
-    false
-}
 fn default_true() -> bool {
     true
 }
 fn default_session_file() -> String {
     "./dambo_session.json".to_string()
-}
-fn default_min_gift_coin() -> u64 {
-    1000
 }
 fn default_avatar_cache_size() -> usize {
     2000
@@ -288,6 +282,12 @@ fn default_window_ms() -> u64 {
 }
 fn default_buffer_capacity() -> usize {
     512
+}
+fn default_min_passthrough_chars() -> usize {
+    4
+}
+fn default_max_combo_wait_secs() -> u64 {
+    8
 }
 fn default_host() -> String {
     "localhost".to_string()
@@ -336,5 +336,51 @@ mod tests {
             path: "./logs".to_string(),
         };
         assert_eq!(cfg.level_filter(), log::LevelFilter::Warn);
+    }
+
+    #[test]
+    fn test_event_and_record_raw_config_defaults_and_aliases() {
+        let def = Config::default();
+        assert_eq!(def.event.window_ms, 2500);
+        assert!(def.event.dedup_enabled);
+        assert_eq!(def.event.buffer_capacity, 512);
+        assert_eq!(def.event.min_passthrough_chars, 4);
+        assert_eq!(def.event.max_combo_wait_secs, 8);
+        assert!(!def.record.record_raw);
+
+        // Explicit [event] + [record].record_raw = true
+        let parsed: Config = toml::from_str(
+            r#"
+[event]
+window_ms = 1800
+min_passthrough_chars = 6
+max_combo_wait_secs = 12
+
+[record]
+enabled = false
+record_raw = true
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.event.window_ms, 1800);
+        assert_eq!(parsed.event.min_passthrough_chars, 6);
+        assert_eq!(parsed.event.max_combo_wait_secs, 12);
+        assert!(!parsed.record.enabled);
+        assert!(parsed.record.record_raw);
+
+        // Legacy aliases [dam] and dump_raw remain readable
+        let legacy: Config = toml::from_str(
+            r#"
+[dam]
+window_ms = 3000
+
+[record]
+dump_raw = true
+"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.event.window_ms, 3000);
+        assert_eq!(legacy.event.min_passthrough_chars, 4);
+        assert!(legacy.record.record_raw);
     }
 }

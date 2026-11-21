@@ -1,44 +1,78 @@
 use crate::config::RecordConfig;
-use crate::model::{RawBiliEvent, now_unix_ms};
+use crate::model::{RawBiliEvent, RoomInfoSnapshot, SessionSummary, now_unix_ms};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, TimeZone};
-use serde_json::json;
+use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-/// Lossless JSONL event recorder mounted pre-filter.
-/// Supports templated filenames and dual-trigger file rotation (room switch + LIVE signal).
+/// Isomorphic JSONL event recorder subscribing to `collector`'s normalized stream,
+/// plus independent sidecar `*_raw.jsonl` capture controlled by `record.record_raw`.
 pub struct Recorder {
     pub enabled: bool,
+    pub record_raw: bool,
     pub output_dir: PathBuf,
     pub filename_pattern: String,
     current_file: Option<BufWriter<File>>,
     current_path: Option<PathBuf>,
+    raw_file: Option<BufWriter<File>>,
+    raw_path: Option<PathBuf>,
     current_room_id: u64,
     current_room_uname: String,
+    current_live_start_time: Option<u64>,
     session_start_ms: u64,
+    last_seq: u64,
+    stats: SessionSummary,
+    session_end_written: bool,
 }
 
 impl Recorder {
     pub fn from_config(cfg: &RecordConfig) -> Self {
         Self::new(
             cfg.enabled,
+            cfg.record_raw,
             PathBuf::from(&cfg.dir),
             cfg.filename_pattern.clone(),
         )
     }
 
-    pub fn new(enabled: bool, output_dir: PathBuf, filename_pattern: String) -> Self {
+    pub fn new(
+        enabled: bool,
+        record_raw: bool,
+        output_dir: PathBuf,
+        filename_pattern: String,
+    ) -> Self {
         Self {
             enabled,
+            record_raw,
             output_dir,
             filename_pattern,
             current_file: None,
             current_path: None,
+            raw_file: None,
+            raw_path: None,
             current_room_id: 0,
             current_room_uname: String::new(),
+            current_live_start_time: None,
             session_start_ms: 0,
+            last_seq: 0,
+            stats: SessionSummary::default(),
+            session_end_written: false,
+        }
+    }
+
+    pub fn is_record_raw_enabled(&self) -> bool {
+        self.record_raw
+    }
+
+    pub fn set_record_raw(&mut self, record_raw: bool) {
+        self.record_raw = record_raw;
+        if !record_raw {
+            if let Some(mut raw_writer) = self.raw_file.take() {
+                let _ = raw_writer.flush();
+            }
+            self.raw_path = None;
         }
     }
 
@@ -76,7 +110,6 @@ impl Recorder {
             .replace("{room_id}", &room_id.to_string());
 
         let formatted = dt.format(&replaced).to_string();
-        // Sanitize once more in case strftime or pattern introduced unexpected chars
         let final_name = Self::sanitize_filename_part(&formatted);
         if final_name.is_empty() {
             format!("dambo_{}.jsonl", room_id)
@@ -85,18 +118,48 @@ impl Recorder {
         }
     }
 
+    fn derive_raw_filename(main_filename: &str) -> String {
+        if let Some(stem) = main_filename.strip_suffix(".jsonl") {
+            format!("{}_raw.jsonl", stem)
+        } else {
+            format!("{}_raw.jsonl", main_filename)
+        }
+    }
+
     pub fn current_path(&self) -> Option<&Path> {
         self.current_path.as_deref()
     }
 
-    /// Flush and close the currently open recording file, if any.
+    pub fn current_raw_path(&self) -> Option<&Path> {
+        self.raw_path.as_deref()
+    }
+
+    /// Write `session_end` summary if an active session is open, then flush and close all writers.
+    pub fn finish_session(&mut self) -> Result<()> {
+        if self.current_file.is_some() && !self.session_end_written {
+            self.write_session_end(now_unix_ms())?;
+        }
+        self.close_writers()
+    }
+
+    /// Flush and close open main & raw writers without emitting `session_end`.
     pub fn close(&mut self) -> Result<()> {
+        self.close_writers()
+    }
+
+    fn close_writers(&mut self) -> Result<()> {
         if let Some(mut writer) = self.current_file.take() {
             writer
                 .flush()
                 .context("Failed to flush JSONL recording file")?;
         }
         self.current_path = None;
+        if let Some(mut raw_writer) = self.raw_file.take() {
+            raw_writer
+                .flush()
+                .context("Failed to flush raw JSONL recording file")?;
+        }
+        self.raw_path = None;
         Ok(())
     }
 
@@ -113,52 +176,91 @@ impl Recorder {
         Ok(())
     }
 
-    /// Rotate recording to a new file for a newly connected/switched room and reset `offset_ms`.
-    /// When joining mid-stream (`is_live == true`), immediately writes an `INIT_LIVE_STATUS` marker line.
-    pub fn rotate_for_room(
-        &mut self,
-        room_id: u64,
-        room_uname: &str,
-        start_ms: u64,
-        is_live: bool,
-    ) -> Result<Option<PathBuf>> {
-        self.close()?;
-        self.current_room_id = room_id;
-        self.current_room_uname = room_uname.to_string();
-        self.session_start_ms = start_ms;
-
-        if !self.enabled || room_id == 0 {
-            return Ok(None);
+    fn write_session_end(&mut self, ts_ms: u64) -> Result<()> {
+        if self.current_file.is_none() || self.session_end_written {
+            return Ok(());
         }
-
-        let path = self.open_new_file(room_id, room_uname, start_ms)?;
-        if is_live {
-            let init_live_ev = RawBiliEvent {
-                offset_ms: 0,
-                timestamp: start_ms,
-                room_id,
-                room_uname: room_uname.to_string(),
-                kind: "live".to_string(),
-                content: "直播中（初始开播状态）".to_string(),
-                raw_cmd: "INIT_LIVE_STATUS".to_string(),
-                raw_data: Some(json!({
-                    "cmd": "INIT_LIVE_STATUS",
-                    "room_id": room_id,
-                    "room_uname": room_uname,
-                    "live_status": 1
-                })),
-                ..Default::default()
-            };
-            self.write_event_line(&init_live_ev)?;
-        }
-        Ok(Some(path))
+        let summary_ev = RawBiliEvent {
+            seq: self.last_seq.saturating_add(1),
+            timestamp: ts_ms,
+            room_id: self.current_room_id,
+            room_uname: self.current_room_uname.clone(),
+            kind: "session_end".to_string(),
+            content: "场次结束汇总".to_string(),
+            summary: Some(self.stats.clone()),
+            raw_cmd: "SESSION_END".to_string(),
+            ..Default::default()
+        };
+        self.write_event_line(&summary_ev)?;
+        self.session_end_written = true;
+        Ok(())
     }
 
-    /// Write a single raw event to the JSONL stream.
-    /// Automatically closes the previous file, opens a fresh file with `offset_ms = 0`,
-    /// and writes the triggering `live` event as Line 1.
+    /// Open a new recording session or continue appending the existing file when `(room_id, start_time)` matches.
+    /// Returns `Ok(true)` if a new session file was opened, `Ok(false)` if continuing the existing session.
+    pub fn open_or_continue_session(
+        &mut self,
+        info: &RoomInfoSnapshot,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let same_session = (self.current_file.is_some() || self.raw_file.is_some())
+            && self.current_room_id == info.room_id
+            && ((info.live_status == 1
+                && info.start_time.is_some()
+                && self.current_live_start_time == info.start_time)
+                || (info.live_status != 1 && self.current_live_start_time.is_none()));
+
+        if same_session {
+            if !info.uname.is_empty() {
+                self.current_room_uname = info.uname.clone();
+            }
+            return Ok(false);
+        }
+
+        self.finish_session()?;
+        self.stats = SessionSummary::default();
+        self.last_seq = 0;
+        self.session_end_written = false;
+        self.current_room_id = info.room_id;
+        self.current_room_uname = info.uname.clone();
+        self.current_live_start_time = if info.live_status == 1 {
+            info.start_time
+        } else {
+            None
+        };
+
+        if info.room_id == 0 || (!self.enabled && !self.record_raw) {
+            return Ok(false);
+        }
+
+        self.session_start_ms = match (info.live_status, info.start_time) {
+            (1, Some(st)) if st > 0 => st.saturating_mul(1000),
+            _ => now_ms,
+        };
+
+        let anchor_ms = self.session_start_ms;
+        if self.enabled {
+            let main_path = self.open_new_main_file(info.room_id, &info.uname, anchor_ms)?;
+            let room_info_ev = info.to_raw_event(now_ms);
+            self.write_event_line(&room_info_ev)?;
+            if self.record_raw {
+                let stem_name = main_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("dambo.jsonl");
+                self.open_raw_file_with_name(&Self::derive_raw_filename(stem_name))?;
+            }
+        } else if self.record_raw {
+            self.open_new_raw_file(info.room_id, &info.uname, anchor_ms)?;
+        }
+
+        Ok(true)
+    }
+
+    /// Write a single normalized event to the main JSONL stream.
+    /// `room_info` opens/continues a session; `preparing` appends `session_end` summary.
     pub fn record_event(&mut self, event: &RawBiliEvent) -> Result<()> {
-        if !self.enabled {
+        if event.kind == "combo_end" {
             return Ok(());
         }
 
@@ -178,29 +280,122 @@ impl Recorder {
             self.current_room_uname.clone()
         };
 
-        if event.kind == "live" {
-            self.close()?;
+        if event.kind == "room_info" {
+            let snap = RoomInfoSnapshot {
+                room_id,
+                short_id: event.short_id.unwrap_or(0),
+                uid: event.uid,
+                uname: room_uname,
+                title: event.title.clone().unwrap_or_else(|| event.content.clone()),
+                area_name: event.area_name.clone().unwrap_or_default(),
+                parent_area_name: event.parent_area_name.clone().unwrap_or_default(),
+                live_status: event.live_status.unwrap_or(0),
+                start_time: event.start_time,
+            };
+            self.open_or_continue_session(&snap, ts)?;
+            return Ok(());
+        }
+
+        if !self.enabled {
+            return Ok(());
+        }
+
+        if event.kind == "live"
+            && (self.current_file.is_none() || self.current_live_start_time.is_none())
+        {
+            self.finish_session()?;
+            self.stats = SessionSummary::default();
+            self.last_seq = 0;
+            self.session_end_written = false;
             self.current_room_id = room_id;
             self.current_room_uname = room_uname.clone();
-            self.session_start_ms = ts;
-            self.open_new_file(room_id, &room_uname, ts)?;
+            let start_sec = event.start_time.filter(|&s| s > 0).unwrap_or(ts / 1000);
+            self.current_live_start_time = Some(start_sec);
+            self.session_start_ms = if event.start_time.is_some_and(|s| s > 0) {
+                start_sec.saturating_mul(1000)
+            } else {
+                ts
+            };
+            let main_path = self.open_new_main_file(room_id, &room_uname, self.session_start_ms)?;
+            if self.record_raw && self.raw_file.is_none() {
+                let stem_name = main_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("dambo.jsonl");
+                self.open_raw_file_with_name(&Self::derive_raw_filename(stem_name))?;
+            }
         } else if self.current_file.is_none() {
             self.current_room_id = room_id;
             self.current_room_uname = room_uname.clone();
             self.session_start_ms = ts;
-            self.open_new_file(room_id, &room_uname, ts)?;
+            self.session_end_written = false;
+            self.open_new_main_file(room_id, &room_uname, ts)?;
         }
 
         if event.timestamp == ts {
-            self.write_event_line(event)
+            self.write_event_line(event)?;
         } else {
             let mut stamped = event.clone();
             stamped.timestamp = ts;
-            self.write_event_line(&stamped)
+            self.write_event_line(&stamped)?;
         }
+
+        self.last_seq = self.last_seq.max(event.seq);
+        match event.kind.as_str() {
+            "chat" => self.stats.chat_count = self.stats.chat_count.saturating_add(1),
+            "like" => self.stats.like_count = self.stats.like_count.saturating_add(1),
+            "guard" => self.stats.guard_count = self.stats.guard_count.saturating_add(1),
+            "gift" => {
+                self.stats.gift_total_coin = self.stats.gift_total_coin.saturating_add(event.price);
+            }
+            "superchat" | "super_chat" => {
+                self.stats.superchat_total_coin =
+                    self.stats.superchat_total_coin.saturating_add(event.price);
+            }
+            "preparing" => {
+                self.write_session_end(ts)?;
+            }
+            _ => {}
+        }
+
+        Ok(())
     }
 
-    fn open_new_file(
+    /// Write an enriched Bilibili raw packet JSON line to `*_raw.jsonl` when `record_raw == true`.
+    pub fn record_raw_json(&mut self, enriched_val: &Value) -> Result<()> {
+        if !self.record_raw {
+            return Ok(());
+        }
+
+        if self.raw_file.is_none() {
+            let ts = if self.session_start_ms > 0 {
+                self.session_start_ms
+            } else {
+                now_unix_ms()
+            };
+            let room_id = self.current_room_id;
+            let room_uname = self.current_room_uname.clone();
+            if let Some(ref main_path) = self.current_path {
+                let stem_name = main_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("dambo.jsonl");
+                self.open_raw_file_with_name(&Self::derive_raw_filename(stem_name))?;
+            } else {
+                self.open_new_raw_file(room_id, &room_uname, ts)?;
+            }
+        }
+
+        if let Some(writer) = self.raw_file.as_mut() {
+            let line = serde_json::to_string(enriched_val)
+                .context("Failed to serialize raw Bilibili JSON")?;
+            writeln!(writer, "{}", line).context("Failed to write raw JSONL line")?;
+            writer.flush().context("Failed to flush raw JSONL line")?;
+        }
+        Ok(())
+    }
+
+    fn open_new_main_file(
         &mut self,
         room_id: u64,
         room_uname: &str,
@@ -225,6 +420,35 @@ impl Recorder {
         self.current_file = Some(BufWriter::new(file));
         self.current_path = Some(target_path.clone());
         log::info!("📼 Recording JSONL to {:?}", target_path);
+        Ok(target_path)
+    }
+
+    fn open_new_raw_file(
+        &mut self,
+        room_id: u64,
+        room_uname: &str,
+        timestamp_ms: u64,
+    ) -> Result<PathBuf> {
+        let dt = Local
+            .timestamp_millis_opt(timestamp_ms as i64)
+            .single()
+            .unwrap_or_else(Local::now);
+        let base_filename = Self::build_filename(&self.filename_pattern, room_id, room_uname, dt);
+        self.open_raw_file_with_name(&Self::derive_raw_filename(&base_filename))
+    }
+
+    fn open_raw_file_with_name(&mut self, raw_filename: &str) -> Result<PathBuf> {
+        fs::create_dir_all(&self.output_dir)
+            .with_context(|| format!("Failed to create recording dir {:?}", self.output_dir))?;
+        let target_path = Self::unique_path(&self.output_dir, raw_filename);
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target_path)
+            .with_context(|| format!("Failed to open raw JSONL file {:?}", target_path))?;
+        self.raw_file = Some(BufWriter::new(file));
+        self.raw_path = Some(target_path.clone());
+        log::info!("📦 Recording raw packets to {:?}", target_path);
         Ok(target_path)
     }
 
@@ -254,13 +478,14 @@ impl Recorder {
 
 impl Drop for Recorder {
     fn drop(&mut self) {
-        let _ = self.close();
+        let _ = self.finish_session();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -277,8 +502,15 @@ mod tests {
         dir
     }
 
-    fn sample_event(kind: &str, timestamp: u64, room_id: u64, room_uname: &str) -> RawBiliEvent {
+    fn sample_event(
+        seq: u64,
+        kind: &str,
+        timestamp: u64,
+        room_id: u64,
+        room_uname: &str,
+    ) -> RawBiliEvent {
         RawBiliEvent {
+            seq,
             offset_ms: 0,
             timestamp,
             room_id,
@@ -289,6 +521,25 @@ mod tests {
             content: format!("content_{}", kind),
             raw_cmd: kind.to_uppercase(),
             ..Default::default()
+        }
+    }
+
+    fn sample_room_info(
+        room_id: u64,
+        uname: &str,
+        live_status: u8,
+        start_time: Option<u64>,
+    ) -> RoomInfoSnapshot {
+        RoomInfoSnapshot {
+            room_id,
+            short_id: 0,
+            uid: 888,
+            uname: uname.to_string(),
+            title: "测试直播间".to_string(),
+            area_name: "虚拟日常".to_string(),
+            parent_area_name: "虚拟主播".to_string(),
+            live_status,
+            start_time,
         }
     }
 
@@ -311,145 +562,111 @@ mod tests {
     }
 
     #[test]
-    fn test_room_switch_rotation_and_offset_reset() {
-        let dir = temp_test_dir("switch");
+    fn test_live_session_anchor_reconnect_continuity_and_summary() {
+        let dir = temp_test_dir("continuity");
         let mut rec = Recorder::new(
             true,
+            false,
             dir.clone(),
             "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string(),
         );
 
-        let path1 = rec
-            .rotate_for_room(100, "主播甲", 1_763_280_000_000, false)
-            .unwrap()
-            .unwrap();
-        rec.record_event(&sample_event("chat", 1_763_280_001_500, 100, "主播甲"))
-            .unwrap();
-
-        let path2 = rec
-            .rotate_for_room(200, "主播乙", 1_763_280_010_000, false)
-            .unwrap()
-            .unwrap();
-        rec.record_event(&sample_event("chat", 1_763_280_012_250, 200, "主播乙"))
-            .unwrap();
-        rec.close().unwrap();
-
-        assert_ne!(path1, path2);
-        let line1: RawBiliEvent =
-            serde_json::from_str(fs::read_to_string(&path1).unwrap().trim()).unwrap();
-        assert_eq!(line1.offset_ms, 1500);
-        assert_eq!(line1.room_id, 100);
-
-        let line2: RawBiliEvent =
-            serde_json::from_str(fs::read_to_string(&path2).unwrap().trim()).unwrap();
-        assert_eq!(line2.offset_ms, 2250);
-        assert_eq!(line2.room_id, 200);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_live_signal_auto_rotation() {
-        let dir = temp_test_dir("live_rot");
-        let mut rec = Recorder::new(
-            true,
-            dir.clone(),
-            "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string(),
+        let info = sample_room_info(21465419, "主播A", 1, Some(1_763_280_000));
+        // Joined mid-stream 5s after start_time
+        assert!(
+            rec.open_or_continue_session(&info, 1_763_280_005_000)
+                .unwrap()
         );
+        let path1 = rec.current_path().unwrap().to_path_buf();
 
-        let pre_live_path = rec
-            .rotate_for_room(21452505, "主播A", 1_763_280_000_000, false)
-            .unwrap()
-            .unwrap();
-        rec.record_event(&sample_event("chat", 1_763_280_005_000, 21452505, "主播A"))
-            .unwrap();
-
-        // LIVE signal should close pre_live_path and open a new file with offset_ms = 0
-        rec.record_event(&sample_event("live", 1_763_280_020_000, 21452505, "主播A"))
-            .unwrap();
-        let live_path = rec.current_path().unwrap().to_path_buf();
-        assert_ne!(pre_live_path, live_path);
-
-        rec.record_event(&sample_event("like", 1_763_280_025_420, 21452505, "主播A"))
-            .unwrap();
-        rec.close().unwrap();
-
-        let pre_content = fs::read_to_string(&pre_live_path).unwrap();
-        let pre_lines: Vec<&str> = pre_content.lines().collect();
-        assert_eq!(pre_lines.len(), 1);
-        let ev_pre: RawBiliEvent = serde_json::from_str(pre_lines[0]).unwrap();
-        assert_eq!(ev_pre.offset_ms, 5000);
-
-        let live_content = fs::read_to_string(&live_path).unwrap();
-        let live_lines: Vec<&str> = live_content.lines().collect();
-        assert_eq!(live_lines.len(), 2);
-        let ev_live: RawBiliEvent = serde_json::from_str(live_lines[0]).unwrap();
-        assert_eq!(ev_live.kind, "live");
-        assert_eq!(ev_live.offset_ms, 0);
-
-        let ev_like: RawBiliEvent = serde_json::from_str(live_lines[1]).unwrap();
-        assert_eq!(ev_like.kind, "like");
-        assert_eq!(ev_like.offset_ms, 5420);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_midstream_join_init_live_marker_and_lossless_guards() {
-        let dir = temp_test_dir("init_live");
-        let mut rec = Recorder::new(
-            true,
-            dir.clone(),
-            "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string(),
+        // Reconnect with identical (room_id, start_time) MUST continue same file without splitting
+        assert!(
+            !rec.open_or_continue_session(&info, 1_763_280_010_000)
+                .unwrap()
         );
+        assert_eq!(rec.current_path().unwrap(), path1.as_path());
 
-        let path = rec
-            .rotate_for_room(21465419, "主播A", 1_763_280_000_000, true)
-            .unwrap()
-            .unwrap();
+        let mut chat = sample_event(1, "chat", 1_763_280_012_000, 21465419, "主播A");
+        chat.raw_cmd = "DANMU_MSG".to_string();
+        rec.record_event(&chat).unwrap();
 
-        // Record both GUARD_BUY (official price) and USER_TOAST_MSG (actual price + payflow_id)
-        let mut guard_buy = sample_event("guard", 1_763_280_002_000, 21465419, "主播A");
-        guard_buy.raw_cmd = "GUARD_BUY".to_string();
-        guard_buy.price = 198000;
-        guard_buy.num = Some(1);
-        guard_buy.guard_level = Some(3);
-        guard_buy.start_time = Some(1763280002);
-        guard_buy.raw_data = Some(json!({"cmd": "GUARD_BUY", "data": {"price": 198000}}));
-        rec.record_event(&guard_buy).unwrap();
+        let like = sample_event(2, "like", 1_763_280_013_000, 21465419, "主播A");
+        rec.record_event(&like).unwrap();
 
-        let mut toast = sample_event("guard", 1_763_280_002_000, 21465419, "主播A");
-        toast.raw_cmd = "USER_TOAST_MSG".to_string();
-        toast.price = 168000;
-        toast.num = Some(1);
-        toast.guard_level = Some(3);
-        toast.payflow_id = Some("pf-123".to_string());
-        toast.start_time = Some(1763280002);
-        toast.raw_data = Some(json!({"cmd": "USER_TOAST_MSG", "data": {"payflow_id": "pf-123"}}));
-        rec.record_event(&toast).unwrap();
-        rec.close().unwrap();
+        let mut gift = sample_event(3, "gift", 1_763_280_014_000, 21465419, "主播A");
+        gift.price = 5000;
+        rec.record_event(&gift).unwrap();
 
-        let content = fs::read_to_string(&path).unwrap();
+        let mut sc = sample_event(4, "superchat", 1_763_280_015_000, 21465419, "主播A");
+        sc.price = 30000;
+        rec.record_event(&sc).unwrap();
+
+        let mut guard = sample_event(5, "guard", 1_763_280_016_000, 21465419, "主播A");
+        guard.price = 168000;
+        rec.record_event(&guard).unwrap();
+
+        // Preparing triggers immediate session_end flush
+        let preparing = sample_event(6, "preparing", 1_763_280_020_000, 21465419, "主播A");
+        rec.record_event(&preparing).unwrap();
+        rec.finish_session().unwrap();
+
+        let content = fs::read_to_string(&path1).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 8);
 
         let line0: RawBiliEvent = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(line0.kind, "live");
-        assert_eq!(line0.raw_cmd, "INIT_LIVE_STATUS");
-        assert_eq!(line0.offset_ms, 0);
-        assert!(line0.raw_data.is_some());
+        assert_eq!(line0.kind, "room_info");
+        assert_eq!(line0.seq, 0);
+        assert_eq!(line0.offset_ms, 5000);
+        assert_eq!(line0.start_time, Some(1_763_280_000));
 
         let line1: RawBiliEvent = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(line1.raw_cmd, "GUARD_BUY");
-        assert_eq!(line1.price, 198000);
-        assert_eq!(line1.guard_level, Some(3));
-        assert!(line1.raw_data.is_some());
+        assert_eq!(line1.kind, "chat");
+        assert_eq!(line1.seq, 1);
+        assert_eq!(line1.offset_ms, 12000);
 
-        let line2: RawBiliEvent = serde_json::from_str(lines[2]).unwrap();
-        assert_eq!(line2.raw_cmd, "USER_TOAST_MSG");
-        assert_eq!(line2.price, 168000);
-        assert_eq!(line2.payflow_id.as_deref(), Some("pf-123"));
-        assert!(line2.raw_data.is_some());
+        let end_ev: RawBiliEvent = serde_json::from_str(lines[7]).unwrap();
+        assert_eq!(end_ev.kind, "session_end");
+        assert_eq!(end_ev.seq, 7);
+        let summary = end_ev.summary.unwrap();
+        assert_eq!(summary.chat_count, 1);
+        assert_eq!(summary.like_count, 1);
+        assert_eq!(summary.guard_count, 1);
+        assert_eq!(summary.gift_total_coin, 5000);
+        assert_eq!(summary.superchat_total_coin, 30000);
+
+        // Ensure no *_raw.jsonl was created when record_raw == false
+        assert!(rec.current_raw_path().is_none());
+        let file_count = fs::read_dir(&dir).unwrap().count();
+        assert_eq!(file_count, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_live_signal_rotation_and_independent_record_raw() {
+        let dir = temp_test_dir("raw_sidecar");
+        let mut rec = Recorder::new(
+            false,
+            true,
+            dir.clone(),
+            "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string(),
+        );
+
+        let info = sample_room_info(21452505, "主播B", 0, None);
+        assert!(
+            rec.open_or_continue_session(&info, 1_763_280_000_000)
+                .unwrap()
+        );
+        assert!(rec.current_path().is_none());
+        let raw_path = rec.current_raw_path().unwrap().to_path_buf();
+
+        rec.record_raw_json(&json!({"cmd": "ONLINE_RANK_COUNT", "data": {"count": 10}}))
+            .unwrap();
+        rec.finish_session().unwrap();
+
+        let raw_text = fs::read_to_string(&raw_path).unwrap();
+        assert!(raw_text.contains("ONLINE_RANK_COUNT"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -457,13 +674,15 @@ mod tests {
     #[test]
     fn test_disabled_recorder_creates_no_files() {
         let dir = temp_test_dir("disabled");
-        let mut rec = Recorder::new(false, dir.clone(), "dambo_{room_name}.jsonl".to_string());
-        assert!(
-            rec.rotate_for_room(123, "主播", 1000, true)
-                .unwrap()
-                .is_none()
+        let mut rec = Recorder::new(
+            false,
+            false,
+            dir.clone(),
+            "dambo_{room_name}.jsonl".to_string(),
         );
-        rec.record_event(&sample_event("live", 2000, 123, "主播"))
+        let info = sample_room_info(123, "主播", 1, Some(1000));
+        assert!(!rec.open_or_continue_session(&info, 1000).unwrap());
+        rec.record_event(&sample_event(1, "live", 2000, 123, "主播"))
             .unwrap();
         assert!(!dir.exists());
     }

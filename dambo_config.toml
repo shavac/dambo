@@ -1,10 +1,7 @@
 [bilibili]
-room_id = 22696954
-history_rooms = [22696954, 21465419, 685026, 23075997, 1773500703, 22924075, 24998481, 30365606, 22748536]
+room_id = 1828676297
+history_rooms = [1828676297, 22696954, 21465419, 685026, 23075997, 1773500703, 22924075, 24998481, 30365606, 22748536]
 session_file = "./etc/dambo_session.json"
-min_gift_coin = 0           # Real-time channel gift filter threshold in gold seeds (1000 = 1 CNY; does not affect recorder)
-ignore_enter = false           # Whether to drop room-enter events in real-time channels (default: false)
-ignore_like = false             # Whether to drop like events in real-time channels (default: true; does not affect recorder)
 avatar_cache_size = 2000       # In-memory LRU cache capacity for uid -> face_url
 
 # Channel A: Real-time feed configuration (serves / OBS overlay and /list web feed)
@@ -13,11 +10,13 @@ max_history = 300              # Max items retained in Snapshot ring buffer
 show_enter = true              # Render viewer enter notifications in frontend themes
 show_medal = true              # Render fan medal badge and level
 
-# Channel B: robao central controller dam stream (ws://localhost:3838/ws/dam)
-[dam]
+# Channel B: robao central controller shaped event stream (ws://localhost:3838/ws/event)
+[event]
 window_ms = 2500               # Reservoir batching window in milliseconds
-dedup_enabled = true           # Deduplicate and count repeated chat messages within window
+dedup_enabled = true           # Deduplicate and count repeated short/emote chat messages within window
 buffer_capacity = 512          # Bounded ingress queue capacity for backpressure protection
+min_passthrough_chars = 4      # Effective char count threshold for 0ms quality-chat passthrough
+max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic batch_combo_id gift aggregation
 
 [server]
 host = "localhost"             # Change to "0.0.0.0" for LAN access (e.g., iPad/mobile /list)
@@ -30,8 +29,9 @@ level = "info"
 path = "./logs"
 
 [record]
-enabled = true                 # Enable lossless JSONL recording (tapped pre-filter)
+enabled = true                 # Enable isomorphic JSONL recording (shared with /ws/event source)
+record_raw = false             # Sidecar raw Bilibili packet capture (*_raw.jsonl with pb_decoded/dm_v2_decoded)
 dir = "./rec"
 # Placeholders: {room_name} (sanitized streamer name), {room_id}, and chrono strftime specifiers
-# Automatically rotates to a new file and resets offset_ms on room switch or LIVE signal
+# Automatically anchors offset_ms and preserves open file across reconnects for the same live session
 filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"

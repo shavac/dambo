@@ -18,11 +18,11 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower_http::services::ServeDir;
 
-/// Shared state for Axum HTTP static serving and dual WebSocket channels (/ws, /ws/dam).
+/// Shared state for Axum HTTP static serving and dual WebSocket channels (`/ws`, `/ws/event`).
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub hub: Arc<StateHub>,
-    pub dam_tx: broadcast::Sender<ChannelBMessage>,
+    pub event_tx: broadcast::Sender<ChannelBMessage>,
     pub html_dir: PathBuf,
 }
 
@@ -138,7 +138,15 @@ async fn ws_channel_b(
 }
 
 async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
-    let mut rx = state.dam_tx.subscribe();
+    let mut rx = state.event_tx.subscribe();
+
+    // Send latest RoomInfo metadata immediately upon connecting to /ws/event
+    let initial_info = ChannelBMessage::RoomInfo(Box::new(state.hub.room_info_event()));
+    if let Ok(json) = serde_json::to_string(&initial_info)
+        && socket.send(Message::Text(json.into())).await.is_err()
+    {
+        return;
+    }
 
     loop {
         tokio::select! {
@@ -152,7 +160,7 @@ async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        log::warn!("/ws/dam client lagged by {} batches", skipped);
+                        log::warn!("/ws/event client lagged by {} batches", skipped);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -168,14 +176,14 @@ async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-/// Build the unified Axum router serving `/`, `/list`, `/static/themes`, `/ws`, and `/ws/dam`.
+/// Build the unified Axum router serving `/`, `/list`, `/static/themes`, `/ws`, and `/ws/event`.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let static_service = ServeDir::new(state.html_dir.clone());
     Router::new()
         .route("/", get(serve_active_theme))
         .route("/list", get(serve_list_page))
         .route("/ws", get(ws_channel_a))
-        .route("/ws/dam", get(ws_channel_b))
+        .route("/ws/event", get(ws_channel_b))
         .nest_service("/static/themes", static_service)
         .layer(middleware::from_fn(no_cache_middleware))
         .with_state(state)
@@ -204,7 +212,7 @@ pub async fn serve(
 mod tests {
     use super::*;
     use crate::config::FeedConfig;
-    use crate::model::{DamBatchData, DamEvent, RawBiliEvent};
+    use crate::model::{EventBatchData, EventItem, RawBiliEvent, RoomInfoSnapshot};
     use futures_util::StreamExt;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -246,19 +254,26 @@ mod tests {
         cfg.server.theme = "default".to_string();
 
         let hub = Arc::new(StateHub::new(&FeedConfig::default()));
-        hub.reset_room(
-            21452505,
-            "主播A".to_string(),
-            "测试直播间".to_string(),
-            true,
+        hub.set_room_info(
+            RoomInfoSnapshot {
+                room_id: 21452505,
+                short_id: 512,
+                uid: 888,
+                uname: "主播A".to_string(),
+                title: "测试直播间".to_string(),
+                area_name: "虚拟日常".to_string(),
+                parent_area_name: "虚拟主播".to_string(),
+                live_status: 1,
+                start_time: Some(1763280000),
+            },
             true,
         );
-        let (dam_tx, _) = broadcast::channel(64);
+        let (event_tx, _) = broadcast::channel(64);
 
         let state = Arc::new(AppState {
             config: Arc::new(RwLock::new(cfg)),
             hub: hub.clone(),
-            dam_tx: dam_tx.clone(),
+            event_tx: event_tx.clone(),
             html_dir: temp_dir.clone(),
         });
 
@@ -327,17 +342,30 @@ mod tests {
             ChannelAMessage::Event(ref item) if item.content == "测试弹幕"
         ));
 
-        // 3. Verify /ws/dam DamBatch forwarding
-        let ws_b_url = format!("ws://{}/ws/dam", addr);
+        // 3. Verify /ws/event initial RoomInfo frame + EventBatch forwarding
+        let ws_b_url = format!("ws://{}/ws/event", addr);
         let (mut ws_b, _) = tokio_tungstenite::connect_async(&ws_b_url).await.unwrap();
-        dam_tx
-            .send(ChannelBMessage::DamBatch(DamBatchData {
+        let room_info_frame = ws_b.next().await.unwrap().unwrap().into_text().unwrap();
+        let parsed_info: ChannelBMessage = serde_json::from_str(&room_info_frame).unwrap();
+        assert!(matches!(
+            parsed_info,
+            ChannelBMessage::RoomInfo(ref info)
+                if info.kind == "room_info"
+                    && info.seq == 0
+                    && info.room_id == 21452505
+                    && info.short_id == Some(512)
+                    && info.live_status == Some(1)
+        ));
+
+        event_tx
+            .send(ChannelBMessage::EventBatch(EventBatchData {
                 batch_id: 1,
                 room_id: 21452505,
                 room_uname: "主播A".to_string(),
                 priority: 0,
                 timestamp: 1763280002500,
-                events: vec![DamEvent {
+                events: vec![EventItem {
+                    seq: 1,
                     kind: "chat".to_string(),
                     uid: 42,
                     uname: "观众甲".to_string(),
@@ -346,15 +374,16 @@ mod tests {
                     count: 5,
                     sample_users: vec!["观众甲".to_string()],
                     price: 0,
+                    ..Default::default()
                 }],
             }))
             .unwrap();
 
-        let dam_frame = ws_b.next().await.unwrap().unwrap().into_text().unwrap();
-        let parsed_dam: ChannelBMessage = serde_json::from_str(&dam_frame).unwrap();
+        let event_frame = ws_b.next().await.unwrap().unwrap().into_text().unwrap();
+        let parsed_event: ChannelBMessage = serde_json::from_str(&event_frame).unwrap();
         assert!(matches!(
-            parsed_dam,
-            ChannelBMessage::DamBatch(ref b) if b.batch_id == 1 && b.events[0].count == 5
+            parsed_event,
+            ChannelBMessage::EventBatch(ref b) if b.batch_id == 1 && b.events[0].count == 5
         ));
 
         cancel.cancel();

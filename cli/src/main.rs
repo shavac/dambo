@@ -10,7 +10,7 @@ use std::time::Duration;
 #[command(
     author = "kshava",
     version = "0.1.0",
-    about = "Bilibili live danmaku collector, lossless recorder, and traffic-shaping dam node"
+    about = "Bilibili live danmaku collector, lossless recorder, and event-shaping node"
 )]
 struct Args {
     /// Path to the dambo TOML configuration file
@@ -24,6 +24,27 @@ struct Args {
     /// Skip interactive terminal QR login check when unauthenticated
     #[arg(long)]
     no_login: bool,
+
+    /// Enable sidecar raw Bilibili packet capture (*_raw.jsonl with pb_decoded/dm_v2_decoded)
+    #[arg(long)]
+    record_raw: bool,
+}
+
+async fn wait_for_shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => res?,
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+    }
+    Ok(())
 }
 
 async fn run_cli_qr_login(runtime: &DamboRuntime) -> bool {
@@ -131,6 +152,10 @@ async fn main() -> Result<()> {
         }
     }
 
+    if args.record_raw {
+        runtime.set_record_raw(true);
+    }
+
     runtime.start().await?;
 
     if let Some(ref target_room) = args.room {
@@ -146,9 +171,9 @@ async fn main() -> Result<()> {
     log::info!("   • OBS Overlay     : {}/", base_http);
     log::info!("   • Danmaku Monitor : {}/list", base_http);
     log::info!("   • Channel A       : {}/ws", base_ws);
-    log::info!("   • Channel B       : {}/ws/dam", base_ws);
+    log::info!("   • Channel B       : {}/ws/event", base_ws);
 
-    tokio::signal::ctrl_c().await?;
+    wait_for_shutdown_signal().await?;
     log::info!("🛑 Shutting down dambo...");
     runtime.shutdown();
     Ok(())

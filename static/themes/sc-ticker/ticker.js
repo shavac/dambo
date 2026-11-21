@@ -21,7 +21,7 @@
     }
 
     function addTickerCard(item) {
-        if (!item || (item.kind !== 'super_chat' && item.kind !== 'guard')) return;
+        if (!item || (item.kind !== 'superchat' && item.kind !== 'super_chat' && item.kind !== 'guard')) return;
         if (item.id && seenIds.has(item.id)) return;
         if (item.id) seenIds.add(item.id);
 
