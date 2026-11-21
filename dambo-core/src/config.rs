@@ -3,7 +3,7 @@ use log;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use toml_edit::{value, Array, DocumentMut, Item, Value};
+use toml_edit::{Array, DocumentMut, Item, Value, value};
 
 #[derive(Clone, Debug)]
 pub struct ConfigManager {
@@ -22,8 +22,9 @@ impl ConfigManager {
         if self.path.exists() {
             let content = fs::read_to_string(&self.path)
                 .with_context(|| format!("Failed to read config file at {:?}", self.path))?;
-            let config: Config = toml::from_str(&content)
-                .with_context(|| format!("Failed to parse TOML configuration from {:?}", self.path))?;
+            let config: Config = toml::from_str(&content).with_context(|| {
+                format!("Failed to parse TOML configuration from {:?}", self.path)
+            })?;
             Ok(config)
         } else {
             Err(anyhow::anyhow!(
@@ -60,7 +61,12 @@ impl ConfigManager {
         fs::write(&self.path, doc.to_string())
             .with_context(|| format!("Failed to write updated TOML back to {:?}", self.path))?;
 
-        log::info!("💾 Room updated to {} (history: {:?}) in {:?}", new_room_id, history_rooms, self.path);
+        log::info!(
+            "💾 Room updated to {} (history: {:?}) in {:?}",
+            new_room_id,
+            history_rooms,
+            self.path
+        );
         Ok(())
     }
 
@@ -259,22 +265,54 @@ impl Default for RecordConfig {
     }
 }
 
-fn default_false() -> bool { false }
-fn default_true() -> bool { true }
-fn default_session_file() -> String { "./dambo_session.json".to_string() }
-fn default_min_gift_coin() -> u64 { 1000 }
-fn default_avatar_cache_size() -> usize { 2000 }
-fn default_max_history() -> usize { 300 }
-fn default_window_ms() -> u64 { 2500 }
-fn default_buffer_capacity() -> usize { 512 }
-fn default_host() -> String { "localhost".to_string() }
-fn default_port() -> u16 { 3838 }
-fn default_html_dir() -> String { "static/themes".to_string() }
-fn default_theme() -> String { "default".to_string() }
-fn default_log_level() -> String { "info".to_string() }
-fn default_log_path() -> String { "./logs".to_string() }
-fn default_record_dir() -> String { "./rec".to_string() }
-fn default_filename_pattern() -> String { "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string() }
+fn default_false() -> bool {
+    false
+}
+fn default_true() -> bool {
+    true
+}
+fn default_session_file() -> String {
+    "./dambo_session.json".to_string()
+}
+fn default_min_gift_coin() -> u64 {
+    1000
+}
+fn default_avatar_cache_size() -> usize {
+    2000
+}
+fn default_max_history() -> usize {
+    300
+}
+fn default_window_ms() -> u64 {
+    2500
+}
+fn default_buffer_capacity() -> usize {
+    512
+}
+fn default_host() -> String {
+    "localhost".to_string()
+}
+fn default_port() -> u16 {
+    3838
+}
+fn default_html_dir() -> String {
+    "static/themes".to_string()
+}
+fn default_theme() -> String {
+    "default".to_string()
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_log_path() -> String {
+    "./logs".to_string()
+}
+fn default_record_dir() -> String {
+    "./rec".to_string()
+}
+fn default_filename_pattern() -> String {
+    "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string()
+}
 
 #[cfg(test)]
 mod tests {

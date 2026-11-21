@@ -92,24 +92,27 @@ dambo/
 
 3.3 全量事件无损录制与场次轮转（Recorder）
 
-⚬ 挂载点前移（Pre-Filter Tap）：recorder 直接订阅 collector 产出的原始标准化事件流，不受下游降噪过滤器（如点赞屏蔽、低价值礼物过滤）影响，以流式追加写 JSONL 的方式完整落盘直播间发生的一切动态。
+⚬ 挂载点前移（Pre-Filter Tap）：recorder 直接订阅 collector 产出的原始标准化事件流，不受下游降噪过滤器（如点赞屏蔽、低价值礼物过滤、大航海去重及 raw 指令拦截）影响，以流式追加写 JSONL 的方式完整落盘直播间发生的一切动态——包括同时无损保留 `GUARD_BUY`（官方原价）与 `USER_TOAST_MSG` / `USER_TOAST_MSG_V2`（实付价及订单流水号），以及未映射的原始 B 站指令（`kind: "raw"`，完整保留 `raw_cmd` 与 `raw_data` 原始 JSON 节点）。
 ⚬ 可配置命名模板与安全清洗：
   ⚬ 支持在 record.filename_pattern 中使用 {room_name}（主播名）、{room_id}（房间号）以及标准时间格式占位符（如 %Y%m%d_%H%M%S），默认格式为 dambo_{room_name}_%Y%m%d_%H%M%S.jsonl（确保文件名必然包含房间名称与时间戳）。
   ⚬ 创建文件时自动过滤 {room_name} 中的跨平台文件系统非法字符（/ \ : * ? " < > | 及控制字符统一替换为 _）；若尚未获取到主播名则自动回退使用 {room_id}。
-⚬ 双触发自动轮转（File Rotation）：
-  1. 连接 / 切换房间：关闭当前正在写入的录制文件，在完成新房间初始化并拿到房间名后立即创建新文件，同时将 offset_ms 计时起点归零。
-  2. 收到开播信令（LIVE）：若程序在开播前已挂机进入直播间，一旦收到 live（LIVE）事件，立即刷盘关闭开播前的过渡文件，重置 offset_ms = 0 并创建新的正式开播录制文件（该 live 事件作为新文件的第一行写入）。
+⚬ 双触发自动轮转与开播标记（File Rotation）：
+  1. 连接 / 切换房间：关闭当前正在写入的录制文件，在完成新房间初始化并拿到房间名后立即创建新文件，同时将 offset_ms 计时起点归零；若建连初始化时 HTTP 接口返回 `live_status == 1`（中途进房，长连不会补发 `LIVE`），则在新建文件首行写入一条 `raw_cmd: "INIT_LIVE_STATUS"` 的 `live` 状态标记（`offset_ms = 0`），便于离线分析识别开播状态。
+  2. 收到开播信令（LIVE）：若程序在开播前已挂机进入直播间，一旦收到 `kind == "live"` 事件，严格按照「先刷盘关闭旧文件 -> 创建新的正式开播 JSONL 文件并重置 `offset_ms = 0` -> 将触发轮转的当前这条 `live` 事件作为新文件第 1 行写入」的顺序执行，严禁吞掉开播信令本身。
 ⚬ 覆盖的完整事件类型（kind）：
-  ⚬ 直播间状态与系统事件：live（主播开播 LIVE）、preparing（主播下播/轮播 PREPARING）、room_change（标题/分区修改 ROOM_CHANGE）、room_block（用户被禁言 ROOM_BLOCK_MSG）、warning（超管警告 WARNING）、cut_off（超管切断 CUT_OFF）。
-  ⚬ 观众互动事件：chat（弹幕）、super_chat（醒目留言）、gift（全部礼物，含免费小心心）、guard（大航海/上舰）、enter（进场）、follow（关注）、share（分享）、like（点赞）。
-⚬ 时间轴双字段：每条 JSONL 记录同时包含 offset_ms（相对当前录制文件开启时刻的毫秒偏移，便于离线仿真 1:1 回放与 robabel .srt 对齐）和 timestamp（13 位本机 Unix 毫秒时间戳）。
+  ⚬ 直播间状态与系统事件：live（主播开播 LIVE 或中途进房 INIT_LIVE_STATUS）、preparing（主播下播 PREPARING，区分 `直播结束` 与 `round == 1` 时的 `直播结束（进入轮播）`）、room_change（标题/分区修改 ROOM_CHANGE）、room_block（用户被禁言 ROOM_BLOCK_MSG）、warning（超管警告 WARNING）、cut_off（超管切断 CUT_OFF）。
+  ⚬ 观众互动事件：chat（弹幕）、super_chat（醒目留言）、gift（全部礼物，含数量 `num` 与免费小心心）、guard（大航海/上舰，完整记录 `GUARD_BUY` 与 `USER_TOAST_MSG`/`V2`）、enter（进场）、follow（关注）、share（分享）、like（点赞）、raw（兜底未映射的原始 B 站指令，仅写入录制文件）。
+⚬ 时间轴双字段：每条 JSONL 记录同时包含 offset_ms（相对当前录制文件开启时刻的毫秒偏移，便于离线仿真 1:1 回放与 robabel .srt 对齐）和 timestamp（13 位本机 Unix 毫秒时间戳），并可选附带 `num`、`guard_level`、`payflow_id`、`start_time` 及原始载荷 `raw_data`。
 
 3.4 入口过滤与观众头像提取策略（Filter）
 
-⚬ 实时通道降噪过滤：仅作用于下游通道 A 与通道 B——默认不剔除进场信令（ignore_enter = false），默认屏蔽点赞（ignore_like = true）与低于 min_gift_coin（默认 1000 金瓜子 = 1 元）的免费礼物；房间状态事件（live、preparing、room_change）默认放行。
+⚬ 实时通道降噪与原始指令隔离：仅作用于下游通道 A 与通道 B——默认不剔除进场信令（ignore_enter = false），默认屏蔽点赞（ignore_like = true）、低于 min_gift_coin（默认 1000 金瓜子 = 1 元）的免费礼物，以及所有兜底原始指令（`kind == "raw"`）；房间状态事件（live、preparing、room_change、warning、cut_off）默认放行。在投递到通道 A（`/ws`）与通道 B（`/ws/dam`）前统一剥离 `raw_data` 原始 JSON 节点，避免增大 WebSocket 传输体积。
+⚬ 实时通道大航海去重：
+  ⚬ 拦截所有 `raw_cmd == "GUARD_BUY"` 的事件，阻止其进入 `/ws`（`hub.rs`）和 `/ws/dam`（`dam_engine.rs`）。
+  ⚬ 仅放行 `USER_TOAST_MSG` 与 `USER_TOAST_MSG_V2`（要求 `guard_level > 0`），并在 `filter.rs` 中维护容量为 256 的内存 LRU 集合，按唯一订单流水号 `payflow_id` 执行幂等去重；严禁使用 `price` 关联同一性（因 `GUARD_BUY` 为官方原价，`USER_TOAST_MSG` 为用户实付价）。
 ⚬ 零风控头像提取与 LRU 缓存：
-  ⚬ 从 DANMU_MSG（优先解析 info[0][15].user.base.face，兼容 dm_v2）、SUPER_CHAT_MESSAGE（data.user_info.face）、SEND_GIFT（data.face）、GUARD_BUY（data.face）中直接提取头像 URL。
-  ⚬ 严禁调用 HTTP 用户信息接口反查头像。在 filter.rs 中维护固定容量（如 2,000 条）的内存 LRU 缓存 uid -> face_url，当已知用户后续触发无头像的 INTERACT_WORD 进场事件时自动补全头像；未知用户留空由前端渲染默认占位图。
+  ⚬ 从 DANMU_MSG（优先解析 info[0][15].user.base.face，兼容 dm_v2）、SUPER_CHAT_MESSAGE（data.user_info.face）、SEND_GIFT（data.face）、GUARD_BUY（data.face）与 USER_TOAST_MSG 中直接提取头像 URL（LRU 维护在过滤拦截之前执行，确保被拦截的 `GUARD_BUY` 或免费礼物也能预热头像缓存）。
+  ⚬ 严禁调用 HTTP 用户信息接口反查头像。在 filter.rs 中维护固定容量（如 2,000 条）的内存 LRU 缓存 uid -> face_url，当已知用户后续触发无头像的 INTERACT_WORD 或 USER_TOAST_MSG 事件时自动补全头像；未知用户留空由前端渲染默认占位图。
 
 3.5 基于 axum 的双通道输出架构（端口 3838）
 
@@ -194,11 +197,14 @@ filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 
 6.1 本地全量录制格式（./rec/dambo_主播A_YYYYMMDD_HHMMSS.jsonl）
 
-按行追加写入，覆盖直播间 100% 事件（含 live、preparing、room_change、room_block、warning、cut_off、chat、super_chat、gift、guard、enter、follow、share、like）：
+按行追加写入，覆盖直播间 100% 事件（含 live、preparing、room_change、room_block、warning、cut_off、chat、super_chat、gift、guard、enter、follow、share、like、raw），并可选附带 `num`（礼物/大航海数量或月数）、`guard_level`（`1` 总督 / `2` 提督 / `3` 舰长）、`payflow_id`（`USER_TOAST_MSG` / `V2` 订单流水号）、`start_time`（大航海生效秒级时间戳）及 `raw_data`（完整原始 B 站 JSON 节点）：
 
-{"offset_ms":0,"timestamp":1763280000000,"room_id":21452505,"room_uname":"主播A","kind":"live","uid":0,"uname":"","content":"直播开始","price":0,"raw_cmd":"LIVE"}
-{"offset_ms":1234,"timestamp":1763280001234,"room_id":21452505,"room_uname":"主播A","kind":"chat","uid":3829104,"uname":"观众甲","face":"[https://i0.hdslb.com/bfs/face/example.jpg](https://i0.hdslb.com/bfs/face/example.jpg)","medal_name":"星光","medal_level":12,"content":"这波操作太细节了","price":0,"raw_cmd":"DANMU_MSG"}
-{"offset_ms":5420,"timestamp":1763280005420,"room_id":21452505,"room_uname":"主播A","kind":"like","uid":9918273,"uname":"老粉丁","content":"为主播点赞了","price":0,"raw_cmd":"LIKE_INFO_V3_CLICK"}
+{"offset_ms":0,"timestamp":1763280000000,"room_id":21452505,"room_uname":"主播A","kind":"live","uid":0,"uname":"","content":"直播中（初始开播状态）","price":0,"raw_cmd":"INIT_LIVE_STATUS","raw_data":{"cmd":"INIT_LIVE_STATUS","live_status":1,"room_id":21452505,"room_uname":"主播A"}}
+{"offset_ms":1234,"timestamp":1763280001234,"room_id":21452505,"room_uname":"主播A","kind":"chat","uid":3829104,"uname":"观众甲","face":"https://i0.hdslb.com/bfs/face/example.jpg","medal_name":"星光","medal_level":12,"content":"这波操作太细节了","price":0,"raw_cmd":"DANMU_MSG","raw_data":{"cmd":"DANMU_MSG","info":[]}}
+{"offset_ms":3100,"timestamp":1763280003100,"room_id":21452505,"room_uname":"主播A","kind":"gift","uid":3829104,"uname":"观众甲","content":"辣条 x3","price":300,"num":3,"raw_cmd":"SEND_GIFT","raw_data":{"cmd":"SEND_GIFT","data":{"giftName":"辣条","num":3}}}
+{"offset_ms":4200,"timestamp":1763280004200,"room_id":21452505,"room_uname":"主播A","kind":"guard","uid":31839477,"uname":"舰长粉","content":"舰长","price":198000,"num":1,"guard_level":3,"start_time":1763280004,"raw_cmd":"GUARD_BUY","raw_data":{"cmd":"GUARD_BUY","data":{"guard_level":3,"num":1,"price":198000,"start_time":1763280004}}}
+{"offset_ms":4200,"timestamp":1763280004200,"room_id":21452505,"room_uname":"主播A","kind":"guard","uid":31839477,"uname":"舰长粉","content":"在主播的直播间开通了舰长","price":168000,"num":1,"guard_level":3,"payflow_id":"2611210800123456","start_time":1763280004,"raw_cmd":"USER_TOAST_MSG","raw_data":{"cmd":"USER_TOAST_MSG","data":{"guard_level":3,"num":1,"payflow_id":"2611210800123456","price":168000}}}
+{"offset_ms":5420,"timestamp":1763280005420,"room_id":21452505,"room_uname":"主播A","kind":"like","uid":9918273,"uname":"老粉丁","content":"为主播点赞了","price":0,"raw_cmd":"LIKE_INFO_V3_CLICK","raw_data":{"cmd":"LIKE_INFO_V3_CLICK","data":{"uid":9918273}}}
 
 
 6.2 通道 A：ws://<host>:3838/ws（面向 / OBS 挂件与 /list 网页列表；dambo-ui 解耦走原生 IPC）

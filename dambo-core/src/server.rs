@@ -2,14 +2,14 @@ use crate::config::Config;
 use crate::hub::StateHub;
 use crate::model::{ChannelAMessage, ChannelBMessage};
 use anyhow::{Context, Result};
+use axum::Router;
 use axum::body::Body;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
-use http::{header, HeaderValue, Request, StatusCode};
+use http::{HeaderValue, Request, StatusCode, header};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -27,10 +27,7 @@ pub struct AppState {
 }
 
 fn is_valid_theme_name(theme: &str) -> bool {
-    !theme.is_empty()
-        && !theme.contains("..")
-        && !theme.contains('/')
-        && !theme.contains('\\')
+    !theme.is_empty() && !theme.contains("..") && !theme.contains('/') && !theme.contains('\\')
 }
 
 async fn no_cache_middleware(req: Request<Body>, next: Next) -> Response {
@@ -93,10 +90,10 @@ async fn handle_ws_a(mut socket: WebSocket, state: Arc<AppState>) {
 
     // Send initial Snapshot frame immediately upon connection
     let initial = ChannelAMessage::Snapshot(state.hub.snapshot());
-    if let Ok(json) = serde_json::to_string(&initial) {
-        if socket.send(Message::Text(json.into())).await.is_err() {
-            return;
-        }
+    if let Ok(json) = serde_json::to_string(&initial)
+        && socket.send(Message::Text(json.into())).await.is_err()
+    {
+        return;
     }
 
     loop {
@@ -104,19 +101,19 @@ async fn handle_ws_a(mut socket: WebSocket, state: Arc<AppState>) {
             recv = rx.recv() => {
                 match recv {
                     Ok(msg) => {
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json.into())).await.is_err() {
-                                break;
-                            }
+                        if let Ok(json) = serde_json::to_string(&msg)
+                            && socket.send(Message::Text(json.into())).await.is_err()
+                        {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         log::warn!("/ws client lagged by {} messages, resending Snapshot", skipped);
                         let fresh = ChannelAMessage::Snapshot(state.hub.snapshot());
-                        if let Ok(json) = serde_json::to_string(&fresh) {
-                            if socket.send(Message::Text(json.into())).await.is_err() {
-                                break;
-                            }
+                        if let Ok(json) = serde_json::to_string(&fresh)
+                            && socket.send(Message::Text(json.into())).await.is_err()
+                        {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -148,10 +145,10 @@ async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
             recv = rx.recv() => {
                 match recv {
                     Ok(msg) => {
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if socket.send(Message::Text(json.into())).await.is_err() {
-                                break;
-                            }
+                        if let Ok(json) = serde_json::to_string(&msg)
+                            && socket.send(Message::Text(json.into())).await.is_err()
+                        {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -231,11 +228,16 @@ mod tests {
     #[tokio::test]
     async fn test_http_static_nocache_and_dual_ws() {
         let id = SERVER_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let temp_dir = std::env::temp_dir().join(format!("dambo_srv_test_{}_{}", std::process::id(), id));
+        let temp_dir =
+            std::env::temp_dir().join(format!("dambo_srv_test_{}_{}", std::process::id(), id));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(temp_dir.join("default")).unwrap();
         fs::create_dir_all(temp_dir.join("list")).unwrap();
-        fs::write(temp_dir.join("default/index.html"), "<html>OBS Default</html>").unwrap();
+        fs::write(
+            temp_dir.join("default/index.html"),
+            "<html>OBS Default</html>",
+        )
+        .unwrap();
         fs::write(temp_dir.join("default/style.css"), "body { color: white; }").unwrap();
         fs::write(temp_dir.join("list/index.html"), "<html>Feed List</html>").unwrap();
 
@@ -244,7 +246,13 @@ mod tests {
         cfg.server.theme = "default".to_string();
 
         let hub = Arc::new(StateHub::new(&FeedConfig::default()));
-        hub.reset_room(21452505, "主播A".to_string(), "测试直播间".to_string(), true, true);
+        hub.reset_room(
+            21452505,
+            "主播A".to_string(),
+            "测试直播间".to_string(),
+            true,
+            true,
+        );
         let (dam_tx, _) = broadcast::channel(64);
 
         let state = Arc::new(AppState {
@@ -269,7 +277,11 @@ mod tests {
         // 1. Verify GET /, GET /list, and GET /static/themes/default/style.css + no-cache headers
         let root_res = http_get_raw(addr, "/").await;
         assert!(root_res.contains("200 OK"));
-        assert!(root_res.to_lowercase().contains("cache-control: no-store, no-cache, must-revalidate"));
+        assert!(
+            root_res
+                .to_lowercase()
+                .contains("cache-control: no-store, no-cache, must-revalidate")
+        );
         assert!(root_res.contains("OBS Default"));
 
         let list_res = http_get_raw(addr, "/list").await;
@@ -278,7 +290,11 @@ mod tests {
 
         let css_res = http_get_raw(addr, "/static/themes/default/style.css").await;
         assert!(css_res.contains("200 OK"));
-        assert!(css_res.to_lowercase().contains("cache-control: no-store, no-cache, must-revalidate"));
+        assert!(
+            css_res
+                .to_lowercase()
+                .contains("cache-control: no-store, no-cache, must-revalidate")
+        );
         assert!(css_res.contains("body { color: white; }"));
 
         // 2. Verify /ws Snapshot + real-time Event
@@ -299,14 +315,9 @@ mod tests {
             kind: "chat".to_string(),
             uid: 42,
             uname: "观众甲".to_string(),
-            face: None,
-            medal_name: None,
-            medal_level: None,
             content: "测试弹幕".to_string(),
-            emoticon: None,
-            emots: None,
-            price: 0,
             raw_cmd: "DANMU_MSG".to_string(),
+            ..Default::default()
         });
 
         let second_frame = ws_a.next().await.unwrap().unwrap().into_text().unwrap();

@@ -9,7 +9,7 @@ pub mod recorder;
 pub mod server;
 
 use crate::auth::AuthManager;
-use crate::collector::{parse_room_input, CollectorContext, CollectorManager};
+use crate::collector::{CollectorContext, CollectorManager, parse_room_input};
 use crate::config::{Config, ConfigManager};
 use crate::dam_engine::DamEngine;
 use crate::filter::EventFilter;
@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::recorder::Recorder;
 use crate::server::AppState;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -43,10 +43,10 @@ fn resolve_bind_addr(host: &str, port: u16) -> SocketAddr {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return SocketAddr::new(ip, port);
     }
-    if let Ok(mut addrs) = (host, port).to_socket_addrs() {
-        if let Some(addr) = addrs.next() {
-            return addr;
-        }
+    if let Ok(mut addrs) = (host, port).to_socket_addrs()
+        && let Some(addr) = addrs.next()
+    {
+        return addr;
     }
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
@@ -139,20 +139,22 @@ impl DamboRuntime {
                     recv = raw_rx.recv() => {
                         match recv {
                             Ok(raw_ev) => {
-                                // Pre-Filter Tap: lossless recording of 100% raw events
-                                if let Ok(mut rec) = recorder.lock() {
-                                    if let Err(e) = rec.record_event(&raw_ev) {
-                                        log::error!("Recorder write failed: {}", e);
-                                    }
+                                // Pre-Filter Tap: lossless recording of 100% raw events (including raw_data)
+                                if let Ok(mut rec) = recorder.lock()
+                                    && let Err(e) = rec.record_event(&raw_ev)
+                                {
+                                    log::error!("Recorder write failed: {}", e);
                                 }
 
-                                // Real-time filter + LRU avatar backfill
+                                // Real-time filter + guard payflow dedup + LRU avatar backfill
                                 let passed = {
                                     let mut flt = filter.lock().expect("Filter Mutex poisoned");
                                     flt.process(raw_ev)
                                 };
 
-                                if let Some(ev) = passed {
+                                if let Some(mut ev) = passed {
+                                    // Strip heavy raw_data payload before Channel A (/ws) & Channel B (/ws/dam)
+                                    ev.raw_data = None;
                                     hub.push_event(&ev);
                                     dam.enqueue(ev);
                                 }
@@ -279,7 +281,11 @@ impl DamboRuntime {
 
         let theme_index = self.html_dir.join(clean).join("index.html");
         if !theme_index.exists() {
-            return Err(anyhow!("Theme '{}' does not exist at {:?}", clean, theme_index));
+            return Err(anyhow!(
+                "Theme '{}' does not exist at {:?}",
+                clean,
+                theme_index
+            ));
         }
 
         {
@@ -298,12 +304,12 @@ impl DamboRuntime {
         if let Ok(entries) = fs::read_dir(&self.html_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
-                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                        if name != "list" && path.join("index.html").exists() {
-                            themes.push(name.to_string());
-                        }
-                    }
+                if path.is_dir()
+                    && let Some(name) = path.file_name().and_then(|s| s.to_str())
+                    && name != "list"
+                    && path.join("index.html").exists()
+                {
+                    themes.push(name.to_string());
                 }
             }
         }
@@ -406,9 +412,21 @@ mod tests {
         fs::create_dir_all(temp_dir.join("static/themes/default")).unwrap();
         fs::create_dir_all(temp_dir.join("static/themes/sc-ticker")).unwrap();
         fs::create_dir_all(temp_dir.join("static/themes/list")).unwrap();
-        fs::write(temp_dir.join("static/themes/default/index.html"), "<html>d</html>").unwrap();
-        fs::write(temp_dir.join("static/themes/sc-ticker/index.html"), "<html>s</html>").unwrap();
-        fs::write(temp_dir.join("static/themes/list/index.html"), "<html>l</html>").unwrap();
+        fs::write(
+            temp_dir.join("static/themes/default/index.html"),
+            "<html>d</html>",
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.join("static/themes/sc-ticker/index.html"),
+            "<html>s</html>",
+        )
+        .unwrap();
+        fs::write(
+            temp_dir.join("static/themes/list/index.html"),
+            "<html>l</html>",
+        )
+        .unwrap();
 
         let cfg_path = temp_dir.join("dambo_config.toml");
         fs::write(
@@ -421,7 +439,10 @@ mod tests {
         assert_eq!(rt.list_themes(), vec!["default", "sc-ticker"]);
         rt.start().await.unwrap();
 
-        let room_id = rt.switch_room("https://live.bilibili.com/21452505?from=test").await.unwrap();
+        let room_id = rt
+            .switch_room("https://live.bilibili.com/21452505?from=test")
+            .await
+            .unwrap();
         assert_eq!(room_id, 21452505);
 
         // Cancel live collector network loop so internet-enabled CI runners never race synthetic assertions
@@ -430,7 +451,13 @@ mod tests {
         if rt.rec_dir.exists() {
             let _ = fs::remove_dir_all(&rt.rec_dir);
         }
-        rt.hub.reset_room(21452505, "主播A".to_string(), "测试".to_string(), true, true);
+        rt.hub.reset_room(
+            21452505,
+            "主播A".to_string(),
+            "测试".to_string(),
+            true,
+            true,
+        );
         rt.dam_engine.set_room(21452505, "主播A".to_string());
 
         let mut dam_rx = rt.subscribe_dam();
@@ -444,14 +471,10 @@ mod tests {
             kind: "like".to_string(),
             uid: 11,
             uname: "点赞粉".to_string(),
-            face: None,
-            medal_name: None,
-            medal_level: None,
             content: "点赞".to_string(),
-            emoticon: None,
-            emots: None,
             price: 0,
             raw_cmd: "LIKE_INFO_V3_CLICK".to_string(),
+            ..Default::default()
         };
         let sc_ev = RawBiliEvent {
             offset_ms: 0,
@@ -465,10 +488,9 @@ mod tests {
             medal_name: Some("星光".to_string()),
             medal_level: Some(15),
             content: "支持一下".to_string(),
-            emoticon: None,
-            emots: None,
             price: 30000,
             raw_cmd: "SUPER_CHAT_MESSAGE".to_string(),
+            ..Default::default()
         };
 
         rt.collector.inject_event(like_ev);
@@ -503,6 +525,146 @@ mod tests {
         assert_eq!(content.lines().count(), 2);
         assert!(content.contains("\"kind\":\"like\""));
         assert!(content.contains("\"kind\":\"super_chat\""));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_lossless_guard_and_raw_strip() {
+        let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_dir =
+            std::env::temp_dir().join(format!("dambo_rt_guard_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("static/themes/default")).unwrap();
+        fs::write(
+            temp_dir.join("static/themes/default/index.html"),
+            "<html>d</html>",
+        )
+        .unwrap();
+
+        let cfg_path = temp_dir.join("dambo_config.toml");
+        fs::write(
+            &cfg_path,
+            "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\n[dam]\nwindow_ms = 60\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n",
+        )
+        .unwrap();
+
+        let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        rt.start().await.unwrap();
+        rt.hub.reset_room(
+            21465419,
+            "主播A".to_string(),
+            "测试".to_string(),
+            true,
+            true,
+        );
+        rt.dam_engine.set_room(21465419, "主播A".to_string());
+
+        let mut dam_rx = rt.subscribe_dam();
+
+        let guard_buy = RawBiliEvent {
+            timestamp: 1763280001000,
+            room_id: 21465419,
+            room_uname: "主播A".to_string(),
+            kind: "guard".to_string(),
+            uid: 31839477,
+            uname: "舰长粉".to_string(),
+            content: "舰长".to_string(),
+            price: 198000,
+            num: Some(1),
+            guard_level: Some(3),
+            start_time: Some(1763280001),
+            raw_cmd: "GUARD_BUY".to_string(),
+            raw_data: Some(serde_json::json!({"cmd": "GUARD_BUY", "data": {"price": 198000}})),
+            ..Default::default()
+        };
+        let toast_v1 = RawBiliEvent {
+            timestamp: 1763280001000,
+            room_id: 21465419,
+            room_uname: "主播A".to_string(),
+            kind: "guard".to_string(),
+            uid: 31839477,
+            uname: "舰长粉".to_string(),
+            content: "在主播房间开通了舰长".to_string(),
+            price: 168000,
+            num: Some(1),
+            guard_level: Some(3),
+            payflow_id: Some("pf-100".to_string()),
+            start_time: Some(1763280001),
+            raw_cmd: "USER_TOAST_MSG".to_string(),
+            raw_data: Some(
+                serde_json::json!({"cmd": "USER_TOAST_MSG", "data": {"payflow_id": "pf-100"}}),
+            ),
+            ..Default::default()
+        };
+        let toast_v2_dup = RawBiliEvent {
+            timestamp: 1763280001100,
+            raw_cmd: "USER_TOAST_MSG_V2".to_string(),
+            raw_data: Some(
+                serde_json::json!({"cmd": "USER_TOAST_MSG_V2", "data": {"payflow_id": "pf-100"}}),
+            ),
+            ..toast_v1.clone()
+        };
+        let raw_ev = RawBiliEvent {
+            timestamp: 1763280001200,
+            room_id: 21465419,
+            room_uname: "主播A".to_string(),
+            kind: "raw".to_string(),
+            raw_cmd: "ONLINE_RANK_COUNT".to_string(),
+            raw_data: Some(serde_json::json!({"cmd": "ONLINE_RANK_COUNT", "data": {"count": 42}})),
+            ..Default::default()
+        };
+
+        rt.collector.inject_event(guard_buy);
+        rt.collector.inject_event(toast_v1);
+        rt.collector.inject_event(toast_v2_dup);
+        rt.collector.inject_event(raw_ev);
+
+        let ChannelBMessage::DamBatch(batch) =
+            tokio::time::timeout(Duration::from_secs(2), dam_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(batch.priority, 2);
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0].kind, "guard");
+        assert_eq!(batch.events[0].price, 168000);
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        // Verify no second DamBatch was emitted for GUARD_BUY, duplicate payflow_id, or raw
+        assert!(dam_rx.try_recv().is_err());
+
+        let dam_json = serde_json::to_string(&ChannelBMessage::DamBatch(batch)).unwrap();
+        assert!(!dam_json.contains("raw_data"));
+
+        let snap = rt.hub.snapshot();
+        assert_eq!(snap.items.len(), 1);
+        assert_eq!(snap.items[0].kind, "guard");
+        assert_eq!(snap.items[0].price, 168000);
+        let snap_json = serde_json::to_string(&snap).unwrap();
+        assert!(!snap_json.contains("raw_data"));
+
+        rt.shutdown();
+
+        // Recorder captures all 4 pre-filter events losslessly with raw_data and structured fields
+        let rec_files: Vec<_> = fs::read_dir(&rt.rec_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(rec_files.len(), 1);
+        let content = fs::read_to_string(rec_files[0].path()).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("\"raw_cmd\":\"GUARD_BUY\""));
+        assert!(lines[0].contains("\"raw_data\""));
+        assert!(lines[1].contains("\"raw_cmd\":\"USER_TOAST_MSG\""));
+        assert!(lines[1].contains("\"payflow_id\":\"pf-100\""));
+        assert!(lines[1].contains("\"guard_level\":3"));
+        assert!(lines[1].contains("\"num\":1"));
+        assert!(lines[1].contains("\"start_time\":1763280001"));
+        assert!(lines[2].contains("\"raw_cmd\":\"USER_TOAST_MSG_V2\""));
+        assert!(lines[3].contains("\"raw_cmd\":\"ONLINE_RANK_COUNT\""));
+        assert!(lines[3].contains("\"kind\":\"raw\""));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

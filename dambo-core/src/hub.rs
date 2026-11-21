@@ -121,15 +121,15 @@ impl StateHub {
             let mut next = guard.room_state.clone();
             next.is_live = is_live;
             next.connected = connected;
-            if let Some(uname) = room_uname {
-                if !uname.is_empty() {
-                    next.room_uname = uname;
-                }
+            if let Some(uname) = room_uname
+                && !uname.is_empty()
+            {
+                next.room_uname = uname;
             }
-            if let Some(title) = room_title {
-                if !title.is_empty() {
-                    next.room_title = title;
-                }
+            if let Some(title) = room_title
+                && !title.is_empty()
+            {
+                next.room_title = title;
             }
             if next != guard.room_state {
                 guard.room_state = next.clone();
@@ -257,10 +257,9 @@ mod tests {
             medal_name: Some("星光".to_string()),
             medal_level: Some(12),
             content: content.to_string(),
-            emoticon: None,
-            emots: None,
             price: 0,
             raw_cmd: kind.to_uppercase(),
+            ..Default::default()
         }
     }
 
@@ -272,7 +271,13 @@ mod tests {
             show_medal: true,
         };
         let hub = StateHub::new(&cfg);
-        hub.reset_room(21452505, "主播A".to_string(), "杂谈".to_string(), false, true);
+        hub.reset_room(
+            21452505,
+            "主播A".to_string(),
+            "杂谈".to_string(),
+            false,
+            true,
+        );
 
         hub.push_event(&mk_raw("chat", "one"));
         hub.push_event(&mk_raw("chat", "two"));
@@ -298,7 +303,13 @@ mod tests {
         let rx = hub.subscribe_room_state();
         let mut ws_rx = hub.subscribe_ws();
 
-        hub.reset_room(21452505, "主播A".to_string(), "原标题".to_string(), false, true);
+        hub.reset_room(
+            21452505,
+            "主播A".to_string(),
+            "原标题".to_string(),
+            false,
+            true,
+        );
         assert!(!rx.borrow().is_live);
         assert!(matches!(ws_rx.try_recv(), Ok(ChannelAMessage::Snapshot(_))));
 

@@ -5,7 +5,11 @@ use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(name = "dambo-ui")]
-#[command(author = "kshava", version = "0.1.0", about = "Dambo Danmaku & Dam Controller")]
+#[command(
+    author = "kshava",
+    version = "0.1.0",
+    about = "Dambo Danmaku & Dam Controller"
+)]
 struct Args {
     #[arg(short, long, default_value = "dambo_config.toml")]
     pub config: String,
@@ -62,6 +66,10 @@ mod tests {
         let exists = resolved_path.exists();
 
         let _ = std::env::set_current_dir(&orig_dir);
-        assert!(exists, "Expected resolved config path {:?} to exist", resolved);
+        assert!(
+            exists,
+            "Expected resolved config path {:?} to exist",
+            resolved
+        );
     }
 }

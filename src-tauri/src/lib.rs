@@ -1,7 +1,7 @@
+use dambo_core::DamboRuntime;
 use dambo_core::auth::QrPollStatus;
 use dambo_core::config::parse_log_level;
 use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
-use dambo_core::DamboRuntime;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::menu::{MenuBuilder, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder,
+};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 use tokio_util::sync::CancellationToken;
 
@@ -112,7 +114,9 @@ fn open_in_os(target: &str) {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("cmd").args(["/C", "start", "", target]).spawn();
+        let _ = Command::new("cmd")
+            .args(["/C", "start", "", target])
+            .spawn();
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -347,10 +351,7 @@ async fn fetch_room_options(ctx: State<'_, AppContext>) -> Result<RoomOptionsPay
 }
 
 #[tauri::command]
-async fn remove_history_room(
-    room_id: u64,
-    ctx: State<'_, AppContext>,
-) -> Result<Vec<u64>, String> {
+async fn remove_history_room(room_id: u64, ctx: State<'_, AppContext>) -> Result<Vec<u64>, String> {
     ctx.runtime
         .remove_history_room(room_id)
         .map_err(|e| e.to_string())
@@ -606,10 +607,10 @@ pub fn run(config_path: &str) {
             let menu = MenuBuilder::new(app)
                 .text("toggle_panel", "Show / Hide Panel")
                 .item(&PredefinedMenuItem::separator(app)?)
-                .text("open_obs_overlay", &format!("Open OBS Overlay (:{})", server_port))
-                .text("copy_obs_url", &format!("Copy OBS Overlay URL (:{})", server_port))
-                .text("open_web_list", &format!("Open Danmaku Monitor (:{}/list)", server_port))
-                .text("copy_list_url", &format!("Copy Danmaku Monitor URL (:{}/list)", server_port))
+                .text("open_obs_overlay", format!("Open OBS Overlay (:{})", server_port))
+                .text("copy_obs_url", format!("Copy OBS Overlay URL (:{})", server_port))
+                .text("open_web_list", format!("Open Danmaku Monitor (:{}/list)", server_port))
+                .text("copy_list_url", format!("Copy Danmaku Monitor URL (:{}/list)", server_port))
                 .item(&PredefinedMenuItem::separator(app)?)
                 .text("relogin", "Re-login")
                 .text("open_config_file", "Open Config File")
@@ -672,10 +673,10 @@ pub fn run(config_path: &str) {
                         "open_rec_dir" => open_dir_in_os(&rt_menu.rec_dir),
                         "open_log_dir" => open_dir_in_os(&rt_menu.log_dir),
                         "quit" => {
-                            if let Ok(mut guard) = qr_menu.try_lock() {
-                                if let Some(cancel) = guard.take() {
-                                    cancel.cancel();
-                                }
+                            if let Ok(mut guard) = qr_menu.try_lock()
+                                && let Some(cancel) = guard.take()
+                            {
+                                cancel.cancel();
                             }
                             rt_menu.shutdown();
                             app.exit(0);

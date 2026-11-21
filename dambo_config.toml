@@ -1,6 +1,6 @@
 [bilibili]
-room_id = 21465419
-history_rooms = [21465419, 685026, 23075997, 1773500703, 22924075, 24998481, 30365606, 22748536]
+room_id = 22696954
+history_rooms = [22696954, 21465419, 685026, 23075997, 1773500703, 22924075, 24998481, 30365606, 22748536]
 session_file = "./etc/dambo_session.json"
 min_gift_coin = 0           # Real-time channel gift filter threshold in gold seeds (1000 = 1 CNY; does not affect recorder)
 ignore_enter = false           # Whether to drop room-enter events in real-time channels (default: false)

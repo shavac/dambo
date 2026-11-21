@@ -12,7 +12,7 @@ pub fn now_unix_ms() -> u64 {
 
 /// Internal normalized event representing 100% of room events before filtering.
 /// Used directly by `recorder.rs` for lossless JSONL streaming.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RawBiliEvent {
     /// Milliseconds elapsed since the current recording session started (for offline playback & ASR sync)
     pub offset_ms: u64,
@@ -23,7 +23,7 @@ pub struct RawBiliEvent {
     /// Streamer username / room name
     pub room_uname: String,
     /// Event category: live, preparing, room_change, room_block, warning, cut_off,
-    /// chat, super_chat, gift, guard, enter, follow, share, like
+    /// chat, super_chat, gift, guard, enter, follow, share, like, raw
     pub kind: String,
     /// Sender user ID
     pub uid: u64,
@@ -48,8 +48,23 @@ pub struct RawBiliEvent {
     pub emots: Option<BTreeMap<String, String>>,
     /// Price or gift value in gold seeds (1000 = 1 CNY)
     pub price: u64,
+    /// Guard subscription months or gift quantity
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num: Option<u32>,
+    /// Guard level (`1` = 总督, `2` = 提督, `3` = 舰长)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_level: Option<u8>,
+    /// Unique order flow ID from `USER_TOAST_MSG` / `USER_TOAST_MSG_V2`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payflow_id: Option<String>,
+    /// Guard effective start timestamp (Unix seconds)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<u64>,
     /// Original Bilibili command opcode/string (DANMU_MSG, LIVE, SEND_GIFT, etc.)
     pub raw_cmd: String,
+    /// Full raw Bilibili event JSON node for lossless recording (stripped before WS Channel A/B)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_data: Option<serde_json::Value>,
 }
 
 /// Channel A Snapshot item (/ws)

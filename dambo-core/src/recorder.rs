@@ -1,7 +1,8 @@
 use crate::config::RecordConfig;
-use crate::model::RawBiliEvent;
+use crate::model::{RawBiliEvent, now_unix_ms};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, TimeZone};
+use serde_json::json;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -21,7 +22,11 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn from_config(cfg: &RecordConfig) -> Self {
-        Self::new(cfg.enabled, PathBuf::from(&cfg.dir), cfg.filename_pattern.clone())
+        Self::new(
+            cfg.enabled,
+            PathBuf::from(&cfg.dir),
+            cfg.filename_pattern.clone(),
+        )
     }
 
     pub fn new(enabled: bool, output_dir: PathBuf, filename_pattern: String) -> Self {
@@ -87,18 +92,35 @@ impl Recorder {
     /// Flush and close the currently open recording file, if any.
     pub fn close(&mut self) -> Result<()> {
         if let Some(mut writer) = self.current_file.take() {
-            writer.flush().context("Failed to flush JSONL recording file")?;
+            writer
+                .flush()
+                .context("Failed to flush JSONL recording file")?;
         }
         self.current_path = None;
         Ok(())
     }
 
+    /// Write a single event line to the currently open JSONL writer, normalizing `offset_ms`.
+    fn write_event_line(&mut self, event: &RawBiliEvent) -> Result<()> {
+        if let Some(writer) = self.current_file.as_mut() {
+            let mut normalized = event.clone();
+            normalized.offset_ms = normalized.timestamp.saturating_sub(self.session_start_ms);
+            let line = serde_json::to_string(&normalized)
+                .context("Failed to serialize RawBiliEvent to JSONL")?;
+            writeln!(writer, "{}", line).context("Failed to write JSONL line")?;
+            writer.flush().context("Failed to flush JSONL line")?;
+        }
+        Ok(())
+    }
+
     /// Rotate recording to a new file for a newly connected/switched room and reset `offset_ms`.
+    /// When joining mid-stream (`is_live == true`), immediately writes an `INIT_LIVE_STATUS` marker line.
     pub fn rotate_for_room(
         &mut self,
         room_id: u64,
         room_uname: &str,
         start_ms: u64,
+        is_live: bool,
     ) -> Result<Option<PathBuf>> {
         self.close()?;
         self.current_room_id = room_id;
@@ -110,16 +132,41 @@ impl Recorder {
         }
 
         let path = self.open_new_file(room_id, room_uname, start_ms)?;
+        if is_live {
+            let init_live_ev = RawBiliEvent {
+                offset_ms: 0,
+                timestamp: start_ms,
+                room_id,
+                room_uname: room_uname.to_string(),
+                kind: "live".to_string(),
+                content: "直播中（初始开播状态）".to_string(),
+                raw_cmd: "INIT_LIVE_STATUS".to_string(),
+                raw_data: Some(json!({
+                    "cmd": "INIT_LIVE_STATUS",
+                    "room_id": room_id,
+                    "room_uname": room_uname,
+                    "live_status": 1
+                })),
+                ..Default::default()
+            };
+            self.write_event_line(&init_live_ev)?;
+        }
         Ok(Some(path))
     }
 
     /// Write a single raw event to the JSONL stream.
-    /// Automatically rotates to a fresh file and resets `offset_ms = 0` when receiving a `live` signal.
+    /// Automatically closes the previous file, opens a fresh file with `offset_ms = 0`,
+    /// and writes the triggering `live` event as Line 1.
     pub fn record_event(&mut self, event: &RawBiliEvent) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
 
+        let ts = if event.timestamp > 0 {
+            event.timestamp
+        } else {
+            now_unix_ms()
+        };
         let room_id = if event.room_id > 0 {
             event.room_id
         } else {
@@ -135,25 +182,22 @@ impl Recorder {
             self.close()?;
             self.current_room_id = room_id;
             self.current_room_uname = room_uname.clone();
-            self.session_start_ms = event.timestamp;
-            self.open_new_file(room_id, &room_uname, event.timestamp)?;
+            self.session_start_ms = ts;
+            self.open_new_file(room_id, &room_uname, ts)?;
         } else if self.current_file.is_none() {
             self.current_room_id = room_id;
             self.current_room_uname = room_uname.clone();
-            self.session_start_ms = event.timestamp;
-            self.open_new_file(room_id, &room_uname, event.timestamp)?;
+            self.session_start_ms = ts;
+            self.open_new_file(room_id, &room_uname, ts)?;
         }
 
-        if let Some(writer) = self.current_file.as_mut() {
-            let mut normalized = event.clone();
-            normalized.offset_ms = event.timestamp.saturating_sub(self.session_start_ms);
-            let line = serde_json::to_string(&normalized)
-                .context("Failed to serialize RawBiliEvent to JSONL")?;
-            writeln!(writer, "{}", line).context("Failed to write JSONL line")?;
-            writer.flush().context("Failed to flush JSONL line")?;
+        if event.timestamp == ts {
+            self.write_event_line(event)
+        } else {
+            let mut stamped = event.clone();
+            stamped.timestamp = ts;
+            self.write_event_line(&stamped)
         }
-
-        Ok(())
     }
 
     fn open_new_file(
@@ -191,10 +235,7 @@ impl Recorder {
         }
 
         let path = Path::new(filename);
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("dambo");
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("dambo");
         let ext = path.extension().and_then(|e| e.to_str());
 
         for idx in 1..10000 {
@@ -245,14 +286,9 @@ mod tests {
             kind: kind.to_string(),
             uid: 1001,
             uname: "观众A".to_string(),
-            face: None,
-            medal_name: None,
-            medal_level: None,
             content: format!("content_{}", kind),
-            emoticon: None,
-            emots: None,
-            price: 0,
             raw_cmd: kind.to_uppercase(),
+            ..Default::default()
         }
     }
 
@@ -262,7 +298,12 @@ mod tests {
         assert_eq!(clean, "主_播_A________B");
 
         let dt = Local.timestamp_millis_opt(1763280000000).single().unwrap();
-        let name = Recorder::build_filename("dambo_{room_name}_{room_id}.jsonl", 21452505, "主播:A/B", dt);
+        let name = Recorder::build_filename(
+            "dambo_{room_name}_{room_id}.jsonl",
+            21452505,
+            "主播:A/B",
+            dt,
+        );
         assert_eq!(name, "dambo_主播_A_B_21452505.jsonl");
 
         let fallback = Recorder::build_filename("dambo_{room_name}.jsonl", 21452505, "   ", dt);
@@ -279,14 +320,14 @@ mod tests {
         );
 
         let path1 = rec
-            .rotate_for_room(100, "主播甲", 1_763_280_000_000)
+            .rotate_for_room(100, "主播甲", 1_763_280_000_000, false)
             .unwrap()
             .unwrap();
         rec.record_event(&sample_event("chat", 1_763_280_001_500, 100, "主播甲"))
             .unwrap();
 
         let path2 = rec
-            .rotate_for_room(200, "主播乙", 1_763_280_010_000)
+            .rotate_for_room(200, "主播乙", 1_763_280_010_000, false)
             .unwrap()
             .unwrap();
         rec.record_event(&sample_event("chat", 1_763_280_012_250, 200, "主播乙"))
@@ -317,7 +358,7 @@ mod tests {
         );
 
         let pre_live_path = rec
-            .rotate_for_room(21452505, "主播A", 1_763_280_000_000)
+            .rotate_for_room(21452505, "主播A", 1_763_280_000_000, false)
             .unwrap()
             .unwrap();
         rec.record_event(&sample_event("chat", 1_763_280_005_000, 21452505, "主播A"))
@@ -354,11 +395,76 @@ mod tests {
     }
 
     #[test]
+    fn test_midstream_join_init_live_marker_and_lossless_guards() {
+        let dir = temp_test_dir("init_live");
+        let mut rec = Recorder::new(
+            true,
+            dir.clone(),
+            "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string(),
+        );
+
+        let path = rec
+            .rotate_for_room(21465419, "主播A", 1_763_280_000_000, true)
+            .unwrap()
+            .unwrap();
+
+        // Record both GUARD_BUY (official price) and USER_TOAST_MSG (actual price + payflow_id)
+        let mut guard_buy = sample_event("guard", 1_763_280_002_000, 21465419, "主播A");
+        guard_buy.raw_cmd = "GUARD_BUY".to_string();
+        guard_buy.price = 198000;
+        guard_buy.num = Some(1);
+        guard_buy.guard_level = Some(3);
+        guard_buy.start_time = Some(1763280002);
+        guard_buy.raw_data = Some(json!({"cmd": "GUARD_BUY", "data": {"price": 198000}}));
+        rec.record_event(&guard_buy).unwrap();
+
+        let mut toast = sample_event("guard", 1_763_280_002_000, 21465419, "主播A");
+        toast.raw_cmd = "USER_TOAST_MSG".to_string();
+        toast.price = 168000;
+        toast.num = Some(1);
+        toast.guard_level = Some(3);
+        toast.payflow_id = Some("pf-123".to_string());
+        toast.start_time = Some(1763280002);
+        toast.raw_data = Some(json!({"cmd": "USER_TOAST_MSG", "data": {"payflow_id": "pf-123"}}));
+        rec.record_event(&toast).unwrap();
+        rec.close().unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3);
+
+        let line0: RawBiliEvent = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(line0.kind, "live");
+        assert_eq!(line0.raw_cmd, "INIT_LIVE_STATUS");
+        assert_eq!(line0.offset_ms, 0);
+        assert!(line0.raw_data.is_some());
+
+        let line1: RawBiliEvent = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(line1.raw_cmd, "GUARD_BUY");
+        assert_eq!(line1.price, 198000);
+        assert_eq!(line1.guard_level, Some(3));
+        assert!(line1.raw_data.is_some());
+
+        let line2: RawBiliEvent = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(line2.raw_cmd, "USER_TOAST_MSG");
+        assert_eq!(line2.price, 168000);
+        assert_eq!(line2.payflow_id.as_deref(), Some("pf-123"));
+        assert!(line2.raw_data.is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_disabled_recorder_creates_no_files() {
         let dir = temp_test_dir("disabled");
         let mut rec = Recorder::new(false, dir.clone(), "dambo_{room_name}.jsonl".to_string());
-        assert!(rec.rotate_for_room(123, "主播", 1000).unwrap().is_none());
-        rec.record_event(&sample_event("live", 2000, 123, "主播")).unwrap();
+        assert!(
+            rec.rotate_for_room(123, "主播", 1000, true)
+                .unwrap()
+                .is_none()
+        );
+        rec.record_event(&sample_event("live", 2000, 123, "主播"))
+            .unwrap();
         assert!(!dir.exists());
     }
 }

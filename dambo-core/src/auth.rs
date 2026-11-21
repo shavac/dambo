@@ -1,7 +1,7 @@
 use crate::model::{AuthState, RoomQuickItem};
-use anyhow::{anyhow, Context, Result};
-use qrcode::render::{svg, unicode};
+use anyhow::{Context, Result, anyhow};
 use qrcode::QrCode;
+use qrcode::render::{svg, unicode};
 use reqwest::header::{COOKIE, REFERER, SET_COOKIE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,22 +11,21 @@ use std::sync::RwLock;
 use std::time::Duration;
 use tokio::sync::watch;
 
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
-                if let Ok(val) = u8::from_str_radix(hex, 16) {
-                    out.push(val);
-                    i += 3;
-                    continue;
-                }
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+            && let Ok(val) = u8::from_str_radix(hex, 16)
+        {
+            out.push(val);
+            i += 3;
+            continue;
         } else if bytes[i] == b'+' {
             out.push(b' ');
             i += 1;
@@ -90,11 +89,11 @@ impl SessionData {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create parent dir for {:?}", path))?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create parent dir for {:?}", path))?;
         }
         let json = serde_json::to_string_pretty(self)?;
         fs::write(path, json).with_context(|| format!("Failed to write session to {:?}", path))
@@ -130,14 +129,14 @@ impl SessionData {
         let mut dede_user_id = String::new();
 
         for h in headers {
-            if let Some(kv) = h.split(';').next() {
-                if let Some((k, v)) = kv.split_once('=') {
-                    match k.trim() {
-                        "SESSDATA" => sessdata = v.trim().to_string(),
-                        "bili_jct" => bili_jct = v.trim().to_string(),
-                        "DedeUserID" => dede_user_id = v.trim().to_string(),
-                        _ => {}
-                    }
+            if let Some(kv) = h.split(';').next()
+                && let Some((k, v)) = kv.split_once('=')
+            {
+                match k.trim() {
+                    "SESSDATA" => sessdata = v.trim().to_string(),
+                    "bili_jct" => bili_jct = v.trim().to_string(),
+                    "DedeUserID" => dede_user_id = v.trim().to_string(),
+                    _ => {}
                 }
             }
         }
@@ -235,7 +234,11 @@ pub fn parse_nav_response(resp: &Value, fallback_mid: u64) -> Option<AuthState> 
     let code = resp["code"].as_i64().unwrap_or(-1);
     let is_login = resp["data"]["isLogin"].as_bool();
     if code == 0 && is_login == Some(true) {
-        let uname = resp["data"]["uname"].as_str().unwrap_or("").trim().to_string();
+        let uname = resp["data"]["uname"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if uname.is_empty() {
             return None;
         }
@@ -243,7 +246,11 @@ pub fn parse_nav_response(resp: &Value, fallback_mid: u64) -> Option<AuthState> 
             is_login: true,
             uname,
             mid: value_as_u64(&resp["data"]["mid"]).unwrap_or(fallback_mid),
-            face: resp["data"]["face"].as_str().unwrap_or("").trim().to_string(),
+            face: resp["data"]["face"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
         });
     }
     if code == -101 || (code == 0 && is_login == Some(false)) {
@@ -341,10 +348,18 @@ impl AuthManager {
     }
 
     pub fn current_session(&self) -> Option<SessionData> {
-        self.session.read().expect("AuthManager RwLock poisoned").clone()
+        self.session
+            .read()
+            .expect("AuthManager RwLock poisoned")
+            .clone()
     }
 
-    pub fn save_session(&self, mut session: SessionData, uname: String, face: String) -> Result<()> {
+    pub fn save_session(
+        &self,
+        mut session: SessionData,
+        uname: String,
+        face: String,
+    ) -> Result<()> {
         let trimmed_uname = uname.trim();
         if !trimmed_uname.is_empty() && !trimmed_uname.starts_with("UID:") {
             session.uname = trimmed_uname.to_string();
@@ -374,7 +389,9 @@ impl AuthManager {
         let snapshot_to_save = {
             let mut guard = self.session.write().expect("AuthManager RwLock poisoned");
             if let Some(ref mut sess) = *guard {
-                if sess.uname == trimmed_uname && (trimmed_face.is_empty() || sess.face == trimmed_face) {
+                if sess.uname == trimmed_uname
+                    && (trimmed_face.is_empty() || sess.face == trimmed_face)
+                {
                     return;
                 }
                 sess.uname = trimmed_uname.to_string();
@@ -386,10 +403,14 @@ impl AuthManager {
                 None
             }
         };
-        if let Some(sess) = snapshot_to_save {
-            if let Err(e) = sess.save(&self.session_path) {
-                log::warn!("Failed to persist cached profile name to {:?}: {:#}", self.session_path, e);
-            }
+        if let Some(sess) = snapshot_to_save
+            && let Err(e) = sess.save(&self.session_path)
+        {
+            log::warn!(
+                "Failed to persist cached profile name to {:?}: {:#}",
+                self.session_path,
+                e
+            );
         }
     }
 
@@ -397,7 +418,11 @@ impl AuthManager {
         if state.is_login {
             self.persist_profile_cache(&state.uname, &state.face);
             self.state_tx.send_replace(state.clone());
-            log::info!("✅ Bilibili session validated: @{} ({})", state.uname, state.mid);
+            log::info!(
+                "✅ Bilibili session validated: @{} ({})",
+                state.uname,
+                state.mid
+            );
             state
         } else {
             log::warn!("⚠️ Bilibili stored session expired or invalid");
@@ -556,7 +581,11 @@ impl AuthManager {
         let status = parse_qr_poll_response(code, message, &set_cookies, fallback_url);
         if let QrPollStatus::Success(ref session) = status {
             let mid = session.dede_user_id.parse().unwrap_or(0);
-            self.save_session(session.clone(), format!("UID:{}", session.dede_user_id), String::new())?;
+            self.save_session(
+                session.clone(),
+                format!("UID:{}", session.dede_user_id),
+                String::new(),
+            )?;
             if let Err(e) = self.validate_session().await {
                 log::warn!("Post-login nav validation failed transiently: {:#}", e);
                 self.state_tx.send_replace(AuthState {
@@ -632,29 +661,27 @@ impl AuthManager {
             .send()
             .await;
 
-        if let Ok(resp) = primary {
-            if let Ok(json) = resp.json::<Value>().await {
-                if json["code"].as_i64() == Some(0) {
-                    if let Some(arr) = json["data"]["list"].as_array() {
-                        let items = arr
-                            .iter()
-                            .filter_map(|item| {
-                                let room_id = value_as_u64(&item["roomid"])?;
-                                if room_id == 0 {
-                                    return None;
-                                }
-                                Some(RoomQuickItem {
-                                    room_id,
-                                    room_uname: item["uname"].as_str().unwrap_or("").to_string(),
-                                    title: item["title"].as_str().unwrap_or("").to_string(),
-                                    is_live: true,
-                                })
-                            })
-                            .collect::<Vec<_>>();
-                        return Ok(items);
+        if let Ok(resp) = primary
+            && let Ok(json) = resp.json::<Value>().await
+            && json["code"].as_i64() == Some(0)
+            && let Some(arr) = json["data"]["list"].as_array()
+        {
+            let items = arr
+                .iter()
+                .filter_map(|item| {
+                    let room_id = value_as_u64(&item["roomid"])?;
+                    if room_id == 0 {
+                        return None;
                     }
-                }
-            }
+                    Some(RoomQuickItem {
+                        room_id,
+                        room_uname: item["uname"].as_str().unwrap_or("").to_string(),
+                        title: item["title"].as_str().unwrap_or("").to_string(),
+                        is_live: true,
+                    })
+                })
+                .collect::<Vec<_>>();
+            return Ok(items);
         }
 
         // Fallback endpoint
@@ -710,7 +737,8 @@ mod tests {
     #[test]
     fn test_session_save_load_and_cookie_header() {
         let id = AUTH_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("dambo_sess_{}_{}.json", std::process::id(), id));
+        let path =
+            std::env::temp_dir().join(format!("dambo_sess_{}_{}.json", std::process::id(), id));
         let _ = fs::remove_file(&path);
 
         let session = SessionData {
@@ -745,7 +773,10 @@ mod tests {
         let cached_mgr = AuthManager::new(&path);
         assert!(cached_mgr.current_state().is_login);
         assert_eq!(cached_mgr.current_state().uname, "测试主播");
-        assert_eq!(cached_mgr.current_state().face, "https://example.com/face.jpg");
+        assert_eq!(
+            cached_mgr.current_state().face,
+            "https://example.com/face.jpg"
+        );
 
         cached_mgr.logout().unwrap();
         assert!(!cached_mgr.current_state().is_login);
@@ -791,7 +822,11 @@ mod tests {
         assert_eq!(live_parsed.face, "https://i0.hdslb.com/b.jpg");
 
         let live_expired = serde_json::json!({"code": -101});
-        assert!(!parse_live_user_info_response(&live_expired, 999).unwrap().is_login);
+        assert!(
+            !parse_live_user_info_response(&live_expired, 999)
+                .unwrap()
+                .is_login
+        );
         let live_risk = serde_json::json!({"code": -412});
         assert!(parse_live_user_info_response(&live_risk, 999).is_none());
     }
@@ -804,9 +839,18 @@ mod tests {
             "DedeUserID=998877; Path=/".to_string(),
         ];
 
-        assert_eq!(parse_qr_poll_code(86101, "未扫码", &[]), QrPollStatus::Waiting);
-        assert_eq!(parse_qr_poll_code(86090, "已扫码", &[]), QrPollStatus::Scanned);
-        assert_eq!(parse_qr_poll_code(86038, "已过期", &[]), QrPollStatus::Expired);
+        assert_eq!(
+            parse_qr_poll_code(86101, "未扫码", &[]),
+            QrPollStatus::Waiting
+        );
+        assert_eq!(
+            parse_qr_poll_code(86090, "已扫码", &[]),
+            QrPollStatus::Scanned
+        );
+        assert_eq!(
+            parse_qr_poll_code(86038, "已过期", &[]),
+            QrPollStatus::Expired
+        );
 
         match parse_qr_poll_code(0, "", &cookies) {
             QrPollStatus::Success(s) => {
@@ -825,7 +869,8 @@ mod tests {
 
     #[test]
     fn test_render_qr_and_from_login_url() {
-        let url = "https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1&qrcode_key=abc123";
+        let url =
+            "https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1&qrcode_key=abc123";
         let (svg_xml, term_qr) = render_qr(url).unwrap();
         assert!(svg_xml.contains("<svg"));
         assert!(svg_xml.contains("</svg>"));

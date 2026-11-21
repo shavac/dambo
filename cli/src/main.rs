@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
-use dambo_core::auth::QrPollStatus;
 use dambo_core::DamboRuntime;
+use dambo_core::auth::QrPollStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,7 +71,10 @@ async fn run_cli_qr_login(runtime: &DamboRuntime) -> bool {
             }
             Ok(QrPollStatus::Success(_)) => {
                 let state = runtime.auth.current_state();
-                println!("✅ 登录成功！当前账号: @{} (UID: {})", state.uname, state.mid);
+                println!(
+                    "✅ 登录成功！当前账号: @{} (UID: {})",
+                    state.uname, state.mid
+                );
                 return true;
             }
             Ok(QrPollStatus::Error(msg)) => {

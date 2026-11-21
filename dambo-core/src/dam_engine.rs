@@ -1,10 +1,10 @@
 use crate::config::DamConfig;
-use crate::model::{now_unix_ms, ChannelBMessage, DamBatchData, DamEvent, RawBiliEvent};
+use crate::model::{ChannelBMessage, DamBatchData, DamEvent, RawBiliEvent, now_unix_ms};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{Notify, broadcast};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -51,6 +51,13 @@ impl BackpressureQueue {
         self.inner.lock().expect("BackpressureQueue poisoned").len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("BackpressureQueue poisoned")
+            .is_empty()
+    }
+
     pub fn clear(&self) {
         self.inner
             .lock()
@@ -71,7 +78,7 @@ impl BackpressureQueue {
                 let mut victim: Option<(usize, u8)> = None;
                 for (idx, item) in q.iter().enumerate() {
                     let t = ingress_tier(item);
-                    if t < incoming_tier && victim.map_or(true, |(_, bt)| t < bt) {
+                    if t < incoming_tier && victim.is_none_or(|(_, bt)| t < bt) {
                         victim = Some((idx, t));
                         if t == 0 {
                             break;
@@ -252,7 +259,8 @@ impl DamEngine {
         self.tx.clone()
     }
 
-    pub fn enqueue(&self, ev: RawBiliEvent) -> bool {
+    pub fn enqueue(&self, mut ev: RawBiliEvent) -> bool {
+        ev.raw_data = None;
         self.queue.push(ev)
     }
 
@@ -379,7 +387,14 @@ impl DamEngine {
 mod tests {
     use super::*;
 
-    fn mk_ev(kind: &str, uid: u64, uname: &str, content: &str, medal: Option<u32>, price: u64) -> RawBiliEvent {
+    fn mk_ev(
+        kind: &str,
+        uid: u64,
+        uname: &str,
+        content: &str,
+        medal: Option<u32>,
+        price: u64,
+    ) -> RawBiliEvent {
         RawBiliEvent {
             offset_ms: 0,
             timestamp: 1763280000000,
@@ -392,10 +407,9 @@ mod tests {
             medal_name: Some("星光".to_string()),
             medal_level: medal,
             content: content.to_string(),
-            emoticon: None,
-            emots: None,
             price,
             raw_cmd: kind.to_uppercase(),
+            ..Default::default()
         }
     }
 
@@ -457,10 +471,11 @@ mod tests {
 
         let mut priorities = Vec::new();
         for _ in 0..3 {
-            let ChannelBMessage::DamBatch(b) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            let ChannelBMessage::DamBatch(b) =
+                tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
             priorities.push((b.events[0].kind.clone(), b.priority));
         }
         assert_eq!(
@@ -485,10 +500,11 @@ mod tests {
         }
         engine.enqueue(mk_ev("enter", 9918273, "老粉丁", "", Some(18), 0));
 
-        let ChannelBMessage::DamBatch(batch) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let ChannelBMessage::DamBatch(batch) =
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(batch.priority, 0);
         assert_eq!(batch.room_id, 21452505);
         assert_eq!(batch.room_uname, "主播A");
