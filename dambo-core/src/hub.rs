@@ -287,6 +287,7 @@ impl StateHub {
                     id,
                     seq: event.seq,
                     kind: event.kind.clone(),
+                    msg_type: event.msg_type,
                     uid: event.uid,
                     uname: event.uname.clone(),
                     face: event.face.clone(),
@@ -369,14 +370,33 @@ mod tests {
         assert!(matches!(ws_rx.try_recv(), Ok(ChannelAMessage::Snapshot(_))));
 
         hub.push_event(&mk_raw(1, "chat", "one"));
-        // High-frequency `like` & `enter` MUST broadcast live over /ws, but NEVER enter Snapshot history!
+        // High-frequency `like` & `enter` plus social events MUST broadcast live over /ws, but NEVER enter Snapshot history!
         hub.push_event(&mk_raw(2, "like", "为主播点赞了"));
-        hub.push_event(&mk_raw(3, "enter", ""));
-        hub.push_event(&mk_raw(4, "gift", "牛哇 x1"));
-        hub.push_event(&mk_raw(5, "superchat", "加油"));
+        hub.push_event(&RawBiliEvent {
+            msg_type: Some(1),
+            ..mk_raw(3, "enter", "")
+        });
+        hub.push_event(&RawBiliEvent {
+            msg_type: Some(4),
+            ..mk_raw(4, "special_follow", "特别关注了直播间")
+        });
+        hub.push_event(&RawBiliEvent {
+            msg_type: Some(5),
+            ..mk_raw(5, "mutual_follow", "互粉了直播间")
+        });
+        hub.push_event(&mk_raw(6, "gift", "牛哇 x1"));
+        hub.push_event(&mk_raw(7, "superchat", "加油"));
 
-        // Verify all 5 events were pushed live over /ws
-        for expected_kind in ["chat", "like", "enter", "gift", "superchat"] {
+        // Verify all 7 events were pushed live over /ws
+        for expected_kind in [
+            "chat",
+            "like",
+            "enter",
+            "special_follow",
+            "mutual_follow",
+            "gift",
+            "superchat",
+        ] {
             assert!(matches!(
                 ws_rx.try_recv(),
                 Ok(ChannelAMessage::Event(item)) if item.kind == expected_kind

@@ -37,6 +37,24 @@ struct InteractWordV2FansMedal {
 }
 
 #[derive(prost::Message)]
+struct InteractWordV2UserBase {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(string, tag = "2")]
+    face: String,
+}
+
+#[derive(prost::Message)]
+struct InteractWordV2UserInfo {
+    #[prost(uint64, tag = "1")]
+    uid: u64,
+    #[prost(bytes = "vec", optional, tag = "2")]
+    base_raw: Option<Vec<u8>>,
+    #[prost(bytes = "vec", optional, tag = "3")]
+    medal_raw: Option<Vec<u8>>,
+}
+
+#[derive(prost::Message)]
 struct InteractWordV2 {
     #[prost(uint64, tag = "1")]
     uid: u64,
@@ -46,6 +64,8 @@ struct InteractWordV2 {
     msg_type: u32,
     #[prost(message, optional, tag = "9")]
     fans_medal: Option<InteractWordV2FansMedal>,
+    #[prost(bytes = "vec", optional, tag = "22")]
+    uinfo_raw: Option<Vec<u8>>,
 }
 
 #[derive(prost::Message)]
@@ -299,6 +319,44 @@ fn apply_extracted_user(ev: &mut RawBiliEvent, user: ExtractedUser) {
     if ev.medal_name.is_none() && user.medal_name.is_some() {
         ev.medal_name = user.medal_name;
         ev.medal_level = user.medal_level;
+    }
+}
+
+fn extract_pb_uinfo_fields(bytes: &[u8]) -> ExtractedUser {
+    let Ok(info) = InteractWordV2UserInfo::decode(bytes) else {
+        return ExtractedUser {
+            uid: None,
+            uname: None,
+            face: None,
+            medal_name: None,
+            medal_level: None,
+        };
+    };
+    let mut uname = None;
+    let mut face = None;
+    if let Some(base_bytes) = info.base_raw.as_deref()
+        && let Ok(base) = InteractWordV2UserBase::decode(base_bytes)
+    {
+        let clean_name = base.name.trim();
+        if !clean_name.is_empty() {
+            uname = Some(clean_name.to_string());
+        }
+        let clean_face = base.face.trim();
+        if !clean_face.is_empty() {
+            face = Some(normalize_bili_url(clean_face));
+        }
+    }
+    let (medal_name, medal_level) = info
+        .medal_raw
+        .as_deref()
+        .map(parse_pb_fans_medal)
+        .unwrap_or((None, None));
+    ExtractedUser {
+        uid: (info.uid > 0).then_some(info.uid),
+        uname,
+        face,
+        medal_name,
+        medal_level,
     }
 }
 
@@ -837,8 +895,10 @@ fn parse_send_gift_v2_events(
 fn parse_interact_msg_type(msg_type: u64) -> Option<(&'static str, &'static str)> {
     match msg_type {
         1 => Some(("enter", "")),
-        2 | 4 => Some(("follow", "关注了直播间")),
+        2 => Some(("follow", "关注了直播间")),
         3 => Some(("share", "分享了直播间")),
+        4 => Some(("special_follow", "特别关注了直播间")),
+        5 => Some(("mutual_follow", "互粉了直播间")),
         _ => None,
     }
 }
@@ -1135,6 +1195,7 @@ fn parse_single_bili_cmd_json(
                 .get("uname")
                 .and_then(non_empty_str)
                 .unwrap_or_default();
+            ev.msg_type = u32::try_from(msg_type).ok();
             if let Some(m) = data.get("fans_medal") {
                 let (mn, ml) = extract_medal_from_obj(m);
                 ev.medal_name = mn;
@@ -1147,12 +1208,14 @@ fn parse_single_bili_cmd_json(
             ev.content = content.to_string();
         }
         "INTERACT_WORD_V2" => {
-            let pb_b64 = payload.get("data")?.get("pb")?.as_str()?;
+            let data = payload.get("data")?;
+            let pb_b64 = data.get("pb")?.as_str()?;
             let bytes = BASE64_STANDARD.decode(pb_b64).ok()?;
             let decoded = InteractWordV2::decode(bytes.as_slice()).ok()?;
             let (kind, content) = parse_interact_msg_type(u64::from(decoded.msg_type))?;
             ev.uid = decoded.uid;
             ev.uname = decoded.uname.trim().to_string();
+            ev.msg_type = Some(decoded.msg_type);
             if let Some(m) = decoded.fans_medal {
                 let mn = m.medal_name.trim().to_string();
                 if !mn.is_empty() {
@@ -1163,6 +1226,12 @@ fn parse_single_bili_cmd_json(
                         None
                     };
                 }
+            }
+            if let Some(uinfo_bytes) = decoded.uinfo_raw.as_deref() {
+                apply_extracted_user(&mut ev, extract_pb_uinfo_fields(uinfo_bytes));
+            }
+            if let Some(uinfo) = data.get("uinfo") {
+                apply_extracted_user(&mut ev, extract_uinfo_fields(uinfo));
             }
             ev.kind = kind.to_string();
             ev.content = content.to_string();
@@ -2589,6 +2658,7 @@ mod tests {
                 medal_level: 18,
                 medal_name: "星光".to_string(),
             }),
+            uinfo_raw: None,
         };
         let raw_pb = json!({
             "cmd": "INTERACT_WORD_V2",
@@ -2599,10 +2669,11 @@ mod tests {
         assert_eq!(enriched["data"]["pb_decoded"]["2"], "老粉丁");
         assert_eq!(enriched["data"]["pb_decoded"]["9"]["3"], "星光");
 
-        // msg_type == 4 maps to follow
-        let ev_follow =
+        // msg_type == 4 maps independently to special_follow
+        let ev_special_follow =
             parse_bili_cmd_json("INTERACT_WORD_V2", &raw_pb, 21465419, "主播A").unwrap();
-        assert_eq!(ev_follow.kind, "follow");
+        assert_eq!(ev_special_follow.kind, "special_follow");
+        assert_eq!(ev_special_follow.msg_type, Some(4));
 
         // Unmapped command returns None from standard parser
         assert!(
@@ -2686,5 +2757,84 @@ mod tests {
         assert_eq!(ev_pb.kind, "gift");
         assert_eq!(ev_pb.num, Some(2));
         assert_eq!(ev_pb.price, 10000);
+    }
+
+    #[test]
+    fn test_interact_word_v2_semantic_mapping_and_uinfo() {
+        let mut norm = CollectorNormalizer::new(64);
+        let expected = [
+            (1u32, "enter"),
+            (2u32, "follow"),
+            (3u32, "share"),
+            (4u32, "special_follow"),
+            (5u32, "mutual_follow"),
+        ];
+
+        for (idx, (msg_type, expected_kind)) in expected.iter().enumerate() {
+            let uid = 5000 + u64::from(*msg_type);
+            let face_url = format!("http://i0.hdslb.com/bfs/face/{}.jpg", uid);
+            let uinfo = InteractWordV2UserInfo {
+                uid,
+                base_raw: Some(
+                    InteractWordV2UserBase {
+                        name: format!("观众{}", msg_type),
+                        face: face_url,
+                    }
+                    .encode_to_vec(),
+                ),
+                medal_raw: None,
+            };
+            let pb = InteractWordV2 {
+                uid: 0,
+                uname: String::new(),
+                msg_type: *msg_type,
+                fans_medal: Some(InteractWordV2FansMedal {
+                    medal_level: 10 + *msg_type,
+                    medal_name: "星光".to_string(),
+                }),
+                uinfo_raw: Some(uinfo.encode_to_vec()),
+            };
+            let payload = json!({
+                "cmd": "INTERACT_WORD_V2",
+                "data": { "pb": BASE64_STANDARD.encode(pb.encode_to_vec()) }
+            });
+            let out = norm.process_payload("INTERACT_WORD_V2", &payload, 21465419, "主播A");
+            assert_eq!(out.len(), 1);
+            let ev = &out[0];
+            assert_eq!(ev.seq, (idx as u64) + 1);
+            assert_eq!(ev.kind, *expected_kind);
+            assert_eq!(ev.msg_type, Some(*msg_type));
+            assert_eq!(ev.uid, uid);
+            assert_eq!(ev.uname, format!("观众{}", msg_type));
+            assert_eq!(
+                ev.face.as_deref(),
+                Some(format!("https://i0.hdslb.com/bfs/face/{}.jpg", uid).as_str())
+            );
+            assert_eq!(ev.medal_name.as_deref(), Some("星光"));
+            assert_eq!(ev.medal_level, Some(10 + *msg_type));
+        }
+
+        // Legacy JSON INTERACT_WORD preserves msg_type = 4/5 and uinfo avatar too
+        let json_special = json!({
+            "cmd": "INTERACT_WORD",
+            "data": {
+                "uid": 9991,
+                "uname": "特关粉",
+                "msg_type": 4,
+                "uinfo": {
+                    "uid": 9991,
+                    "base": { "face": "http://i0.hdslb.com/bfs/face/9991.jpg" }
+                }
+            }
+        });
+        let legacy_out = norm.process_payload("INTERACT_WORD", &json_special, 21465419, "主播A");
+        assert_eq!(legacy_out.len(), 1);
+        assert_eq!(legacy_out[0].seq, 6);
+        assert_eq!(legacy_out[0].kind, "special_follow");
+        assert_eq!(legacy_out[0].msg_type, Some(4));
+        assert_eq!(
+            legacy_out[0].face.as_deref(),
+            Some("https://i0.hdslb.com/bfs/face/9991.jpg")
+        );
     }
 }

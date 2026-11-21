@@ -153,15 +153,12 @@ async fn main() -> Result<()> {
     }
 
     if args.record_raw {
-        runtime.set_record_raw(true);
+        runtime.set_record_raw_override(true);
     }
 
-    runtime.start().await?;
-
-    if let Some(ref target_room) = args.room {
-        let room_id = runtime.switch_room(target_room).await?;
-        log::info!("🎯 CLI room override connected: {}", room_id);
-    }
+    runtime
+        .start_with_room_override(args.room.as_deref())
+        .await?;
 
     let cfg = runtime.config_snapshot();
     let base_http = format!("http://{}:{}", cfg.server.host, cfg.server.port);

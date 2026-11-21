@@ -163,10 +163,11 @@ impl Recorder {
         Ok(())
     }
 
-    /// Write a single event line to the currently open JSONL writer, normalizing `offset_ms`.
+    /// Write a single event line to the currently open JSONL writer, normalizing `offset_ms`
+    /// and stripping `face` from unpaid events.
     fn write_event_line(&mut self, event: &RawBiliEvent) -> Result<()> {
         if let Some(writer) = self.current_file.as_mut() {
-            let mut normalized = event.clone();
+            let mut normalized = event.sanitized_for_standard_stream();
             normalized.offset_ms = normalized.timestamp.saturating_sub(self.session_start_ms);
             let line = serde_json::to_string(&normalized)
                 .context("Failed to serialize RawBiliEvent to JSONL")?;
@@ -345,6 +346,11 @@ impl Recorder {
             "chat" => self.stats.chat_count = self.stats.chat_count.saturating_add(1),
             "like" => self.stats.like_count = self.stats.like_count.saturating_add(1),
             "guard" => self.stats.guard_count = self.stats.guard_count.saturating_add(1),
+            "enter" => self.stats.enter_count = self.stats.enter_count.saturating_add(1),
+            "follow" | "special_follow" | "mutual_follow" => {
+                self.stats.follow_count = self.stats.follow_count.saturating_add(1);
+            }
+            "share" => self.stats.share_count = self.stats.share_count.saturating_add(1),
             "gift" => {
                 self.stats.gift_total_coin = self.stats.gift_total_coin.saturating_add(event.price);
             }
@@ -587,32 +593,64 @@ mod tests {
         assert_eq!(rec.current_path().unwrap(), path1.as_path());
 
         let mut chat = sample_event(1, "chat", 1_763_280_012_000, 21465419, "主播A");
+        chat.face = Some("https://i0.hdslb.com/bfs/face/chat.jpg".to_string());
         chat.raw_cmd = "DANMU_MSG".to_string();
         rec.record_event(&chat).unwrap();
 
-        let like = sample_event(2, "like", 1_763_280_013_000, 21465419, "主播A");
+        let mut like = sample_event(2, "like", 1_763_280_013_000, 21465419, "主播A");
+        like.face = Some("https://i0.hdslb.com/bfs/face/like.jpg".to_string());
         rec.record_event(&like).unwrap();
 
-        let mut gift = sample_event(3, "gift", 1_763_280_014_000, 21465419, "主播A");
-        gift.price = 5000;
-        rec.record_event(&gift).unwrap();
+        let mut gift_paid = sample_event(3, "gift", 1_763_280_014_000, 21465419, "主播A");
+        gift_paid.price = 5000;
+        gift_paid.face = Some("https://i0.hdslb.com/bfs/face/gift_paid.jpg".to_string());
+        rec.record_event(&gift_paid).unwrap();
 
-        let mut sc = sample_event(4, "superchat", 1_763_280_015_000, 21465419, "主播A");
+        let mut gift_free = sample_event(4, "gift", 1_763_280_014_500, 21465419, "主播A");
+        gift_free.price = 0;
+        gift_free.face = Some("https://i0.hdslb.com/bfs/face/gift_free.jpg".to_string());
+        rec.record_event(&gift_free).unwrap();
+
+        let mut sc = sample_event(5, "superchat", 1_763_280_015_000, 21465419, "主播A");
         sc.price = 30000;
+        sc.face = Some("https://i0.hdslb.com/bfs/face/sc.jpg".to_string());
         rec.record_event(&sc).unwrap();
 
-        let mut guard = sample_event(5, "guard", 1_763_280_016_000, 21465419, "主播A");
+        let mut guard = sample_event(6, "guard", 1_763_280_016_000, 21465419, "主播A");
         guard.price = 168000;
+        guard.face = Some("https://i0.hdslb.com/bfs/face/guard.jpg".to_string());
         rec.record_event(&guard).unwrap();
 
+        let mut enter = sample_event(7, "enter", 1_763_280_016_500, 21465419, "主播A");
+        enter.face = Some("https://i0.hdslb.com/bfs/face/enter.jpg".to_string());
+        rec.record_event(&enter).unwrap();
+
+        let mut follow = sample_event(8, "follow", 1_763_280_017_000, 21465419, "主播A");
+        follow.face = Some("https://i0.hdslb.com/bfs/face/follow.jpg".to_string());
+        rec.record_event(&follow).unwrap();
+
+        let mut special_follow =
+            sample_event(9, "special_follow", 1_763_280_017_500, 21465419, "主播A");
+        special_follow.face = Some("https://i0.hdslb.com/bfs/face/special_follow.jpg".to_string());
+        rec.record_event(&special_follow).unwrap();
+
+        let mut mutual_follow =
+            sample_event(10, "mutual_follow", 1_763_280_018_000, 21465419, "主播A");
+        mutual_follow.face = Some("https://i0.hdslb.com/bfs/face/mutual_follow.jpg".to_string());
+        rec.record_event(&mutual_follow).unwrap();
+
+        let mut share = sample_event(11, "share", 1_763_280_018_500, 21465419, "主播A");
+        share.face = Some("https://i0.hdslb.com/bfs/face/share.jpg".to_string());
+        rec.record_event(&share).unwrap();
+
         // Preparing triggers immediate session_end flush
-        let preparing = sample_event(6, "preparing", 1_763_280_020_000, 21465419, "主播A");
+        let preparing = sample_event(12, "preparing", 1_763_280_020_000, 21465419, "主播A");
         rec.record_event(&preparing).unwrap();
         rec.finish_session().unwrap();
 
         let content = fs::read_to_string(&path1).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 8);
+        assert_eq!(lines.len(), 14);
 
         let line0: RawBiliEvent = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(line0.kind, "room_info");
@@ -625,15 +663,31 @@ mod tests {
         assert_eq!(line1.seq, 1);
         assert_eq!(line1.offset_ms, 12000);
 
-        let end_ev: RawBiliEvent = serde_json::from_str(lines[7]).unwrap();
+        // Verify face retention: ONLY paid gift, superchat, and guard preserve `face`
+        assert!(!lines[1].contains("\"face\"")); // chat
+        assert!(!lines[2].contains("\"face\"")); // like
+        assert!(lines[3].contains("\"face\":\"https://i0.hdslb.com/bfs/face/gift_paid.jpg\""));
+        assert!(!lines[4].contains("\"face\"")); // free gift (price == 0)
+        assert!(lines[5].contains("\"face\":\"https://i0.hdslb.com/bfs/face/sc.jpg\""));
+        assert!(lines[6].contains("\"face\":\"https://i0.hdslb.com/bfs/face/guard.jpg\""));
+        assert!(!lines[7].contains("\"face\"")); // enter
+        assert!(!lines[8].contains("\"face\"")); // follow
+        assert!(!lines[9].contains("\"face\"")); // special_follow
+        assert!(!lines[10].contains("\"face\"")); // mutual_follow
+        assert!(!lines[11].contains("\"face\"")); // share
+
+        let end_ev: RawBiliEvent = serde_json::from_str(lines[13]).unwrap();
         assert_eq!(end_ev.kind, "session_end");
-        assert_eq!(end_ev.seq, 7);
+        assert_eq!(end_ev.seq, 13);
         let summary = end_ev.summary.unwrap();
         assert_eq!(summary.chat_count, 1);
         assert_eq!(summary.like_count, 1);
         assert_eq!(summary.guard_count, 1);
         assert_eq!(summary.gift_total_coin, 5000);
         assert_eq!(summary.superchat_total_coin, 30000);
+        assert_eq!(summary.enter_count, 1);
+        assert_eq!(summary.follow_count, 3);
+        assert_eq!(summary.share_count, 1);
 
         // Ensure no *_raw.jsonl was created when record_raw == false
         assert!(rec.current_raw_path().is_none());

@@ -2,12 +2,15 @@ use dambo_core::DamboRuntime;
 use dambo_core::auth::QrPollStatus;
 use dambo_core::config::parse_log_level;
 use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
+use dambo_core::state::{AppPersistedState, RoomHistoryEntry};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::menu::{MenuBuilder, PredefinedMenuItem};
+use tauri::menu::{
+    CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
+};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder,
@@ -351,10 +354,21 @@ async fn fetch_room_options(ctx: State<'_, AppContext>) -> Result<RoomOptionsPay
 }
 
 #[tauri::command]
-async fn remove_history_room(room_id: u64, ctx: State<'_, AppContext>) -> Result<Vec<u64>, String> {
+async fn remove_history_room(
+    room_id: u64,
+    ctx: State<'_, AppContext>,
+) -> Result<Vec<RoomHistoryEntry>, String> {
     ctx.runtime
         .remove_history_room(room_id)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_record_raw(enabled: bool, ctx: State<'_, AppContext>) -> Result<bool, String> {
+    ctx.runtime
+        .set_record_raw(enabled)
+        .map_err(|e| e.to_string())?;
+    Ok(ctx.runtime.is_record_raw_enabled())
 }
 
 #[tauri::command]
@@ -492,6 +506,86 @@ fn build_log_plugin(
         .build()
 }
 
+fn format_history_menu_label(entry: &RoomHistoryEntry) -> String {
+    match (entry.uname.is_empty(), entry.title.is_empty()) {
+        (true, true) => entry.room_id.to_string(),
+        (false, true) => format!("{} ({})", entry.room_id, entry.uname),
+        (true, false) => format!("{}: {}", entry.room_id, entry.title),
+        (false, false) => format!("{} ({}) - {}", entry.room_id, entry.uname, entry.title),
+    }
+}
+
+fn build_tray_menu(app: &AppHandle, runtime: &DamboRuntime) -> tauri::Result<Menu<tauri::Wry>> {
+    let persisted = runtime.state_store.snapshot();
+    let themes = runtime.list_themes();
+    let server_port = runtime.config.server.port;
+
+    let mut recent_sub = SubmenuBuilder::new(app, "Recent Rooms");
+    if persisted.room_history.is_empty() {
+        let empty = MenuItemBuilder::with_id("recent_empty", "No Recent Rooms")
+            .enabled(false)
+            .build(app)?;
+        recent_sub = recent_sub.item(&empty);
+    } else {
+        for entry in &persisted.room_history {
+            let item = CheckMenuItemBuilder::with_id(
+                format!("room:{}", entry.room_id),
+                format_history_menu_label(entry),
+            )
+            .checked(persisted.current_room_id == Some(entry.room_id))
+            .build(app)?;
+            recent_sub = recent_sub.item(&item);
+        }
+    }
+    let recent_menu = recent_sub.build()?;
+
+    let mut theme_sub = SubmenuBuilder::new(app, "OBS Theme");
+    for theme_name in themes {
+        let item = CheckMenuItemBuilder::with_id(format!("theme:{}", theme_name), &theme_name)
+            .checked(persisted.theme == theme_name)
+            .build(app)?;
+        theme_sub = theme_sub.item(&item);
+    }
+    let theme_menu = theme_sub.build()?;
+
+    let record_raw_item =
+        CheckMenuItemBuilder::with_id("toggle_record_raw", "Record Raw Packets (*_raw.jsonl)")
+            .checked(runtime.is_record_raw_enabled())
+            .build(app)?;
+
+    MenuBuilder::new(app)
+        .text("toggle_panel", "Show / Hide Panel")
+        .item(&PredefinedMenuItem::separator(app)?)
+        .item(&recent_menu)
+        .item(&theme_menu)
+        .item(&record_raw_item)
+        .item(&PredefinedMenuItem::separator(app)?)
+        .text(
+            "open_obs_overlay",
+            format!("Open OBS Overlay (:{})", server_port),
+        )
+        .text(
+            "copy_obs_url",
+            format!("Copy OBS Overlay URL (:{})", server_port),
+        )
+        .text(
+            "open_web_list",
+            format!("Open Danmaku Monitor (:{}/list)", server_port),
+        )
+        .text(
+            "copy_list_url",
+            format!("Copy Danmaku Monitor URL (:{}/list)", server_port),
+        )
+        .item(&PredefinedMenuItem::separator(app)?)
+        .text("relogin", "Re-login")
+        .text("open_config_file", "Open Config File")
+        .text("open_rec_dir", "Open Recordings Folder")
+        .text("open_log_dir", "Open Logs Folder")
+        .item(&PredefinedMenuItem::separator(app)?)
+        .text("quit", "Quit Dambo")
+        .build()
+}
+
 pub fn run(config_path: &str) {
     let runtime = Arc::new(
         DamboRuntime::from_config_path(config_path)
@@ -513,6 +607,7 @@ pub fn run(config_path: &str) {
             change_theme,
             fetch_room_options,
             remove_history_room,
+            set_record_raw,
             set_dropdown_expanded,
             open_obs_overlay,
             open_web_list,
@@ -602,23 +697,8 @@ pub fn run(config_path: &str) {
                 }
             });
 
-            // 5. Build system tray icon & context menu
-            let server_port = runtime.config_snapshot().server.port;
-            let menu = MenuBuilder::new(app)
-                .text("toggle_panel", "Show / Hide Panel")
-                .item(&PredefinedMenuItem::separator(app)?)
-                .text("open_obs_overlay", format!("Open OBS Overlay (:{})", server_port))
-                .text("copy_obs_url", format!("Copy OBS Overlay URL (:{})", server_port))
-                .text("open_web_list", format!("Open Danmaku Monitor (:{}/list)", server_port))
-                .text("copy_list_url", format!("Copy Danmaku Monitor URL (:{}/list)", server_port))
-                .item(&PredefinedMenuItem::separator(app)?)
-                .text("relogin", "Re-login")
-                .text("open_config_file", "Open Config File")
-                .text("open_rec_dir", "Open Recordings Folder")
-                .text("open_log_dir", "Open Logs Folder")
-                .item(&PredefinedMenuItem::separator(app)?)
-                .text("quit", "Quit Dambo")
-                .build()?;
+            // 5. Build system tray icon & dynamic state menu synced with etc/state.json
+            let menu = build_tray_menu(&app_handle, &runtime)?;
 
             let rt_menu = runtime.clone();
             let qr_menu = qr_poll_cancel.clone();
@@ -638,8 +718,31 @@ pub fn run(config_path: &str) {
                 })
                 .on_menu_event(move |app, event| {
                     let cfg = rt_menu.config_snapshot();
-                    match event.id().as_ref() {
+                    let menu_id = event.id().as_ref();
+                    if let Some(room_str) = menu_id.strip_prefix("room:") {
+                        let rt_c = rt_menu.clone();
+                        let target = room_str.to_string();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = rt_c.switch_room(&target).await {
+                                log::warn!("Tray switch_room({}) failed: {}", target, e);
+                            }
+                        });
+                        return;
+                    }
+                    if let Some(theme_name) = menu_id.strip_prefix("theme:") {
+                        if let Err(e) = rt_menu.change_theme(theme_name) {
+                            log::warn!("Tray change_theme('{}') failed: {}", theme_name, e);
+                        }
+                        return;
+                    }
+                    match menu_id {
                         "toggle_panel" => toggle_main_window(app),
+                        "toggle_record_raw" => {
+                            let next = !rt_menu.is_record_raw_enabled();
+                            if let Err(e) = rt_menu.set_record_raw(next) {
+                                log::warn!("Tray set_record_raw({}) failed: {}", next, e);
+                            }
+                        }
                         "open_obs_overlay" => {
                             let url = format!("http://{}:{}/", cfg.server.host, cfg.server.port);
                             open_in_os(&url);
@@ -689,6 +792,22 @@ pub fn run(config_path: &str) {
                 tray_builder = tray_builder.icon(icon);
             }
             tray_builder.build(app)?;
+
+            // 6. Refresh tray menu and notify UI capsule whenever etc/state.json changes
+            let mut state_rx = runtime.state_rx();
+            let app_state_sync = app_handle.clone();
+            let rt_state_sync = runtime.clone();
+            tauri::async_runtime::spawn(async move {
+                while state_rx.changed().await.is_ok() {
+                    let persisted: AppPersistedState = state_rx.borrow().clone();
+                    let _ = app_state_sync.emit_to("main", "app_state_changed", &persisted);
+                    if let Some(tray) = app_state_sync.tray_by_id("main-tray")
+                        && let Ok(next_menu) = build_tray_menu(&app_state_sync, &rt_state_sync)
+                    {
+                        let _ = tray.set_menu(Some(next_menu));
+                    }
+                }
+            });
 
             Ok(())
         })

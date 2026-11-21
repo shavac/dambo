@@ -16,7 +16,6 @@ tower-http = { version = "0.7.1", features = ["fs", "cors", "set-header"] }
 http = "1.5.0"
 futures-util = "0.3.34"
 toml = "1.1.8"
-toml_edit = "0.25.19"
 regex = "1.13.1"
 clru = "0.6.3"
 blivedm = "0.5.8"

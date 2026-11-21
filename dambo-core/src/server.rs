@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::hub::StateHub;
 use crate::model::{ChannelAMessage, ChannelBMessage};
+use crate::state::{StateStore, is_valid_theme_name};
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::body::Body;
@@ -12,7 +13,7 @@ use axum::routing::get;
 use http::{HeaderValue, Request, StatusCode, header};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -20,14 +21,11 @@ use tower_http::services::ServeDir;
 
 /// Shared state for Axum HTTP static serving and dual WebSocket channels (`/ws`, `/ws/event`).
 pub struct AppState {
-    pub config: Arc<RwLock<Config>>,
+    pub config: Arc<Config>,
+    pub state_store: Arc<StateStore>,
     pub hub: Arc<StateHub>,
     pub event_tx: broadcast::Sender<ChannelBMessage>,
     pub html_dir: PathBuf,
-}
-
-fn is_valid_theme_name(theme: &str) -> bool {
-    !theme.is_empty() && !theme.contains("..") && !theme.contains('/') && !theme.contains('\\')
 }
 
 async fn no_cache_middleware(req: Request<Body>, next: Next) -> Response {
@@ -44,10 +42,7 @@ async fn no_cache_middleware(req: Request<Body>, next: Next) -> Response {
 }
 
 async fn serve_active_theme(State(state): State<Arc<AppState>>) -> Response {
-    let theme = {
-        let cfg = state.config.read().expect("Config RwLock poisoned");
-        cfg.server.theme.clone()
-    };
+    let theme = state.state_store.theme();
 
     if !is_valid_theme_name(&theme) {
         return (StatusCode::BAD_REQUEST, "Invalid theme name").into_response();
@@ -251,7 +246,7 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.server.html_dir = temp_dir.to_string_lossy().to_string();
-        cfg.server.theme = "default".to_string();
+        let state_store = Arc::new(StateStore::load_or_default(temp_dir.join("etc/state.json")));
 
         let hub = Arc::new(StateHub::new(&FeedConfig::default()));
         hub.set_room_info(
@@ -271,7 +266,8 @@ mod tests {
         let (event_tx, _) = broadcast::channel(64);
 
         let state = Arc::new(AppState {
-            config: Arc::new(RwLock::new(cfg)),
+            config: Arc::new(cfg),
+            state_store,
             hub: hub.clone(),
             event_tx: event_tx.clone(),
             html_dir: temp_dir.clone(),

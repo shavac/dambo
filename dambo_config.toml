@@ -1,6 +1,5 @@
 [bilibili]
-room_id = 1828676297
-history_rooms = [1828676297, 22696954, 21465419, 685026, 23075997, 1773500703, 22924075, 24998481, 30365606, 22748536]
+room_id = 0                    # Optional static fallback room ID; runtime room & history live in state_file
 session_file = "./etc/dambo_session.json"
 avatar_cache_size = 2000       # In-memory LRU cache capacity for uid -> face_url
 
@@ -22,7 +21,7 @@ max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic batch_combo
 host = "localhost"             # Change to "0.0.0.0" for LAN access (e.g., iPad/mobile /list)
 port = 3838                    # Adjacent to robabel's port 3737
 html_dir = "static/themes"
-theme = "default"
+state_file = "etc/state.json"  # Runtime persisted state (room_id, theme, room_history, record_raw)
 
 [log]
 level = "info"

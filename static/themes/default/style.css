@@ -369,7 +369,9 @@ html, body {
     padding: 5px 10px;
     font-size: 13px;
 }
-.item-follow {
+.item-follow,
+.item-special_follow,
+.item-mutual_follow {
     border-color: rgba(244, 114, 182, 0.38);
 }
 .item-interaction .sender-name {

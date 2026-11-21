@@ -21,13 +21,17 @@
 dambo/
 ├── Cargo.toml                  # Virtual workspace root manifest (Edition 2024)
 ├── DESIGN.md                   # Product requirements & architecture design doc
-├── dambo_config.toml           # Default runtime configuration file
+├── dambo_config.toml           # Strictly read-only static configuration template
+├── etc/
+│   ├── dambo_session.json      # Persisted Bilibili auth cookies
+│   └── state.json              # Runtime state (current_room_id, theme, room_history[<=20], record_raw)
 ├── dambo-core/                 # Core shared library (used by both CLI and Tauri UI)
 │   ├── Cargo.toml              # Depends on axum (ws), tower-http (fs), tokio, etc.
 │   └── src/
-│       ├── lib.rs              # DamboRuntime isomorphic pipeline dispatcher
-│       ├── config.rs           # Configuration loading ([event], [record].record_raw) & persistence
-│       ├── model.rs            # RoomInfoSnapshot, RawBiliEvent (seq), Channel A/B contracts
+│       ├── lib.rs              # DamboRuntime isomorphic pipeline dispatcher (read-only Arc<Config> + StateStore)
+│       ├── config.rs           # Strictly read-only TOML configuration loading ([event], [server].state_file, [record].record_raw)
+│       ├── state.rs            # Fault-tolerant atomic JSON persistence for etc/state.json (StateStore)
+│       ├── model.rs            # RoomInfoSnapshot, RawBiliEvent (seq, msg_type), SessionSummary, Channel A/B contracts
 │       ├── auth.rs             # Bilibili cookie validation, QR generation, and polling FSM
 │       ├── collector.rs        # Single-room collector, seq sequencing, guard dedup & PB decoder
 │       ├── recorder.rs         # Isomorphic JSONL recorder, session_end summary & *_raw.jsonl sidecar
@@ -87,7 +91,13 @@ dambo/
   * 废除独立过滤层，改为在采集归一化阶段直接完成单源防重：跳过冗余的 `GUARD_BUY` 指令（若其携带头像则先预热缓存），仅解析 `guard_level > 0` 的 `USER_TOAST_MSG` / `USER_TOAST_MSG_V2`（映射为 `kind: "guard"`），并使用容量 256 的内存 LRU 集合按 `payflow_id` 做幂等去重（严禁以 `price` 关联同一性）。
   * 维护容量 `avatar_cache_size`（默认 2,000）的内存 LRU 缓存 `uid -> face_url`，严禁反查 HTTP 用户接口；触发无头像互动时自动补全。
 * **完整互动、连击与生命周期提取**：
-  * 保留全部 `like`（点赞）、`enter`、`follow`、`share`、`guard_enter`（`ENTRY_EFFECT`）；
+  * 保留全部 `like`（点赞）与 `guard_enter`（`ENTRY_EFFECT`）；
+  * 解析 `INTERACT_WORD` 与 `INTERACT_WORD_V2`（Protobuf 解包 `uid`、`uname`、`fans_medal`、`uinfo` 头像及原始 `msg_type`）并一一独立映射为标准 `kind`（同时保留原始 `msg_type` 字段）：
+    * `msg_type == 1` -> `enter`（进房）
+    * `msg_type == 2` -> `follow`（关注）
+    * `msg_type == 3` -> `share`（分享直播间）
+    * `msg_type == 4` -> `special_follow`（特别关注）
+    * `msg_type == 5` -> `mutual_follow`（互粉）
   * 在 `SEND_GIFT` / `SEND_GIFT_V2` 提取 `num`、`batch_combo_id` 与 `combo_stay_time`；
   * 将 `COMBO_SEND` / `GIFT_COMBO` 转化为轻量内部结算信号 `kind: "combo_end"`（携带 `batch_combo_id`，不分配 `seq`，不进 `recorder` 与 `/ws`，仅投递 `EventEngine` 提前结束连击桶）；
   * 提取 `live`、`preparing`（区分 `round == 1` 的轮播状态）、`room_change`、`superchat_delete`（含 `ids`）、`room_silent`、`room_block`、`warning`、`cut_off`。
@@ -96,24 +106,24 @@ dambo/
 
 ### 3.3 同构录制与场次连续性保护（Recorder）
 
-* **同构事件流**：`Recorder` 直接订阅 `collector` 产出的标准事件流写入主 `.jsonl`（完整保留 `like`、`chat`、`gift`、`superchat`、`guard`、`guard_enter`、`enter`、`follow`、`share` 及生命周期事件，不含内部信号 `combo_end`），确保录制文件与 `/ws/event` 源数据 100% 同构。
+* **同构事件流与付费头像保留策略**：`Recorder` 直接订阅 `collector` 产出的标准事件流写入主 `.jsonl`（完整保留 `like`、`chat`、`gift`、`superchat`、`guard`、`guard_enter`、`enter`、`follow`、`share`、`special_follow`、`mutual_follow` 及生命周期事件，不含内部信号 `combo_end`），确保录制文件与 `/ws/event` 源数据 100% 同构。其中 `face` 头像 URL **仅在付费事件（`superchat`、`guard` 以及 `price > 0` / `coin_type == "gold"` 的付费 `gift`）中保留落盘**，其余非付费互动与免费礼物（`price == 0`）一律清空 `face` 并在 JSON 序列化时自动省略。
 * **首行元事件与 `offset_ms` 锚定**：
   * 新建或轮转文件首行固定写入 `kind: "room_info"`（`seq = 0`）；若建连时已处于直播中（`live_status == 1` 且 `start_time` 有效），则将 `offset_ms` 基准锚定为 `start_time * 1000`。
 * **场次指纹与断线续写**：
   * 以 `(room_id, start_time)` 为场次指纹，网络闪断重连后若 `live_status == 1` 且 `start_time` 未变，则**继续追加原文件不切分**，仅发射一条 `kind: "reconnected"` 事件并保持 `seq` 单调递增。
 * **场次结束汇总（`session_end`）**：
-  * 收到 `preparing` 下播或进程退出（`SIGINT`/`SIGTERM`）前，向当前 `.jsonl` 末尾追加写入 `kind: "session_end"` 汇总元事件（统计 `chat_count`、`like_count`、`guard_count`、`gift_total_coin`、`superchat_total_coin`）并强制 `flush`。
+  * 收到 `preparing` 下播或进程退出（`SIGINT`/`SIGTERM`）前，向当前 `.jsonl` 末尾追加写入 `kind: "session_end"` 汇总元事件（统计 `chat_count`、`like_count`、`guard_count`、`gift_total_coin`、`superchat_total_coin`、`enter_count`、`follow_count`〔含普通关注/特关/互粉〕、`share_count`）并强制 `flush`。
 
 ### 3.4 基于 axum 的双通道输出架构（端口 3838）
 
-`server.rs` 使用 `axum` 搭建异步 HTTP 与双 WebSocket 服务（共享 `Arc<AppState>`），无独立 `filter.rs` 丢弃环节：
+`server.rs` 使用 `axum` 搭建异步 HTTP 与双 WebSocket 服务（共享 `Arc<AppState>`，注入只读 `Arc<Config>` 与运行时 `Arc<StateStore>`），无独立 `filter.rs` 丢弃环节：
 
 #### 通道 A：网页展示与实时直通流（`http://<host>:3838/`、`/list` & `ws://<host>:3838/ws`）
 
-* `GET /`：动态读取激活主题（`static/themes/<theme>/index.html`），支持运行时热切换即时生效。
+* `GET /`：从 `StateStore` 读取运行时激活主题（`static/themes/<theme>/index.html`，默认为 `"default"`），支持通过托盘或胶囊面板切换并即时生效。
 * `GET /list`：返回 `static/themes/list/index.html`，提供独立网页端弹幕监看页。
 * `nest_service("/static/themes", ServeDir::new(...))`：统一注入 `Cache-Control: no-store, no-cache, must-revalidate` 响应头，防止 OBS 浏览器源缓存旧资产。
-* `GET /ws`：实时向前端推送所有标准事件（含 `like`、`enter` 等；内置主题默认跳过 `like` 渲染，可通过 `?show_like=1` 开启），并在 `Snapshot` 环形缓冲区（`feed.max_history`，默认 300）中**仅保留核心视觉事件（`chat`、`gift`、`superchat`、`guard`）**，防止刷新挂件时历史弹幕被高频点赞或进场挤没。
+* `GET /ws`：实时向前端推送所有标准事件（**全量保留 `face` 头像供 OBS 视觉挂件渲染**，含 `like`、`enter`、`follow`、`share`、`special_follow`、`mutual_follow` 等；内置主题默认跳过 `like` 渲染，可通过 `?show_like=1` 开启），并在 `Snapshot` 环形缓冲区（`feed.max_history`，默认 300）中**仅保留核心视觉事件（`chat`、`gift`、`superchat`、`guard`）**，跳过高频 `enter` 与 `like`，防止刷新挂件时历史视觉消息被挤没。
 
 #### 通道 B：robao 中控智能事件整形流（`ws://<host>:3838/ws/event`）
 
@@ -121,13 +131,13 @@ dambo/
 * **`EventEngine` 三车道智能分流与连击桶**：
   1. **零延迟直通车道（0ms）**：
      * 关键状态与高优互动（`priority = 2`）：`live`、`preparing`、`room_change`、`room_silent`、`superchat_delete`、`room_block`、`warning`、`cut_off`、`reconnected`、`superchat`、`guard`；
-     * 优质文本弹幕、社交信号与非连击礼物（`priority = 1`）：`follow`、`share`、`guard_enter`、非连击 `gift`（`combo_stay_time == 0 || batch_combo_id == None`），以及 `dm_type == 0` 且剥离 `[表情名]` 与空白后的有效字符数 `>= min_passthrough_chars`（默认 4）的 `chat`。
+     * 社交互动、优质文本弹幕与非连击礼物（`priority = 1`）：`enter`、`follow`、`share`、`special_follow`、`mutual_follow`、`guard_enter`、非连击 `gift`（`combo_stay_time == 0 || batch_combo_id == None`），以及 `dm_type == 0` 且剥离 `[表情名]` 与空白后的有效字符数 `>= min_passthrough_chars`（默认 4）的 `chat`（上述 5 类 `INTERACT_WORD*` 互动均保持单条原始颗粒度直通，不合并）。
   2. **高频噪音与短句聚合车道（`window_ms = 2500ms` `Reservoir`，`priority = 0`）**：
-     * `like` 与普通 `enter` 按类型合并计数；
+     * `like` 按类型合并计数；
      * 纯表情弹幕（`dm_type == 1` 或剥离 `[xxx]` 后为空）及超短弹幕（有效字符数 `< min_passthrough_chars`）经大小写与连续重复字符归一化后合并计数，到期输出 `EventBatch`。
   3. **动态礼物连击聚合桶（按 `batch_combo_id` 聚合，`priority = 1`）**：
      * 当 `combo_stay_time > 0` 且 `batch_combo_id` 有效时，以 `batch_combo_id` 为键累加 `num` 与总价值，截止时间设为 `min(now + combo_stay_time, first_seen_at + max_combo_wait_secs)`；收到匹配的 `combo_end` 信号时提前刷出并销毁桶，到达截止时间未结束时自动兜底刷出。
-* **背压保护**：有界队列 `buffer_capacity = 512`，队满优先淘汰低价值 `like` / 无牌 `enter`，其次短弹幕，绝不丢弃关键状态/SC/上舰/连击结算信号；消息体剥离 `face` URL，保留 `seq`、`uid`、`uname`、`medal_level` 等结构化字段。
+* **背压保护与头像精简**：有界队列 `buffer_capacity = 512`，队满优先淘汰低价值 `like` / 无牌 `enter`，其次短弹幕，绝不丢弃关键状态/SC/上舰/连击结算信号；输出至 `/ws/event` 时，**仅付费事件（`superchat`、`guard` 及 `price > 0` 的付费 `gift`）保留 `face` 头像 URL**，非付费事件与免费礼物一律剥离 `face`，保留 `seq`、`msg_type`、`uid`、`uname`、`medal_level` 等结构化字段。
 
 ---
 
@@ -135,19 +145,25 @@ dambo/
 
 1. 主控制浮窗（单行紧凑悬浮舱）：
    * 左侧拖拽手柄 + 登录账号徽章（点击登出重扫码）+ 房间选择与三态指示灯（⚪未连 / 🟡未开播 / 🟢直播中）+ 主题切换 + 一键复制 OBS 地址（`:3838`）+ 更多菜单。
-   * 通信架构解耦：`dambo-ui` 不连接 `/ws`，全面使用 Tauri 原生 IPC（`room_state_changed`、`auth_state_changed`）。
+   * 通信架构解耦：`dambo-ui` 不连接 `/ws`，全面使用 Tauri 原生 IPC（`room_state_changed`、`auth_state_changed`、`app_state_changed`）。
 2. 系统托盘（Tray Icon）：
-   * 左键切换浮窗显隐，右键菜单快捷访问 OBS 挂件、`/list`、配置/录制/日志目录、重新登录与退出。
+   * 左键切换浮窗显隐；右键菜单内嵌 **Recent Rooms** 历史房间快捷子菜单（直接读取 `StateStore` 中的 `room_history` 展示房间号/主播名/标题并一键切换）、**OBS Theme** 主题切换子菜单、`Record Raw Packets (*_raw.jsonl)` 运行时抓包开关，以及 OBS 挂件、`/list`、配置/录制/日志目录、重新登录与退出入口；所有状态变更均通过 `app_state_changed` 双向同步并原子写入 `etc/state.json`。
 
 ---
 
-## 5. 配置文件规范（`dambo_config.toml`）
+## 5. 静态配置与运行时状态分离（`dambo_config.toml` & `etc/state.json`）
+
+* **职责边界**：
+  * `dambo_config.toml`：**全程只读（`Arc<Config>`）**，仅承载静态服务端口、日志级别、录制目录模板、`state_file` 路径及可选静态兜底 `room_id`；程序在运行期绝不回写 `dambo_config.toml`。
+  * `etc/state.json`（由 `[server].state_file` 指定，支持相对/绝对路径）：**运行时状态唯一持久化文件（`StateStore`）**；缺失或 JSON 损坏时记录 `warn` 日志并安全回退默认空状态，不阻断启动；任何变更均自动创建父目录后通过同目录临时文件 + `fs::rename` 原子替换。
+* **启动房间优先级**：CLI `--room` 覆盖 > `etc/state.json` 的 `current_room_id` > 只读 `dambo_config.toml` 的 `[bilibili].room_id`。
+
+### 5.1 静态配置文件模板（`dambo_config.toml`）
 
 ```toml
 [bilibili]
-room_id = 0                    # Target live room ID (numeric; 0 = disconnected; auto-resolves short IDs)
-history_rooms = []             # Recently connected numeric room IDs
-session_file = "./dambo_session.json"
+room_id = 0                    # Optional static fallback room ID; runtime room & history live in state_file
+session_file = "./etc/dambo_session.json"
 avatar_cache_size = 2000       # In-memory LRU cache capacity for uid -> face_url
 
 # Channel A: Real-time feed configuration (serves / OBS overlay and /list web feed)
@@ -168,7 +184,7 @@ max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic batch_combo
 host = "localhost"             # Change to "0.0.0.0" for LAN access (e.g., iPad/mobile /list)
 port = 3838                    # Adjacent to robabel's port 3737
 html_dir = "static/themes"
-theme = "default"              # Active OBS overlay theme served at root /
+state_file = "etc/state.json"  # Runtime persisted state (current_room_id, theme, room_history, record_raw)
 
 [log]
 level = "info"
@@ -183,6 +199,27 @@ dir = "./rec"
 filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 ```
 
+### 5.2 运行时持久化状态 Schema（`etc/state.json`）
+
+```json
+{
+  "current_room_id": 21452505,
+  "theme": "default",
+  "room_history": [
+    {
+      "room_id": 21452505,
+      "uname": "主播A",
+      "title": "深夜杂谈",
+      "last_used_at": 1763280005
+    }
+  ],
+  "record_raw": false
+}
+```
+
+* `theme` 加载时校验 `is_valid_theme_name`（禁止空串、`"list"`、`..`、`/`、`\` 与控制字符），非法则回退为 `"default"`；
+* `room_history` 每次连接或收到 `room_info` / `room_change` 时自动去重、更新主播昵称/房间标题并置顶，上限保留最近 `20` 条。
+
 ---
 
 ## 6. 数据契约（JSONL 录制 & WebSocket 协议）
@@ -191,15 +228,16 @@ filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 
 #### 主事件文件（`./rec/dambo_主播A_YYYYMMDD_HHMMSS.jsonl`，受 `[record].enabled` 控制）
 
-首行写入 `room_info`（`seq = 0`），中间按 `seq` 单调递增记录 100% 标准事件（含 `live`、`preparing`、`room_change`、`room_silent`、`superchat_delete`、`room_block`、`warning`、`cut_off`、`reconnected`、`chat`、`superchat`、`gift`、`guard`、`guard_enter`、`enter`、`follow`、`share`、`like`），结束时写入 `session_end` 汇总：
+首行写入 `room_info`（`seq = 0`），中间按 `seq` 单调递增记录 100% 标准事件（含 `live`、`preparing`、`room_change`、`room_silent`、`superchat_delete`、`room_block`、`warning`、`cut_off`、`reconnected`、`chat`、`superchat`、`gift`、`guard`、`guard_enter`、`enter`、`follow`、`share`、`special_follow`、`mutual_follow`、`like`），结束时写入 `session_end` 汇总；其中 `face` 仅在付费事件（付费 `gift`、`superchat`、`guard`）中写入，其余事件自动省略：
 
 ```json
 {"seq":0,"offset_ms":5000,"timestamp":1763280005000,"room_id":21452505,"room_uname":"主播A","kind":"room_info","uid":123456,"uname":"主播A","content":"深夜杂谈","price":0,"start_time":1763280000,"short_id":512,"title":"深夜杂谈","area_name":"虚拟日常","parent_area_name":"虚拟主播","live_status":1,"raw_cmd":"ROOM_INFO"}
-{"seq":1,"offset_ms":6234,"timestamp":1763280006234,"room_id":21452505,"room_uname":"主播A","kind":"chat","uid":3829104,"uname":"观众甲","face":"https://i0.hdslb.com/bfs/face/example.jpg","medal_name":"星光","medal_level":12,"content":"这波操作太细节了","dm_type":0,"price":0,"raw_cmd":"DANMU_MSG"}
-{"seq":2,"offset_ms":7100,"timestamp":1763280007100,"room_id":21452505,"room_uname":"主播A","kind":"gift","uid":3829104,"uname":"观众甲","content":"辣条 x3","price":300,"num":3,"batch_combo_id":"batch:gift:1","combo_stay_time":3,"raw_cmd":"SEND_GIFT"}
-{"seq":3,"offset_ms":8200,"timestamp":1763280008200,"room_id":21452505,"room_uname":"主播A","kind":"guard","uid":31839477,"uname":"舰长粉","content":"在主播的直播间开通了舰长","price":168000,"num":1,"guard_level":3,"payflow_id":"2611210800123456","start_time":1763280008,"raw_cmd":"USER_TOAST_MSG"}
-{"seq":4,"offset_ms":9420,"timestamp":1763280009420,"room_id":21452505,"room_uname":"主播A","kind":"like","uid":9918273,"uname":"老粉丁","content":"为主播点赞了","price":0,"raw_cmd":"LIKE_INFO_V3_CLICK"}
-{"seq":5,"offset_ms":15000,"timestamp":1763280015000,"room_id":21452505,"room_uname":"主播A","kind":"session_end","uid":0,"uname":"","content":"场次结束汇总","price":0,"summary":{"chat_count":1,"like_count":1,"guard_count":1,"gift_total_coin":300,"superchat_total_coin":0},"raw_cmd":"SESSION_END"}
+{"seq":1,"offset_ms":6234,"timestamp":1763280006234,"room_id":21452505,"room_uname":"主播A","kind":"chat","uid":3829104,"uname":"观众甲","medal_name":"星光","medal_level":12,"content":"这波操作太细节了","dm_type":0,"price":0,"raw_cmd":"DANMU_MSG"}
+{"seq":2,"offset_ms":7100,"timestamp":1763280007100,"room_id":21452505,"room_uname":"主播A","kind":"gift","uid":3829104,"uname":"观众甲","face":"https://i0.hdslb.com/bfs/face/example.jpg","content":"辣条 x3","price":300,"num":3,"batch_combo_id":"batch:gift:1","combo_stay_time":3,"raw_cmd":"SEND_GIFT"}
+{"seq":3,"offset_ms":8200,"timestamp":1763280008200,"room_id":21452505,"room_uname":"主播A","kind":"guard","uid":31839477,"uname":"舰长粉","face":"https://i0.hdslb.com/bfs/face/guard.jpg","content":"在主播的直播间开通了舰长","price":168000,"num":1,"guard_level":3,"payflow_id":"2611210800123456","start_time":1763280008,"raw_cmd":"USER_TOAST_MSG"}
+{"seq":4,"offset_ms":8900,"timestamp":1763280008900,"room_id":21452505,"room_uname":"主播A","kind":"special_follow","msg_type":4,"uid":9918273,"uname":"老粉丁","content":"特别关注了直播间","price":0,"raw_cmd":"INTERACT_WORD_V2"}
+{"seq":5,"offset_ms":9420,"timestamp":1763280009420,"room_id":21452505,"room_uname":"主播A","kind":"like","uid":9918273,"uname":"老粉丁","content":"为主播点赞了","price":0,"raw_cmd":"LIKE_INFO_V3_CLICK"}
+{"seq":6,"offset_ms":15000,"timestamp":1763280015000,"room_id":21452505,"room_uname":"主播A","kind":"session_end","uid":0,"uname":"","content":"场次结束汇总","price":0,"summary":{"chat_count":1,"like_count":1,"guard_count":1,"gift_total_coin":300,"superchat_total_coin":0,"enter_count":0,"follow_count":1,"share_count":0},"raw_cmd":"SESSION_END"}
 ```
 
 #### 旁路原始抓包文件（`./rec/dambo_主播A_YYYYMMDD_HHMMSS_raw.jsonl`，受 `[record].record_raw` 或 `--record-raw` 独立控制）
@@ -300,6 +338,33 @@ filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
         "medal_level": 18,
         "content": "为主播点赞了",
         "count": 23,
+        "sample_users": ["老粉丁"],
+        "price": 0
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "type": "EventBatch",
+  "data": {
+    "batch_id": 89,
+    "room_id": 21452505,
+    "room_uname": "主播A",
+    "priority": 1,
+    "timestamp": 1763280008100,
+    "events": [
+      {
+        "seq": 16,
+        "kind": "special_follow",
+        "msg_type": 4,
+        "uid": 9918273,
+        "uname": "老粉丁",
+        "medal_level": 18,
+        "content": "特别关注了直播间",
+        "count": 1,
         "sample_users": ["老粉丁"],
         "price": 0
       }

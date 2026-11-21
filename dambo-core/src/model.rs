@@ -1,3 +1,4 @@
+use crate::state::RoomHistoryEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,6 +69,12 @@ pub struct SessionSummary {
     pub guard_count: u64,
     pub gift_total_coin: u64,
     pub superchat_total_coin: u64,
+    #[serde(default)]
+    pub enter_count: u64,
+    #[serde(default)]
+    pub follow_count: u64,
+    #[serde(default)]
+    pub share_count: u64,
 }
 
 /// Canonical normalized event shared by `recorder.rs`, Channel A (`/ws`), and Channel B (`/ws/event`).
@@ -86,8 +93,11 @@ pub struct RawBiliEvent {
     pub room_uname: String,
     /// Event category: room_info, live, preparing, room_change, room_silent, superchat_delete,
     /// room_block, warning, cut_off, reconnected, session_end, chat, superchat, gift, guard,
-    /// guard_enter, enter, follow, share, like, combo_end
+    /// guard_enter, enter, follow, share, special_follow, mutual_follow, like, combo_end
     pub kind: String,
+    /// Raw interaction `msg_type` (`INTERACT_WORD` / `INTERACT_WORD_V2`: 1=enter, 2=follow, 3=share, 4=special_follow, 5=mutual_follow)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msg_type: Option<u32>,
     /// Sender user ID
     pub uid: u64,
     /// Sender nickname
@@ -157,6 +167,27 @@ pub struct RawBiliEvent {
     pub raw_cmd: String,
 }
 
+impl RawBiliEvent {
+    /// Returns `true` iff this event is a paid event (`superchat`, `guard`, or paid `gift` with `price > 0`)
+    /// that retains its `face` avatar URL in `.jsonl` recordings and `/ws/event`.
+    pub fn is_paid_event_for_face(&self) -> bool {
+        match self.kind.as_str() {
+            "superchat" | "super_chat" | "guard" => true,
+            "gift" => self.price > 0,
+            _ => false,
+        }
+    }
+
+    /// Return a cloned event with `face` stripped (`None`) unless `is_paid_event_for_face()` is `true`.
+    pub fn sanitized_for_standard_stream(&self) -> Self {
+        let mut out = self.clone();
+        if !out.is_paid_event_for_face() {
+            out.face = None;
+        }
+        out
+    }
+}
+
 /// Channel A Snapshot item (/ws)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotItem {
@@ -164,6 +195,8 @@ pub struct SnapshotItem {
     #[serde(default)]
     pub seq: u64,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msg_type: Option<u32>,
     pub uid: u64,
     pub uname: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -214,8 +247,12 @@ pub struct EventItem {
     #[serde(default)]
     pub seq: u64,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msg_type: Option<u32>,
     pub uid: u64,
     pub uname: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<String>,
     pub medal_level: u32,
     pub content: String,
     pub count: u32,
@@ -283,7 +320,7 @@ pub struct RoomQuickItem {
 pub struct RoomOptionsPayload {
     pub my_room: Option<RoomQuickItem>,
     pub following_live: Vec<RoomQuickItem>,
-    pub history_rooms: Vec<u64>,
+    pub history_rooms: Vec<RoomHistoryEntry>,
 }
 
 /// Initial hydrated UI state for Tauri capsule
@@ -295,5 +332,6 @@ pub struct InitialUiState {
     pub themes: Vec<String>,
     pub server_host: String,
     pub server_port: u16,
-    pub history_rooms: Vec<u64>,
+    pub history_rooms: Vec<RoomHistoryEntry>,
+    pub record_raw: bool,
 }

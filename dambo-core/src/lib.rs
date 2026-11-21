@@ -6,6 +6,7 @@ pub mod hub;
 pub mod model;
 pub mod recorder;
 pub mod server;
+pub mod state;
 
 use crate::auth::AuthManager;
 use crate::collector::{CollectorContext, CollectorManager, parse_room_input};
@@ -18,11 +19,12 @@ use crate::model::{
 };
 use crate::recorder::Recorder;
 use crate::server::AppState;
+use crate::state::{AppPersistedState, RoomHistoryEntry, StateStore, is_valid_theme_name};
 use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -50,14 +52,15 @@ fn resolve_bind_addr(host: &str, port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
-/// Central orchestrator owning the `dambo` pipeline, configuration, and lifecycle.
+/// Central orchestrator owning the `dambo` pipeline, read-only configuration, persisted runtime state, and lifecycle.
 pub struct DamboRuntime {
     pub config_manager: ConfigManager,
     pub base_dir: PathBuf,
     pub html_dir: PathBuf,
     pub rec_dir: PathBuf,
     pub log_dir: PathBuf,
-    pub config: Arc<RwLock<Config>>,
+    pub config: Arc<Config>,
+    pub state_store: Arc<StateStore>,
     pub auth: Arc<AuthManager>,
     pub collector: Arc<CollectorManager>,
     pub recorder: Arc<Mutex<Recorder>>,
@@ -87,15 +90,19 @@ impl DamboRuntime {
 
     pub fn from_parts(config_manager: ConfigManager, base_dir: PathBuf, cfg: Config) -> Self {
         let session_path = resolve_path(&base_dir, &cfg.bilibili.session_file);
+        let state_path = resolve_path(&base_dir, &cfg.server.state_file);
         let html_dir = resolve_path(&base_dir, &cfg.server.html_dir);
         let rec_dir = resolve_path(&base_dir, &cfg.record.dir);
         let log_dir = resolve_path(&base_dir, &cfg.log.path);
+
+        let state_store = Arc::new(StateStore::load_or_default(state_path));
+        let effective_record_raw = state_store.record_raw().unwrap_or(cfg.record.record_raw);
 
         let auth = Arc::new(AuthManager::new(session_path));
         let collector = Arc::new(CollectorManager::new());
         let recorder = Arc::new(Mutex::new(Recorder::new(
             cfg.record.enabled,
-            cfg.record.record_raw,
+            effective_record_raw,
             rec_dir.clone(),
             cfg.record.filename_pattern.clone(),
         )));
@@ -108,7 +115,8 @@ impl DamboRuntime {
             html_dir,
             rec_dir,
             log_dir,
-            config: Arc::new(RwLock::new(cfg)),
+            config: Arc::new(cfg),
+            state_store,
             auth,
             collector,
             recorder,
@@ -118,25 +126,48 @@ impl DamboRuntime {
         }
     }
 
-    /// Runtime override for `[record].record_raw` (e.g. CLI `--record-raw`).
-    pub fn set_record_raw(&self, enabled: bool) {
-        {
-            let mut cfg = self.config.write().expect("Config RwLock poisoned");
-            cfg.record.record_raw = enabled;
+    /// Returns whether sidecar `*_raw.jsonl` packet capture is currently enabled.
+    pub fn is_record_raw_enabled(&self) -> bool {
+        self.recorder
+            .lock()
+            .map(|r| r.is_record_raw_enabled())
+            .unwrap_or_else(|_| {
+                self.state_store
+                    .record_raw()
+                    .unwrap_or(self.config.record.record_raw)
+            })
+    }
+
+    /// Update and atomically persist the runtime `record_raw` toggle into `etc/state.json`.
+    pub fn set_record_raw(&self, enabled: bool) -> Result<()> {
+        if let Ok(mut rec) = self.recorder.lock() {
+            rec.set_record_raw(enabled);
         }
+        self.state_store.set_record_raw(Some(enabled))?;
+        Ok(())
+    }
+
+    /// Per-process in-memory override for `[record].record_raw` (e.g. CLI `--record-raw`).
+    pub fn set_record_raw_override(&self, enabled: bool) {
         if let Ok(mut rec) = self.recorder.lock() {
             rec.set_record_raw(enabled);
         }
     }
 
     /// Start isomorphic dispatcher, `EventEngine` loop, Axum HTTP/WS server,
-    /// and auto-connect configured `room_id` if non-zero.
+    /// and auto-connect persisted or fallback `room_id`.
     pub async fn start(&self) -> Result<()> {
+        self.start_with_room_override(None).await
+    }
+
+    /// Start runtime services with an optional CLI room override taking precedence over `state.json`.
+    pub async fn start_with_room_override(&self, room_override: Option<&str>) -> Result<()> {
         // 1. Isomorphic dispatcher: Collector -> Recorder + StateHub (/ws) + EventEngine (/ws/event)
         let mut raw_rx = self.collector.subscribe();
         let recorder = self.recorder.clone();
         let hub = self.hub.clone();
         let event_engine = self.event_engine.clone();
+        let state_store = self.state_store.clone();
         let tap_cancel = self.cancel.child_token();
 
         tokio::spawn(async move {
@@ -151,8 +182,10 @@ impl DamboRuntime {
                                     continue;
                                 }
 
+                                let standard_ev = ev.sanitized_for_standard_stream();
+
                                 if let Ok(mut rec) = recorder.lock()
-                                    && let Err(e) = rec.record_event(&ev)
+                                    && let Err(e) = rec.record_event(&standard_ev)
                                 {
                                     log::error!("Recorder write failed: {}", e);
                                 }
@@ -170,13 +203,26 @@ impl DamboRuntime {
                                         live_status: ev.live_status.unwrap_or(0),
                                         start_time: ev.start_time,
                                     };
+                                    if let Err(e) = state_store.record_room_info(&snap) {
+                                        log::warn!("Failed to persist room_info into StateStore: {}", e);
+                                    }
                                     hub.set_room_info(snap, connected);
-                                    event_engine.emit_room_info(ev);
+                                    event_engine.emit_room_info(standard_ev);
                                     continue;
                                 }
 
+                                if ev.kind == "room_change"
+                                    && ev.room_id > 0
+                                    && let Some(ref title) = ev.title
+                                    && let Err(e) = state_store.record_room_visit(ev.room_id, &ev.room_uname, title)
+                                {
+                                    log::warn!("Failed to persist room_change metadata into StateStore: {}", e);
+                                }
+
+                                // Channel A (/ws) retains full `face` for OBS visual rendering;
+                                // Channel B (/ws/event) receives paid-only `face` sanitized events.
                                 hub.push_event(&ev);
-                                event_engine.enqueue(ev);
+                                event_engine.enqueue(standard_ev);
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 log::warn!("Dispatcher lagged by {} collector events", n);
@@ -196,13 +242,10 @@ impl DamboRuntime {
         });
 
         // 3. Axum HTTP & dual WS server
-        let (host, port) = {
-            let cfg = self.config.read().expect("Config RwLock poisoned");
-            (cfg.server.host.clone(), cfg.server.port)
-        };
-        let addr = resolve_bind_addr(&host, port);
+        let addr = resolve_bind_addr(&self.config.server.host, self.config.server.port);
         let app_state = Arc::new(AppState {
             config: self.config.clone(),
+            state_store: self.state_store.clone(),
             hub: self.hub.clone(),
             event_tx: self.event_engine.sender(),
             html_dir: self.html_dir.clone(),
@@ -214,15 +257,15 @@ impl DamboRuntime {
             }
         });
 
-        // 4. Initial room connection if configured
-        let initial_room = self
-            .config
-            .read()
-            .expect("Config RwLock poisoned")
-            .bilibili
-            .room_id;
-        if initial_room > 0 {
-            self.connect_room_internal(initial_room, false).await?;
+        // 4. Auto-connect: CLI override > persisted state.json current_room_id > static config.bilibili.room_id
+        if let Some(raw) = room_override {
+            let room_id = self.switch_room(raw).await?;
+            log::info!("🎯 CLI room override connected: {}", room_id);
+        } else if let Some(saved_room) = self.state_store.current_room_id().filter(|&id| id > 0) {
+            self.connect_room_internal(saved_room, false).await?;
+        } else if self.config.bilibili.room_id > 0 {
+            self.connect_room_internal(self.config.bilibili.room_id, false)
+                .await?;
         }
 
         Ok(())
@@ -236,23 +279,9 @@ impl DamboRuntime {
     }
 
     async fn connect_room_internal(&self, room_id: u64, persist: bool) -> Result<()> {
-        let (avatar_cache_size, history_snapshot) = {
-            let mut cfg = self.config.write().expect("Config RwLock poisoned");
-            cfg.bilibili.room_id = room_id;
-            cfg.bilibili.history_rooms.retain(|&r| r != room_id);
-            cfg.bilibili.history_rooms.insert(0, room_id);
-            if cfg.bilibili.history_rooms.len() > 20 {
-                cfg.bilibili.history_rooms.truncate(20);
-            }
-            (
-                cfg.bilibili.avatar_cache_size,
-                cfg.bilibili.history_rooms.clone(),
-            )
-        };
-
-        if persist && self.config_manager.path.exists() {
-            self.config_manager
-                .update_room(room_id, &history_snapshot)
+        if persist {
+            self.state_store
+                .set_current_room(Some(room_id))
                 .context("Failed to persist room switch")?;
         }
 
@@ -266,7 +295,7 @@ impl DamboRuntime {
             hub: self.hub.clone(),
             recorder: self.recorder.clone(),
             event_engine: self.event_engine.clone(),
-            avatar_cache_size,
+            avatar_cache_size: self.config.bilibili.avatar_cache_size,
         };
         self.collector.connect_room(room_id, ctx).await;
         Ok(())
@@ -279,26 +308,13 @@ impl DamboRuntime {
             rec.finish_session()?;
         }
 
-        let history_snapshot = {
-            let mut cfg = self.config.write().expect("Config RwLock poisoned");
-            cfg.bilibili.room_id = 0;
-            cfg.bilibili.history_rooms.clone()
-        };
-
-        if self.config_manager.path.exists() {
-            self.config_manager.update_room(0, &history_snapshot)?;
-        }
+        self.state_store.set_current_room(None)?;
         Ok(())
     }
 
     pub fn change_theme(&self, theme: &str) -> Result<()> {
         let clean = theme.trim();
-        if clean.is_empty()
-            || clean == "list"
-            || clean.contains("..")
-            || clean.contains('/')
-            || clean.contains('\\')
-        {
+        if !is_valid_theme_name(clean) {
             return Err(anyhow!("Invalid OBS theme name: '{}'", theme));
         }
 
@@ -311,14 +327,7 @@ impl DamboRuntime {
             ));
         }
 
-        {
-            let mut cfg = self.config.write().expect("Config RwLock poisoned");
-            cfg.server.theme = clean.to_string();
-        }
-
-        if self.config_manager.path.exists() {
-            self.config_manager.update_theme(clean)?;
-        }
+        self.state_store.set_theme(clean)?;
         Ok(())
     }
 
@@ -344,16 +353,8 @@ impl DamboRuntime {
         themes
     }
 
-    pub fn remove_history_room(&self, room_id: u64) -> Result<Vec<u64>> {
-        let (current_room, updated) = {
-            let mut cfg = self.config.write().expect("Config RwLock poisoned");
-            cfg.bilibili.history_rooms.retain(|&r| r != room_id);
-            (cfg.bilibili.room_id, cfg.bilibili.history_rooms.clone())
-        };
-        if self.config_manager.path.exists() {
-            self.config_manager.update_room(current_room, &updated)?;
-        }
-        Ok(updated)
+    pub fn remove_history_room(&self, room_id: u64) -> Result<Vec<RoomHistoryEntry>> {
+        self.state_store.remove_history_room(room_id)
     }
 
     pub async fn fetch_room_options(&self) -> RoomOptionsPayload {
@@ -365,13 +366,7 @@ impl DamboRuntime {
         }
         let my_room = self.auth.fetch_my_room().await.ok().flatten();
         let following_live = self.auth.fetch_following_live().await.unwrap_or_default();
-        let history_rooms = self
-            .config
-            .read()
-            .expect("Config RwLock poisoned")
-            .bilibili
-            .history_rooms
-            .clone();
+        let history_rooms = self.state_store.room_history();
 
         RoomOptionsPayload {
             my_room,
@@ -381,15 +376,16 @@ impl DamboRuntime {
     }
 
     pub fn initial_ui_state(&self) -> InitialUiState {
-        let cfg = self.config.read().expect("Config RwLock poisoned").clone();
+        let persisted = self.state_store.snapshot();
         InitialUiState {
             room_state: self.hub.room_state(),
             auth_state: self.auth.current_state(),
-            theme: cfg.server.theme,
+            theme: persisted.theme,
             themes: self.list_themes(),
-            server_host: cfg.server.host,
-            server_port: cfg.server.port,
-            history_rooms: cfg.bilibili.history_rooms,
+            server_host: self.config.server.host.clone(),
+            server_port: self.config.server.port,
+            history_rooms: persisted.room_history,
+            record_raw: self.is_record_raw_enabled(),
         }
     }
 
@@ -401,12 +397,16 @@ impl DamboRuntime {
         self.auth.subscribe()
     }
 
+    pub fn state_rx(&self) -> watch::Receiver<AppPersistedState> {
+        self.state_store.subscribe()
+    }
+
     pub fn subscribe_event(&self) -> broadcast::Receiver<ChannelBMessage> {
         self.event_engine.subscribe()
     }
 
     pub fn config_snapshot(&self) -> Config {
-        self.config.read().expect("Config RwLock poisoned").clone()
+        (*self.config).clone()
     }
 
     pub fn shutdown(&self) {
@@ -451,12 +451,9 @@ mod tests {
         )
         .unwrap();
 
+        let raw_toml = "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\nstate_file = \"etc/state.json\"\n[event]\nwindow_ms = 60\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n";
         let cfg_path = temp_dir.join("dambo_config.toml");
-        fs::write(
-            &cfg_path,
-            "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\n[event]\nwindow_ms = 60\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n",
-        )
-        .unwrap();
+        fs::write(&cfg_path, raw_toml).unwrap();
 
         let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
         assert_eq!(rt.list_themes(), vec!["default", "sc-ticker"]);
@@ -500,6 +497,7 @@ mod tests {
             kind: "like".to_string(),
             uid: 11,
             uname: "点赞粉".to_string(),
+            face: Some("https://face/11.jpg".to_string()),
             content: "点赞".to_string(),
             raw_cmd: "LIKE_INFO_V3_CLICK".to_string(),
             ..Default::default()
@@ -536,7 +534,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(msg1, ChannelBMessage::EventBatch(ref b) if b.priority == 2 && b.events[0].kind == "superchat")
+            matches!(msg1, ChannelBMessage::EventBatch(ref b) if b.priority == 2 && b.events[0].kind == "superchat" && b.events[0].face.as_deref() == Some("https://face/22.jpg"))
         );
 
         let msg2 = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
@@ -544,19 +542,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(msg2, ChannelBMessage::EventBatch(ref b) if b.priority == 0 && b.events[0].kind == "like")
+            matches!(msg2, ChannelBMessage::EventBatch(ref b) if b.priority == 0 && b.events[0].kind == "like" && b.events[0].face.is_none())
         );
 
-        // Channel A received BOTH like and superchat live, while Snapshot ring buffer keeps ONLY superchat!
-        let mut seen_ws_kinds = Vec::new();
+        // Channel A received BOTH like and superchat live WITH full `face` preserved, while Snapshot ring buffer keeps ONLY superchat!
+        let mut seen_ws_items = Vec::new();
         while let Ok(m) = ws_a_rx.try_recv() {
             if let crate::model::ChannelAMessage::Event(item) = m {
-                seen_ws_kinds.push(item.kind);
+                seen_ws_items.push((item.kind, item.face));
             }
         }
         assert_eq!(
-            seen_ws_kinds,
-            vec!["like".to_string(), "superchat".to_string()]
+            seen_ws_items,
+            vec![
+                ("like".to_string(), Some("https://face/11.jpg".to_string())),
+                (
+                    "superchat".to_string(),
+                    Some("https://face/22.jpg".to_string())
+                ),
+            ]
         );
 
         let snap = rt.hub.snapshot();
@@ -564,7 +568,25 @@ mod tests {
         assert_eq!(snap.items[0].kind, "superchat");
 
         rt.change_theme("sc-ticker").unwrap();
-        assert_eq!(rt.config_snapshot().server.theme, "sc-ticker");
+        rt.set_record_raw(true).unwrap();
+
+        let persisted = rt.state_store.snapshot();
+        assert_eq!(persisted.theme, "sc-ticker");
+        assert_eq!(persisted.current_room_id, Some(21452505));
+        assert_eq!(persisted.record_raw, Some(true));
+        assert_eq!(persisted.room_history.len(), 1);
+        assert_eq!(persisted.room_history[0].room_id, 21452505);
+        assert_eq!(persisted.room_history[0].uname, "主播A");
+        assert_eq!(persisted.room_history[0].title, "测试");
+
+        // Ensure config.toml stays strictly read-only on disk
+        assert_eq!(fs::read_to_string(&cfg_path).unwrap(), raw_toml);
+
+        // Reloading a fresh runtime recovers theme, current_room_id, history, and record_raw from etc/state.json
+        let rt_reloaded = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        assert_eq!(rt_reloaded.state_store.theme(), "sc-ticker");
+        assert_eq!(rt_reloaded.state_store.current_room_id(), Some(21452505));
+        assert!(rt_reloaded.is_record_raw_enabled());
 
         rt.shutdown();
 
@@ -579,7 +601,9 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert!(lines[0].contains("\"kind\":\"room_info\""));
         assert!(lines[1].contains("\"kind\":\"like\""));
+        assert!(!lines[1].contains("\"face\""));
         assert!(lines[2].contains("\"kind\":\"superchat\""));
+        assert!(lines[2].contains("\"face\":\"https://face/22.jpg\""));
         assert!(lines[3].contains("\"kind\":\"session_end\""));
 
         let _ = fs::remove_dir_all(&temp_dir);

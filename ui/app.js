@@ -201,13 +201,21 @@ function renderHistoryList(historyRooms) {
         return;
     }
 
-    historyRooms.forEach((roomId) => {
+    historyRooms.forEach((entry) => {
+        const roomId = typeof entry === 'number' ? entry : entry.room_id;
+        if (!roomId) return;
+        const uname = typeof entry === 'object' ? (entry.uname || '') : '';
+        const title = typeof entry === 'object' ? (entry.title || '') : '';
+        const head = uname ? `${roomId}(${uname})` : `${roomId}`;
+        const text = title ? `${head}: ${title}` : head;
+
         const row = document.createElement('div');
         row.className = 'history-row';
 
         const label = document.createElement('div');
         label.className = 'menu-item';
-        label.innerText = String(roomId);
+        label.innerText = text;
+        label.title = text;
         label.onclick = () => connectTarget(roomId);
 
         const removeBtn = document.createElement('button');
@@ -272,6 +280,18 @@ if (listen) {
     listen('auth_state_changed', (event) => {
         if (event.payload) {
             updateAccountDisplay(event.payload);
+        }
+    });
+
+    listen('app_state_changed', (event) => {
+        const persisted = event.payload;
+        if (!persisted) return;
+        const select = document.getElementById('theme-select');
+        if (select && persisted.theme && select.value !== persisted.theme) {
+            select.value = persisted.theme;
+        }
+        if (Array.isArray(persisted.room_history)) {
+            renderHistoryList(persisted.room_history);
         }
     });
 }

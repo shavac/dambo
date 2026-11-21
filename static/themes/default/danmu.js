@@ -448,6 +448,12 @@
             case 'follow':
                 div = buildInteractionItem(kind, item, '❤️', '关注了直播间');
                 break;
+            case 'special_follow':
+                div = buildInteractionItem(kind, item, '⭐', '特别关注了直播间');
+                break;
+            case 'mutual_follow':
+                div = buildInteractionItem(kind, item, '🤝', '互粉了直播间');
+                break;
             case 'share':
                 div = buildInteractionItem(kind, item, '🔗', '分享了直播间');
                 break;

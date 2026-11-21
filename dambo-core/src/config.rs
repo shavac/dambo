@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
-use log;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use toml_edit::{Array, DocumentMut, Item, Value, value};
 
 #[derive(Clone, Debug)]
 pub struct ConfigManager {
@@ -17,7 +15,7 @@ impl ConfigManager {
         }
     }
 
-    /// Load and deserialize configuration from disk
+    /// Load and deserialize static configuration from disk (strictly read-only).
     pub fn load(&self) -> Result<Config> {
         if self.path.exists() {
             let content = fs::read_to_string(&self.path)
@@ -32,67 +30,6 @@ impl ConfigManager {
                 self.path
             ))
         }
-    }
-
-    /// Update [bilibili].room_id and [bilibili].history_rooms in place while preserving comments
-    pub fn update_room(&self, new_room_id: u64, history_rooms: &[u64]) -> Result<()> {
-        if !self.path.exists() {
-            return Err(anyhow::anyhow!(
-                "Cannot update room: configuration file does not exist at {:?}",
-                self.path
-            ));
-        }
-
-        let content = fs::read_to_string(&self.path)
-            .with_context(|| format!("Failed to read configuration file: {:?}", self.path))?;
-
-        let mut doc: DocumentMut = content
-            .parse::<DocumentMut>()
-            .with_context(|| "Failed to parse configuration file into TOML AST")?;
-
-        doc["bilibili"]["room_id"] = value(new_room_id as i64);
-
-        let mut arr = Array::new();
-        for &r in history_rooms {
-            arr.push(r as i64);
-        }
-        doc["bilibili"]["history_rooms"] = Item::Value(Value::Array(arr));
-
-        fs::write(&self.path, doc.to_string())
-            .with_context(|| format!("Failed to write updated TOML back to {:?}", self.path))?;
-
-        log::info!(
-            "💾 Room updated to {} (history: {:?}) in {:?}",
-            new_room_id,
-            history_rooms,
-            self.path
-        );
-        Ok(())
-    }
-
-    /// Update [server].theme in place while preserving comments
-    pub fn update_theme(&self, new_theme: &str) -> Result<()> {
-        if !self.path.exists() {
-            return Err(anyhow::anyhow!(
-                "Cannot update theme: configuration file does not exist at {:?}",
-                self.path
-            ));
-        }
-
-        let content = fs::read_to_string(&self.path)
-            .with_context(|| format!("Failed to read configuration file: {:?}", self.path))?;
-
-        let mut doc: DocumentMut = content
-            .parse::<DocumentMut>()
-            .with_context(|| "Failed to parse configuration file into TOML AST")?;
-
-        doc["server"]["theme"] = value(new_theme);
-
-        fs::write(&self.path, doc.to_string())
-            .with_context(|| format!("Failed to write updated TOML back to {:?}", self.path))?;
-
-        log::info!("💾 Theme updated to '{}' in {:?}", new_theme, self.path);
-        Ok(())
     }
 }
 
@@ -117,8 +54,6 @@ pub struct Config {
 pub struct BilibiliConfig {
     #[serde(default)]
     pub room_id: u64,
-    #[serde(default)]
-    pub history_rooms: Vec<u64>,
     #[serde(default = "default_session_file")]
     pub session_file: String,
     #[serde(default = "default_avatar_cache_size")]
@@ -129,7 +64,6 @@ impl Default for BilibiliConfig {
     fn default() -> Self {
         Self {
             room_id: 0,
-            history_rooms: Vec::new(),
             session_file: default_session_file(),
             avatar_cache_size: default_avatar_cache_size(),
         }
@@ -190,8 +124,8 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_html_dir")]
     pub html_dir: String,
-    #[serde(default = "default_theme")]
-    pub theme: String,
+    #[serde(default = "default_state_file")]
+    pub state_file: String,
 }
 
 impl Default for ServerConfig {
@@ -200,7 +134,7 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             html_dir: default_html_dir(),
-            theme: default_theme(),
+            state_file: default_state_file(),
         }
     }
 }
@@ -298,8 +232,8 @@ fn default_port() -> u16 {
 fn default_html_dir() -> String {
     "static/themes".to_string()
 }
-fn default_theme() -> String {
-    "default".to_string()
+fn default_state_file() -> String {
+    "etc/state.json".to_string()
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -346,15 +280,19 @@ mod tests {
         assert_eq!(def.event.buffer_capacity, 512);
         assert_eq!(def.event.min_passthrough_chars, 4);
         assert_eq!(def.event.max_combo_wait_secs, 8);
+        assert_eq!(def.server.state_file, "etc/state.json");
         assert!(!def.record.record_raw);
 
-        // Explicit [event] + [record].record_raw = true
+        // Explicit [event] + [server].state_file + [record].record_raw = true
         let parsed: Config = toml::from_str(
             r#"
 [event]
 window_ms = 1800
 min_passthrough_chars = 6
 max_combo_wait_secs = 12
+
+[server]
+state_file = "/tmp/custom_state.json"
 
 [record]
 enabled = false
@@ -365,6 +303,7 @@ record_raw = true
         assert_eq!(parsed.event.window_ms, 1800);
         assert_eq!(parsed.event.min_passthrough_chars, 6);
         assert_eq!(parsed.event.max_combo_wait_secs, 12);
+        assert_eq!(parsed.server.state_file, "/tmp/custom_state.json");
         assert!(!parsed.record.enabled);
         assert!(parsed.record.record_raw);
 

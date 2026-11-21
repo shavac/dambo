@@ -69,7 +69,7 @@ fn ingress_tier(ev: &RawBiliEvent, min_passthrough_chars: usize) -> u8 {
         | "room_silent" | "superchat_delete" | "room_block" | "warning" | "cut_off"
         | "reconnected" | "combo_end" | "room_info" => 4,
         "gift" | "guard_enter" => 3,
-        "follow" | "share" => 2,
+        "follow" | "share" | "special_follow" | "mutual_follow" => 2,
         "chat" if is_passthrough_chat(ev, min_passthrough_chars) => 2,
         "chat" => 1,
         "enter" if ev.medal_level.unwrap_or(0) > 0 => 1,
@@ -191,7 +191,6 @@ impl BackpressureQueue {
 struct Reservoir {
     events: Vec<EventItem>,
     like_idx: Option<usize>,
-    enter_idx: Option<usize>,
     chat_indices: HashMap<String, usize>,
 }
 
@@ -203,7 +202,6 @@ impl Reservoir {
     fn clear(&mut self) {
         self.events.clear();
         self.like_idx = None;
-        self.enter_idx = None;
         self.chat_indices.clear();
     }
 
@@ -239,36 +237,6 @@ impl Reservoir {
                         } else {
                             ev.content
                         },
-                        count: 1,
-                        sample_users: if ev.uname.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![ev.uname]
-                        },
-                        price: 0,
-                        ..Default::default()
-                    });
-                }
-            }
-            "enter" => {
-                if let Some(idx) = self.enter_idx {
-                    let target = &mut self.events[idx];
-                    target.count = target.count.saturating_add(1);
-                    target.seq = target.seq.max(ev.seq);
-                    if medal_level > target.medal_level {
-                        target.medal_level = medal_level;
-                    }
-                    Self::push_sample_user(&mut target.sample_users, &ev.uname);
-                } else {
-                    let idx = self.events.len();
-                    self.enter_idx = Some(idx);
-                    self.events.push(EventItem {
-                        seq: ev.seq,
-                        kind: "enter".to_string(),
-                        uid: ev.uid,
-                        uname: ev.uname.clone(),
-                        medal_level,
-                        content: String::new(),
                         count: 1,
                         sample_users: if ev.uname.is_empty() {
                             Vec::new()
@@ -320,6 +288,7 @@ impl Reservoir {
                 self.events.push(EventItem {
                     seq: ev.seq,
                     kind: ev.kind,
+                    msg_type: ev.msg_type,
                     uid: ev.uid,
                     uname: ev.uname.clone(),
                     medal_level,
@@ -331,6 +300,7 @@ impl Reservoir {
                         vec![ev.uname]
                     },
                     price: ev.price,
+                    face: None,
                     guard_level: ev.guard_level,
                     batch_combo_id: ev.batch_combo_id,
                     ids: ev.ids,
@@ -341,7 +311,6 @@ impl Reservoir {
 
     fn drain_events(&mut self) -> Vec<EventItem> {
         self.like_idx = None;
-        self.enter_idx = None;
         self.chat_indices.clear();
         std::mem::take(&mut self.events)
     }
@@ -353,6 +322,7 @@ struct ComboBucket {
     room_uname: String,
     uid: u64,
     uname: String,
+    face: Option<String>,
     medal_level: u32,
     gift_name: String,
     total_num: u32,
@@ -523,7 +493,10 @@ impl EventEngine {
             return;
         }
 
-        if matches!(kind, "follow" | "share" | "guard_enter") {
+        if matches!(
+            kind,
+            "enter" | "follow" | "share" | "special_follow" | "mutual_follow" | "guard_enter"
+        ) {
             self.emit_single(ev, 1);
             return;
         }
@@ -547,6 +520,9 @@ impl EventEngine {
                 if let Some(bucket) = combo_buckets.get_mut(&combo_id) {
                     bucket.total_num = bucket.total_num.saturating_add(add_num);
                     bucket.total_price = bucket.total_price.saturating_add(ev.price);
+                    if bucket.face.is_none() && ev.face.is_some() {
+                        bucket.face = ev.face.clone();
+                    }
                     bucket.last_seq = ev.seq;
                     bucket.timestamp = ev.timestamp;
                     if medal_level > bucket.medal_level {
@@ -564,6 +540,7 @@ impl EventEngine {
                             room_uname: ev.room_uname,
                             uid: ev.uid,
                             uname: ev.uname,
+                            face: ev.face,
                             medal_level,
                             gift_name,
                             total_num: add_num,
@@ -605,6 +582,11 @@ impl EventEngine {
             kind: "gift".to_string(),
             uid: bucket.uid,
             uname: bucket.uname.clone(),
+            face: if bucket.total_price > 0 {
+                bucket.face
+            } else {
+                None
+            },
             medal_level: bucket.medal_level,
             content: format!("{} x{}", bucket.gift_name, bucket.total_num),
             count: bucket.total_num,
@@ -636,11 +618,18 @@ impl EventEngine {
         } else {
             1
         };
+        let face = if ev.is_paid_event_for_face() {
+            ev.face
+        } else {
+            None
+        };
         let item = EventItem {
             seq: ev.seq,
             kind: ev.kind,
+            msg_type: ev.msg_type,
             uid: ev.uid,
             uname: ev.uname.clone(),
+            face,
             medal_level: ev.medal_level.unwrap_or(0),
             content: ev.content,
             count,
@@ -852,13 +841,11 @@ mod tests {
             ]
         );
 
-        // 2. Lane 2 Reservoir: "666" + "66666" normalize together, plus `like` and `enter` merge by type
+        // 2. Lane 2 Reservoir: "666" + "66666" normalize together, plus `like` merges by type
         engine.enqueue(mk_ev(6, "chat", 1, "观众1", "666", Some(3), 0));
         engine.enqueue(mk_ev(7, "chat", 2, "观众2", "66666", Some(6), 0));
         engine.enqueue(mk_ev(8, "like", 3, "点赞1", "为主播点赞了", Some(2), 0));
         engine.enqueue(mk_ev(9, "like", 4, "点赞2", "为主播点赞了", Some(9), 0));
-        engine.enqueue(mk_ev(10, "enter", 5, "路人1", "", None, 0));
-        engine.enqueue(mk_ev(11, "enter", 6, "老粉1", "", Some(18), 0));
 
         let ChannelBMessage::EventBatch(batch) =
             tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -869,7 +856,7 @@ mod tests {
             panic!("expected EventBatch");
         };
         assert_eq!(batch.priority, 0);
-        assert_eq!(batch.events.len(), 3);
+        assert_eq!(batch.events.len(), 2);
 
         let chat_ev = &batch.events[0];
         assert_eq!(chat_ev.kind, "chat");
@@ -881,11 +868,6 @@ mod tests {
         assert_eq!(like_ev.kind, "like");
         assert_eq!(like_ev.count, 2);
         assert_eq!(like_ev.medal_level, 9);
-
-        let enter_ev = &batch.events[2];
-        assert_eq!(enter_ev.kind, "enter");
-        assert_eq!(enter_ev.count, 2);
-        assert_eq!(enter_ev.medal_level, 18);
 
         let json_str = serde_json::to_string(&batch).unwrap();
         assert!(!json_str.contains("face"));
@@ -967,6 +949,209 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(rx.try_recv().is_err());
+
+        cancel.cancel();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_interact_five_kinds_passthrough_without_merging() {
+        let cfg = EventConfig {
+            window_ms: 2500,
+            dedup_enabled: true,
+            buffer_capacity: 512,
+            min_passthrough_chars: 4,
+            max_combo_wait_secs: 8,
+        };
+        let engine = Arc::new(EventEngine::new(&cfg));
+        engine.set_room(21452505, "主播A".to_string());
+        let mut rx = engine.subscribe();
+
+        let cancel = CancellationToken::new();
+        let engine_run = engine.clone();
+        let cancel_run = cancel.clone();
+        let handle = tokio::spawn(async move {
+            engine_run.run(cancel_run).await;
+        });
+
+        let cases = [
+            (1u64, "enter", Some(1u32), 101u64, "进房A", ""),
+            (2u64, "enter", Some(1u32), 102u64, "进房B", ""),
+            (3u64, "follow", Some(2u32), 103u64, "关注C", "关注了直播间"),
+            (4u64, "share", Some(3u32), 104u64, "分享D", "分享了直播间"),
+            (
+                5u64,
+                "special_follow",
+                Some(4u32),
+                105u64,
+                "特关E",
+                "特别关注了直播间",
+            ),
+            (
+                6u64,
+                "mutual_follow",
+                Some(5u32),
+                106u64,
+                "互粉F",
+                "互粉了直播间",
+            ),
+        ];
+
+        for (seq, kind, msg_type, uid, uname, content) in cases {
+            engine.enqueue(RawBiliEvent {
+                msg_type,
+                ..mk_ev(seq, kind, uid, uname, content, Some(5), 0)
+            });
+        }
+
+        // All 6 interact events emit immediately at priority 1 without merging, well under window_ms (2500ms)
+        for (expected_seq, expected_kind, expected_msg_type, expected_uid, expected_uname, _) in
+            cases
+        {
+            let ChannelBMessage::EventBatch(batch) =
+                tokio::time::timeout(Duration::from_millis(300), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("expected immediate EventBatch for {}", expected_kind);
+            };
+            assert_eq!(batch.priority, 1);
+            assert_eq!(batch.events.len(), 1);
+            let item = &batch.events[0];
+            assert_eq!(item.seq, expected_seq);
+            assert_eq!(item.kind, expected_kind);
+            assert_eq!(item.msg_type, expected_msg_type);
+            assert_eq!(item.uid, expected_uid);
+            assert_eq!(item.uname, expected_uname);
+            assert_eq!(item.count, 1);
+        }
+
+        cancel.cancel();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_paid_vs_unpaid_face_retention_in_event_engine() {
+        let cfg = EventConfig {
+            window_ms: 80,
+            dedup_enabled: true,
+            buffer_capacity: 512,
+            min_passthrough_chars: 4,
+            max_combo_wait_secs: 2,
+        };
+        let engine = Arc::new(EventEngine::new(&cfg));
+        engine.set_room(21452505, "主播A".to_string());
+        let mut rx = engine.subscribe();
+
+        let cancel = CancellationToken::new();
+        let engine_run = engine.clone();
+        let cancel_run = cancel.clone();
+        let handle = tokio::spawn(async move {
+            engine_run.run(cancel_run).await;
+        });
+
+        // Unpaid passthrough + free gift + paid passthrough events
+        engine.enqueue(mk_ev(
+            1,
+            "chat",
+            1,
+            "观众A",
+            "这是一条优质文本弹幕",
+            Some(5),
+            0,
+        ));
+        engine.enqueue(mk_ev(2, "enter", 2, "观众B", "", None, 0));
+        engine.enqueue(mk_ev(3, "follow", 3, "观众C", "关注了直播间", None, 0));
+        engine.enqueue(mk_ev(4, "gift", 4, "白嫖侠", "辣条 x1", None, 0));
+        engine.enqueue(mk_ev(5, "gift", 5, "富哥", "摩天大楼 x1", Some(10), 50000));
+        engine.enqueue(mk_ev(
+            6,
+            "superchat",
+            6,
+            "老板",
+            "加油支持",
+            Some(20),
+            30000,
+        ));
+        engine.enqueue(mk_ev(7, "guard", 7, "舰长", "开通了舰长", Some(21), 168000));
+
+        for (seq, expect_face) in [
+            (1u64, false),
+            (2u64, false),
+            (3u64, false),
+            (4u64, false),
+            (5u64, true),
+            (6u64, true),
+            (7u64, true),
+        ] {
+            let ChannelBMessage::EventBatch(batch) =
+                tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("expected immediate EventBatch");
+            };
+            assert_eq!(batch.events[0].seq, seq);
+            let json = serde_json::to_string(&batch).unwrap();
+            assert_eq!(
+                json.contains("\"face\""),
+                expect_face,
+                "unexpected face serialization for seq {}: {}",
+                seq,
+                json
+            );
+        }
+
+        // Paid combo gift retains face; free combo gift omits face
+        engine.enqueue(RawBiliEvent {
+            num: Some(2),
+            batch_combo_id: Some("combo:paid".to_string()),
+            combo_stay_time: 3,
+            ..mk_ev(8, "gift", 8, "连击富哥", "粉丝团灯牌 x2", None, 200)
+        });
+        engine.enqueue(RawBiliEvent {
+            seq: 0,
+            kind: "combo_end".to_string(),
+            batch_combo_id: Some("combo:paid".to_string()),
+            raw_cmd: "COMBO_SEND".to_string(),
+            ..Default::default()
+        });
+        let ChannelBMessage::EventBatch(paid_combo) =
+            tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected paid combo batch");
+        };
+        let paid_json = serde_json::to_string(&paid_combo).unwrap();
+        assert!(paid_json.contains("\"face\":\"https://face/should_strip.jpg\""));
+
+        engine.enqueue(RawBiliEvent {
+            num: Some(2),
+            batch_combo_id: Some("combo:free".to_string()),
+            combo_stay_time: 3,
+            ..mk_ev(9, "gift", 9, "连击免费", "辣条 x2", None, 0)
+        });
+        engine.enqueue(RawBiliEvent {
+            seq: 0,
+            kind: "combo_end".to_string(),
+            batch_combo_id: Some("combo:free".to_string()),
+            raw_cmd: "COMBO_SEND".to_string(),
+            ..Default::default()
+        });
+        let ChannelBMessage::EventBatch(free_combo) =
+            tokio::time::timeout(Duration::from_millis(500), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected free combo batch");
+        };
+        let free_json = serde_json::to_string(&free_combo).unwrap();
+        assert!(!free_json.contains("\"face\""));
 
         cancel.cancel();
         let _ = handle.await;
