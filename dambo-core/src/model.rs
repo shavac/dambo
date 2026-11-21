@@ -328,10 +328,10 @@ pub struct RoomOptionsPayload {
 pub struct InitialUiState {
     pub room_state: RoomStateSnapshot,
     pub auth_state: AuthState,
-    pub theme: String,
-    pub themes: Vec<String>,
     pub server_host: String,
     pub server_port: u16,
     pub history_rooms: Vec<RoomHistoryEntry>,
     pub record_raw: bool,
+    #[serde(default)]
+    pub connecting: bool,
 }

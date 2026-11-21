@@ -71,7 +71,8 @@ jobs:
           ditto Dambo.app "$STAGE_DIR/Dambo.app"
           cp target/release/dambo "$STAGE_DIR/dambo"
           chmod +x "$STAGE_DIR/dambo"
-          cp dambo_config.toml "$STAGE_DIR/dambo_config.toml"
+          mkdir -p "$STAGE_DIR/etc"
+          cp etc/config.toml "$STAGE_DIR/etc/config.toml"
           cp README.md README.md.zh "$STAGE_DIR/"
           cp -R static "$STAGE_DIR/static"
 
@@ -89,7 +90,8 @@ jobs:
 
           Copy-Item "target\release\dambo-ui.exe" -Destination "$StageDir\dambo-ui.exe"
           Copy-Item "target\release\dambo.exe" -Destination "$StageDir\dambo.exe"
-          Copy-Item "dambo_config.toml" -Destination "$StageDir\dambo_config.toml"
+          New-Item -ItemType Directory -Force -Path "$StageDir\etc" | Out-Null
+          Copy-Item "etc\config.toml" -Destination "$StageDir\etc\config.toml"
           Copy-Item "static" -Destination "$StageDir\static" -Recurse
           Copy-Item "README.md" -Destination "$StageDir\README.md"
           Copy-Item "README.md.zh" -Destination "$StageDir\README.md.zh"

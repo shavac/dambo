@@ -14,7 +14,7 @@ use std::time::Duration;
 )]
 struct Args {
     /// Path to the dambo TOML configuration file
-    #[arg(short, long, default_value = "dambo_config.toml")]
+    #[arg(short, long, default_value = "etc/config.toml")]
     config: String,
 
     /// Optional room ID or live URL override

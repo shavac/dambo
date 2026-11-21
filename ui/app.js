@@ -9,10 +9,171 @@ let currentRoomState = {
     connected: false,
 };
 
-let serverHost = "localhost";
-let serverPort = 3838;
+let currentAuthState = {
+    is_login: false,
+    mid: 0,
+    uname: "",
+};
+
+let currentLocale = "en";
+let i18nMessages = {};
+let pluginList = [];
+let currentHistoryRooms = [];
+let lastRoomOptions = null;
+let recordRawEnabled = false;
 let activeRoomLabel = "";
-let isAlwaysOnTop = true;
+let pendingRoomDraft = null;
+let isConnecting = false;
+let connectingTimeoutId = null;
+let isAlwaysOnTop = false;
+let toastTimer = null;
+
+function t(key, vars) {
+    let text = i18nMessages[key] || key;
+    if (vars && typeof vars === 'object') {
+        Object.entries(vars).forEach(([k, v]) => {
+            text = text.replaceAll(`{${k}}`, String(v));
+        });
+    }
+    return text;
+}
+
+function showToast(text) {
+    const el = document.getElementById('toast-banner');
+    if (!el || !text) return;
+    el.innerText = text;
+    el.classList.remove('hidden');
+    if (toastTimer !== null) {
+        clearTimeout(toastTimer);
+    }
+    toastTimer = setTimeout(() => {
+        el.classList.add('hidden');
+        toastTimer = null;
+    }, 1800);
+}
+
+const PANEL_BASE_MIN_WIDTH = 520;
+const PANEL_MAX_WIDTH = 860;
+const MIN_ROOM_PICKER_WIDTH = 136;
+const IS_MACOS = /mac/i.test(navigator.platform || navigator.userAgent || '');
+let lastSyncedPanelMinWidth = PANEL_BASE_MIN_WIDTH;
+let minWidthSyncRaf = null;
+
+function sumOuterWidths(elements) {
+    return elements.reduce((sum, el) => {
+        return el ? sum + el.getBoundingClientRect().width : sum;
+    }, 0);
+}
+
+function horizontalBoxChrome(el) {
+    if (!el) return 0;
+    const cs = window.getComputedStyle(el);
+    return (
+        parseFloat(cs.paddingLeft || '0') +
+        parseFloat(cs.paddingRight || '0') +
+        parseFloat(cs.borderLeftWidth || '0') +
+        parseFloat(cs.borderRightWidth || '0')
+    );
+}
+
+function computeRequiredMinPanelWidth() {
+    const pod = document.querySelector('.pod-container');
+    const podContent = document.querySelector('.pod-content');
+    const dragHandle = document.getElementById('drag-handle');
+    const accountBadge = document.getElementById('account-badge');
+    const roomSwitchBtn = document.getElementById('room-switch-btn');
+    const pluginGroup = document.querySelector('.plugin-menu-group');
+    const moreGroup = document.querySelector('.more-menu-group');
+    const winControls = document.querySelector('.win-controls');
+    const resizeHandleRight = document.getElementById('resize-handle-right');
+    const dividers = Array.from(document.querySelectorAll('.pod-content > .divider'));
+    const roomSelectorGroup = document.querySelector('.room-selector-group');
+    if (!pod || !podContent || !accountBadge) return PANEL_BASE_MIN_WIDTH;
+
+    const fixedWidth = sumOuterWidths([
+        dragHandle,
+        accountBadge,
+        ...dividers,
+        roomSwitchBtn,
+        pluginGroup,
+        moreGroup,
+        winControls,
+        resizeHandleRight,
+    ]);
+
+    const podStyle = window.getComputedStyle(pod);
+    const podContentStyle = window.getComputedStyle(podContent);
+    const roomGroupStyle = roomSelectorGroup ? window.getComputedStyle(roomSelectorGroup) : null;
+    const podGap = parseFloat(podStyle.columnGap || podStyle.gap || '8') || 0;
+    const contentGap = parseFloat(podContentStyle.columnGap || podContentStyle.gap || '6') || 0;
+    const roomGap = roomGroupStyle
+        ? parseFloat(roomGroupStyle.columnGap || roomGroupStyle.gap || '6') || 0
+        : 6;
+    const podChildCount = pod.children.length;
+    const contentChildCount = podContent.children.length;
+    const totalGaps =
+        Math.max(0, podChildCount - 1) * podGap +
+        Math.max(0, contentChildCount - 1) * contentGap +
+        roomGap;
+    const totalChrome = horizontalBoxChrome(document.body) + horizontalBoxChrome(pod);
+
+    const required = Math.ceil(fixedWidth + totalGaps + totalChrome + MIN_ROOM_PICKER_WIDTH + 6);
+    return Math.max(PANEL_BASE_MIN_WIDTH, required);
+}
+
+function scheduleSyncPanelMinWidth() {
+    if (!invoke) return;
+    if (minWidthSyncRaf !== null) {
+        cancelAnimationFrame(minWidthSyncRaf);
+    }
+    minWidthSyncRaf = requestAnimationFrame(() => {
+        minWidthSyncRaf = null;
+        const required = computeRequiredMinPanelWidth();
+        if (required !== lastSyncedPanelMinWidth) {
+            lastSyncedPanelMinWidth = required;
+            invoke('sync_panel_min_width', { minWidth: required }).catch(console.error);
+        }
+    });
+}
+
+function applyTranslations(payload) {
+    if (payload && payload.locale) {
+        currentLocale = payload.locale;
+    }
+    if (payload && payload.messages) {
+        i18nMessages = payload.messages;
+    }
+
+    document.documentElement.lang = currentLocale;
+    document.querySelectorAll('[data-i18n]').forEach((el) => {
+        const key = el.getAttribute('data-i18n');
+        if (key) {
+            el.innerText = t(key);
+        }
+    });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+        const key = el.getAttribute('data-i18n-placeholder');
+        if (key) {
+            el.placeholder = t(key);
+        }
+    });
+    document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+        const key = el.getAttribute('data-i18n-title');
+        if (key) {
+            el.title = t(key);
+        }
+    });
+
+    updateAccountDisplay(currentAuthState);
+    updateRoomDisplay(currentRoomState, { fromBackendEvent: false });
+    renderPlugins(pluginList);
+    if (lastRoomOptions) {
+        renderRoomOptions({ ...lastRoomOptions, history_rooms: currentHistoryRooms });
+    } else {
+        renderHistoryList(currentHistoryRooms);
+    }
+    scheduleSyncPanelMinWidth();
+}
 
 function formatRoomLabel(state) {
     if (!state || state.room_id <= 0) return "";
@@ -20,69 +181,235 @@ function formatRoomLabel(state) {
     return state.room_title ? `${head}: ${state.room_title}` : head;
 }
 
-function updateRoomDisplay(state) {
-    currentRoomState = state;
-    const roomDot = document.getElementById('room-dot');
+function setConnectingState(connecting) {
+    if (connectingTimeoutId !== null) {
+        clearTimeout(connectingTimeoutId);
+        connectingTimeoutId = null;
+    }
+    isConnecting = Boolean(connecting);
+    if (isConnecting) {
+        connectingTimeoutId = setTimeout(() => {
+            connectingTimeoutId = null;
+            if (isConnecting) {
+                isConnecting = false;
+                syncRoomActionButton();
+            }
+        }, 15000);
+    }
+    syncRoomActionButton();
+}
+
+function syncRoomActionButton() {
     const roomInput = document.getElementById('room-input');
     const roomSwitchBtn = document.getElementById('room-switch-btn');
+    if (!roomSwitchBtn) return;
+
+    if (isConnecting) {
+        roomSwitchBtn.innerText = t('panel.connecting');
+        roomSwitchBtn.disabled = true;
+        roomSwitchBtn.classList.add('connecting');
+        scheduleSyncPanelMinWidth();
+        return;
+    }
+
+    roomSwitchBtn.disabled = false;
+    roomSwitchBtn.classList.remove('connecting');
+
+    const draft = (roomInput?.value || '').trim();
+    if (!currentRoomState.connected) {
+        roomSwitchBtn.innerText = t('panel.connect');
+    } else if (draft && draft !== activeRoomLabel && draft !== String(currentRoomState.room_id)) {
+        roomSwitchBtn.innerText = t('panel.switch');
+    } else {
+        roomSwitchBtn.innerText = t('panel.disconnect');
+    }
+    scheduleSyncPanelMinWidth();
+}
+
+function updateRoomDisplay(state, { fromBackendEvent = true } = {}) {
+    const prevRoomId = currentRoomState.room_id;
+    const prevConnected = currentRoomState.connected;
+    currentRoomState = state;
+    if (state.room_id !== prevRoomId || state.connected !== prevConnected) {
+        pendingRoomDraft = null;
+    }
+    if (fromBackendEvent && isConnecting && (state.connected || state.room_id === 0)) {
+        setConnectingState(false);
+    }
+
+    const roomDot = document.getElementById('room-dot');
+    const roomInput = document.getElementById('room-input');
 
     roomDot.className = 'status-dot';
     if (!state.connected) {
-        roomDot.classList.add('dot-gray');
-        roomSwitchBtn.innerText = state.room_id > 0 ? "Switch" : "Connect";
+        roomDot.classList.add('dot-off');
     } else if (!state.is_live) {
         roomDot.classList.add('dot-yellow');
-        roomSwitchBtn.innerText = "Disconnect";
     } else {
         roomDot.classList.add('dot-green');
-        roomSwitchBtn.innerText = "Disconnect";
     }
 
     activeRoomLabel = formatRoomLabel(state);
     roomInput.title = activeRoomLabel;
-    if (document.activeElement !== roomInput) {
+    if (document.activeElement !== roomInput && pendingRoomDraft === null) {
         roomInput.value = activeRoomLabel;
     }
+    syncRoomActionButton();
 }
 
 function updateAccountDisplay(auth) {
+    currentAuthState = auth || { is_login: false, mid: 0, uname: "" };
     const accountDot = document.getElementById('account-dot');
     const accountName = document.getElementById('account-name');
 
     accountDot.className = 'status-dot';
-    if (auth && auth.is_login) {
+    if (currentAuthState.is_login) {
         accountDot.classList.add('dot-green');
-        accountName.innerText = auth.uname ? `@${auth.uname}` : `@${auth.mid}`;
+        accountName.innerText = currentAuthState.uname
+            ? `@${currentAuthState.uname}`
+            : `@${currentAuthState.mid}`;
     } else {
         accountDot.classList.add('dot-gray');
-        accountName.innerText = "Sign In";
+        accountName.innerText = t('panel.sign_in');
     }
 
     const logoutBtn = document.getElementById('more-logout-btn');
     if (logoutBtn) {
-        logoutBtn.disabled = !(auth && auth.is_login);
+        logoutBtn.disabled = !currentAuthState.is_login;
+    }
+    scheduleSyncPanelMinWidth();
+}
+
+function updateRecordRawDisplay(enabled) {
+    recordRawEnabled = Boolean(enabled);
+    const check = document.getElementById('more-record-raw-check');
+    if (check) {
+        check.innerText = recordRawEnabled ? '✓' : '';
     }
 }
 
-function populateThemes(themes, activeTheme) {
-    const select = document.getElementById('theme-select');
-    if (!select) return;
-    const list = Array.isArray(themes) && themes.length > 0 ? themes : ['default', 'sc-ticker'];
-    select.innerHTML = '';
-    list.forEach((name) => {
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.innerText = name;
-        if (name === activeTheme) opt.selected = true;
-        select.appendChild(opt);
+function renderPlugins(plugins) {
+    pluginList = Array.isArray(plugins) ? plugins : [];
+    const triggerLabel = document.getElementById('plugin-trigger-label');
+    if (triggerLabel) {
+        triggerLabel.innerText = t('plugin.trigger_label', { count: pluginList.length });
+    }
+
+    const listEl = document.getElementById('plugin-cards-list');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    if (pluginList.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'plugin-empty';
+        empty.innerText = t('plugin.empty');
+        listEl.appendChild(empty);
+        return;
+    }
+
+    pluginList.forEach((p) => {
+        const isDesktopOpen = Boolean(p.is_desktop_open);
+        const card = document.createElement('div');
+        card.className = `plugin-card${isDesktopOpen ? ' desktop-open' : ''}`;
+
+        const main = document.createElement('div');
+        main.className = 'plugin-card-main';
+
+        const header = document.createElement('div');
+        header.className = 'plugin-card-header';
+
+        const title = document.createElement('span');
+        title.className = 'plugin-title';
+        title.innerText = p.title || p.name;
+        header.appendChild(title);
+
+        const badge = document.createElement('span');
+        badge.className = `plugin-badge${p.is_builtin ? '' : ' custom'}`;
+        badge.innerText = t(p.is_builtin ? 'plugin.badge_builtin' : 'plugin.badge_custom');
+        header.appendChild(badge);
+
+        if (p.obs_width && p.obs_height) {
+            const size = document.createElement('span');
+            size.className = 'plugin-size-badge';
+            size.innerText = `${p.obs_width}×${p.obs_height}`;
+            header.appendChild(size);
+        }
+
+        main.appendChild(header);
+
+        const desc = document.createElement('div');
+        desc.className = 'plugin-desc';
+        desc.innerText = p.description || t('plugin.no_description');
+        desc.title = desc.innerText;
+        main.appendChild(desc);
+
+        const urlEl = document.createElement('div');
+        urlEl.className = 'plugin-url';
+        urlEl.innerText = `${p.route}  ·  ${p.url}`;
+        urlEl.title = p.url;
+        main.appendChild(urlEl);
+
+        const actions = document.createElement('div');
+        actions.className = 'plugin-card-actions';
+
+        const toggleDesktopBtn = document.createElement('button');
+        toggleDesktopBtn.type = 'button';
+        toggleDesktopBtn.className = `plugin-btn ${isDesktopOpen ? 'danger' : 'primary'}`;
+        toggleDesktopBtn.innerText = t(isDesktopOpen ? 'plugin.close_desktop' : 'plugin.open_desktop');
+        toggleDesktopBtn.onclick = async () => {
+            if (!invoke) return;
+            try {
+                if (isDesktopOpen) {
+                    await invoke('close_plugin_desktop', { pluginName: p.name });
+                    showToast(t('toast.closed_desktop', { name: p.title || p.name }));
+                } else {
+                    await invoke('open_plugin_desktop', { pluginName: p.name });
+                    showToast(t('toast.opened_desktop', { name: p.title || p.name }));
+                }
+                const fresh = await invoke('get_plugins');
+                renderPlugins(fresh);
+            } catch (e) {
+                console.error('toggle_plugin_desktop failed:', e);
+                showToast(t('toast.error_prefix', { error: String(e) }));
+            }
+        };
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'plugin-btn';
+        copyBtn.innerText = t('plugin.copy_url');
+        copyBtn.onclick = async () => {
+            try {
+                await navigator.clipboard.writeText(p.url);
+                copyBtn.classList.add('copied');
+                copyBtn.innerText = t('plugin.copied');
+                setTimeout(() => {
+                    copyBtn.classList.remove('copied');
+                    copyBtn.innerText = t('plugin.copy_url');
+                }, 1500);
+            } catch (e) {
+                console.error('Failed to copy plugin url:', e);
+                showToast(t('toast.error_prefix', { error: String(e) }));
+            }
+        };
+
+        actions.appendChild(toggleDesktopBtn);
+        actions.appendChild(copyBtn);
+
+        card.appendChild(main);
+        card.appendChild(actions);
+        listEl.appendChild(card);
     });
+    scheduleSyncPanelMinWidth();
 }
 
 function syncWindowExpanded() {
     const roomMenu = document.getElementById('room-dropdown-menu');
+    const pluginMenu = document.getElementById('plugin-dropdown-menu');
     const moreMenu = document.getElementById('more-dropdown-menu');
     const expanded =
         (roomMenu && !roomMenu.classList.contains('hidden')) ||
+        (pluginMenu && !pluginMenu.classList.contains('hidden')) ||
         (moreMenu && !moreMenu.classList.contains('hidden'));
     if (invoke) {
         invoke('set_dropdown_expanded', { expanded: Boolean(expanded) }).catch(console.error);
@@ -93,14 +420,31 @@ function setDropdownOpen(open) {
     const menu = document.getElementById('room-dropdown-menu');
     if (!menu) return;
     if (open) {
-        const moreMenu = document.getElementById('more-dropdown-menu');
-        const moreBtn = document.getElementById('more-btn');
-        moreMenu?.classList.add('hidden');
-        moreBtn?.classList.remove('active');
-        moreBtn?.setAttribute('aria-expanded', 'false');
+        setPluginMenuOpen(false);
+        setMoreMenuOpen(false);
         menu.classList.remove('hidden');
     } else {
         menu.classList.add('hidden');
+    }
+    syncWindowExpanded();
+}
+
+function setPluginMenuOpen(open) {
+    const pluginMenu = document.getElementById('plugin-dropdown-menu');
+    const pluginBtn = document.getElementById('plugin-dropdown-btn');
+    if (!pluginMenu) return;
+    if (open) {
+        document.getElementById('room-dropdown-menu')?.classList.add('hidden');
+        document.getElementById('more-dropdown-menu')?.classList.add('hidden');
+        document.getElementById('more-btn')?.classList.remove('active');
+        document.getElementById('more-btn')?.setAttribute('aria-expanded', 'false');
+        pluginMenu.classList.remove('hidden');
+        pluginBtn?.classList.add('active');
+        pluginBtn?.setAttribute('aria-expanded', 'true');
+    } else {
+        pluginMenu.classList.add('hidden');
+        pluginBtn?.classList.remove('active');
+        pluginBtn?.setAttribute('aria-expanded', 'false');
     }
     syncWindowExpanded();
 }
@@ -111,6 +455,9 @@ function setMoreMenuOpen(open) {
     if (!moreMenu) return;
     if (open) {
         document.getElementById('room-dropdown-menu')?.classList.add('hidden');
+        document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
+        document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
+        document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
         moreMenu.classList.remove('hidden');
         moreBtn?.classList.add('active');
         moreBtn?.setAttribute('aria-expanded', 'true');
@@ -124,6 +471,9 @@ function setMoreMenuOpen(open) {
 
 function closeAllMenus() {
     document.getElementById('room-dropdown-menu')?.classList.add('hidden');
+    document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
+    document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
+    document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
     const moreMenu = document.getElementById('more-dropdown-menu');
     const moreBtn = document.getElementById('more-btn');
     moreMenu?.classList.add('hidden');
@@ -133,16 +483,39 @@ function closeAllMenus() {
 }
 
 async function connectTarget(target) {
-    if (!invoke || !target) return;
+    if (!invoke || !target || isConnecting) return;
+    pendingRoomDraft = null;
+    setConnectingState(true);
     try {
-        await invoke('switch_room', { target: String(target) });
+        const resolvedId = await invoke('switch_room', { target: String(target) });
         setDropdownOpen(false);
+        if (currentRoomState.connected && currentRoomState.room_id === Number(resolvedId)) {
+            setConnectingState(false);
+        }
     } catch (e) {
+        setConnectingState(false);
         console.error('Failed to switch room:', e);
+        showToast(t('toast.error_prefix', { error: String(e) }));
     }
 }
 
+async function selectAndConnectRoom(roomId) {
+    if (!roomId) return;
+    const roomInput = document.getElementById('room-input');
+    const idStr = String(roomId);
+    if (roomInput) {
+        roomInput.value = idStr;
+        roomInput.title = idStr;
+        roomInput.blur();
+    }
+    setDropdownOpen(false);
+    await connectTarget(idStr);
+}
+
 function renderRoomOptions(payload) {
+    if (payload) {
+        lastRoomOptions = payload;
+    }
     const myRoomEl = document.getElementById('my-room-item');
     const followingEl = document.getElementById('following-rooms-list');
     const historyEl = document.getElementById('history-rooms-list');
@@ -153,10 +526,13 @@ function renderRoomOptions(payload) {
             myRoomEl.className = 'menu-item';
             myRoomEl.innerText = label;
             myRoomEl.title = label;
-            myRoomEl.onclick = () => connectTarget(payload.my_room.room_id);
+            myRoomEl.onclick = (e) => {
+                e.stopPropagation();
+                selectAndConnectRoom(payload.my_room.room_id);
+            };
         } else {
             myRoomEl.className = 'menu-item empty-hint';
-            myRoomEl.innerText = 'No room found';
+            myRoomEl.innerText = t('panel.my_room_empty');
             myRoomEl.title = '';
             myRoomEl.onclick = null;
         }
@@ -168,7 +544,7 @@ function renderRoomOptions(payload) {
         if (list.length === 0) {
             const empty = document.createElement('div');
             empty.className = 'menu-item empty-hint';
-            empty.innerText = 'No live channels';
+            empty.innerText = t('panel.following_empty');
             followingEl.appendChild(empty);
         } else {
             list.forEach((item) => {
@@ -177,7 +553,10 @@ function renderRoomOptions(payload) {
                 row.className = 'menu-item';
                 row.innerText = label;
                 row.title = label;
-                row.onclick = () => connectTarget(item.room_id);
+                row.onclick = (e) => {
+                    e.stopPropagation();
+                    selectAndConnectRoom(item.room_id);
+                };
                 followingEl.appendChild(row);
             });
         }
@@ -189,20 +568,21 @@ function renderRoomOptions(payload) {
 }
 
 function renderHistoryList(historyRooms) {
+    currentHistoryRooms = Array.isArray(historyRooms) ? historyRooms : [];
     const historyEl = document.getElementById('history-rooms-list');
     if (!historyEl) return;
     historyEl.innerHTML = '';
 
-    if (!historyRooms || historyRooms.length === 0) {
+    if (currentHistoryRooms.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'menu-item empty-hint';
-        empty.innerText = 'No history';
+        empty.innerText = t('panel.history_empty');
         historyEl.appendChild(empty);
         return;
     }
 
-    historyRooms.forEach((entry) => {
-        const roomId = typeof entry === 'number' ? entry : entry.room_id;
+    currentHistoryRooms.forEach((entry) => {
+        const roomId = typeof entry === 'number' ? entry : entry?.room_id;
         if (!roomId) return;
         const uname = typeof entry === 'object' ? (entry.uname || '') : '';
         const title = typeof entry === 'object' ? (entry.title || '') : '';
@@ -216,17 +596,23 @@ function renderHistoryList(historyRooms) {
         label.className = 'menu-item';
         label.innerText = text;
         label.title = text;
-        label.onclick = () => connectTarget(roomId);
+        label.onclick = (e) => {
+            e.stopPropagation();
+            selectAndConnectRoom(roomId);
+        };
 
         const removeBtn = document.createElement('button');
         removeBtn.className = 'history-remove-btn';
-        removeBtn.title = 'Remove';
+        removeBtn.title = t('panel.history_remove');
         removeBtn.innerText = '×';
         removeBtn.onclick = async (e) => {
             e.stopPropagation();
             if (!invoke) return;
             try {
                 const updated = await invoke('remove_history_room', { roomId });
+                if (lastRoomOptions) {
+                    lastRoomOptions.history_rooms = updated;
+                }
                 renderHistoryList(updated);
             } catch (err) {
                 console.error('Failed to remove history room:', err);
@@ -242,28 +628,28 @@ function renderHistoryList(historyRooms) {
 async function hydrateInitialState() {
     if (!invoke) return;
     try {
-        const init = await invoke('get_initial_state');
-        if (!init) return;
-        serverHost = init.server_host || 'localhost';
-        serverPort = init.server_port || 3838;
-
-        const copyBtn = document.getElementById('copy-obs-btn');
-        if (copyBtn) {
-            copyBtn.innerText = `📋 OBS (:${serverPort})`;
+        const [i18nPayload, init, plugins] = await Promise.all([
+            invoke('get_i18n'),
+            invoke('get_initial_state'),
+            invoke('get_plugins'),
+        ]);
+        if (i18nPayload) {
+            applyTranslations(i18nPayload);
         }
-        const openObsLabel = document.getElementById('more-open-obs-label');
-        if (openObsLabel) {
-            openObsLabel.innerText = `Open OBS Overlay (:${serverPort})`;
+        if (init) {
+            if (!currentRoomState.connected || init.room_state?.connected) {
+                updateRoomDisplay(init.room_state, { fromBackendEvent: false });
+            }
+            const stillConnecting = Boolean(init.connecting) && !currentRoomState.connected;
+            setConnectingState(stillConnecting);
+            updateAccountDisplay(init.auth_state);
+            renderHistoryList(init.history_rooms || []);
+            updateRecordRawDisplay(init.record_raw);
         }
-        const openListLabel = document.getElementById('more-open-list-label');
-        if (openListLabel) {
-            openListLabel.innerText = `Open Danmaku Monitor (:${serverPort}/list)`;
+        if (Array.isArray(plugins)) {
+            renderPlugins(plugins);
         }
-
-        updateRoomDisplay(init.room_state);
-        updateAccountDisplay(init.auth_state);
-        populateThemes(init.themes, init.theme);
-        renderHistoryList(init.history_rooms || []);
+        scheduleSyncPanelMinWidth();
     } catch (e) {
         console.error('Failed to hydrate initial UI state:', e);
     }
@@ -286,51 +672,205 @@ if (listen) {
     listen('app_state_changed', (event) => {
         const persisted = event.payload;
         if (!persisted) return;
-        const select = document.getElementById('theme-select');
-        if (select && persisted.theme && select.value !== persisted.theme) {
-            select.value = persisted.theme;
-        }
         if (Array.isArray(persisted.room_history)) {
+            if (lastRoomOptions) {
+                lastRoomOptions.history_rooms = persisted.room_history;
+            }
             renderHistoryList(persisted.room_history);
+        }
+        if (typeof persisted.record_raw === 'boolean') {
+            updateRecordRawDisplay(persisted.record_raw);
+        }
+    });
+
+    listen('plugins-updated', (event) => {
+        if (Array.isArray(event.payload)) {
+            renderPlugins(event.payload);
+        }
+    });
+
+    listen('i18n-updated', (event) => {
+        if (event.payload) {
+            applyTranslations(event.payload);
         }
     });
 }
 
-document.getElementById('copy-obs-btn')?.addEventListener('click', async () => {
+function startPanelDragging() {
+    const cur = window.__TAURI__?.window?.getCurrentWindow?.();
+    if (cur && typeof cur.startDragging === 'function') {
+        return cur.startDragging().catch(() =>
+            window.__TAURI_INTERNALS__?.invoke?.('plugin:window|start_dragging')
+        );
+    }
+    return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|start_dragging');
+}
+
+function startPanelEastResize() {
+    const cur = window.__TAURI__?.window?.getCurrentWindow?.();
+    if (cur && typeof cur.startResizeDragging === 'function') {
+        return cur.startResizeDragging('East').catch(() =>
+            window.__TAURI_INTERNALS__?.invoke?.('plugin:window|start_resize_dragging', {
+                value: 'East',
+            })
+        );
+    }
+    return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|start_resize_dragging', {
+        value: 'East',
+    });
+}
+
+let activePointerResize = null;
+
+function stopPointerEastResize() {
+    if (!activePointerResize) return;
+    const drag = activePointerResize;
+    activePointerResize = null;
+
+    if (drag.rafId !== null) {
+        cancelAnimationFrame(drag.rafId);
+    }
+    window.removeEventListener('pointermove', drag.onMove);
+    window.removeEventListener('pointerup', drag.onEnd);
+    window.removeEventListener('pointercancel', drag.onEnd);
+    drag.handle.removeEventListener('lostpointercapture', drag.onEnd);
+    drag.handle.classList.remove('dragging');
+    document.documentElement.style.cursor = '';
+
     try {
-        await navigator.clipboard.writeText(`http://${serverHost}:${serverPort}`);
-        const btn = document.getElementById('copy-obs-btn');
-        const orig = btn.innerText;
-        btn.innerText = "Copied!";
-        setTimeout(() => { btn.innerText = orig; }, 1500);
-    } catch (e) {
-        console.error("Failed to copy OBS url:", e);
+        if (drag.handle.hasPointerCapture?.(drag.pointerId)) {
+            drag.handle.releasePointerCapture(drag.pointerId);
+        }
+    } catch (_) {
+        // Ignore if capture is already released
     }
+}
+
+function startPointerEastResize(handle, startEvent) {
+    if (!handle || !invoke) return;
+    stopPointerEastResize();
+
+    const pointerId = startEvent.pointerId;
+    const startScreenX = startEvent.screenX;
+    const startWidth = window.innerWidth;
+    let lastSentWidth = Math.round(startWidth);
+    let pendingWidth = null;
+    let rafId = null;
+
+    const flushWidth = () => {
+        rafId = null;
+        if (activePointerResize) {
+            activePointerResize.rafId = null;
+        }
+        if (pendingWidth === null || pendingWidth === lastSentWidth) return;
+        const targetWidth = pendingWidth;
+        lastSentWidth = targetWidth;
+        invoke('set_panel_width', { width: targetWidth }).catch((err) => {
+            console.error('Failed to resize panel width:', err);
+        });
+    };
+
+    const onMove = (ev) => {
+        if (ev.pointerId !== pointerId) return;
+        const deltaX = ev.screenX - startScreenX;
+        const maxWidth = Math.max(PANEL_MAX_WIDTH, lastSyncedPanelMinWidth);
+        const clamped = Math.max(
+            lastSyncedPanelMinWidth,
+            Math.min(maxWidth, Math.round(startWidth + deltaX))
+        );
+        pendingWidth = clamped;
+        if (rafId === null) {
+            rafId = requestAnimationFrame(flushWidth);
+            if (activePointerResize) {
+                activePointerResize.rafId = rafId;
+            }
+        }
+    };
+
+    const onEnd = (ev) => {
+        if (ev && ev.pointerId !== undefined && ev.pointerId !== pointerId) return;
+        if (pendingWidth !== null && pendingWidth !== lastSentWidth) {
+            flushWidth();
+        }
+        stopPointerEastResize();
+    };
+
+    activePointerResize = {
+        handle,
+        pointerId,
+        onMove,
+        onEnd,
+        rafId: null,
+    };
+
+    handle.classList.add('dragging');
+    document.documentElement.style.cursor = 'ew-resize';
+    try {
+        handle.setPointerCapture(pointerId);
+    } catch (_) {
+        // Window listeners continue tracking if capture fails
+    }
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
+    handle.addEventListener('lostpointercapture', onEnd);
+}
+
+const resizeHandleEl = document.getElementById('resize-handle-right');
+resizeHandleEl?.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    if (IS_MACOS) {
+        startPointerEastResize(resizeHandleEl, e);
+        return;
+    }
+    Promise.resolve(startPanelEastResize()).catch(() => {
+        startPointerEastResize(resizeHandleEl, e);
+    });
 });
 
-document.getElementById('room-switch-btn')?.addEventListener('click', async () => {
-    if (!invoke) return;
-    const input = document.getElementById('room-input').value.trim();
-    if (currentRoomState.connected && (!input || input === activeRoomLabel)) {
-        await invoke('disconnect_room').catch(console.error);
-    } else if (input) {
-        await connectTarget(input);
+document.querySelector('.pod-container')?.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (
+        e.target instanceof Element &&
+        e.target.closest(
+            'button, input, textarea, select, a, .room-pill, .resize-handle-right, .dropdown-menu, .plugin-dropdown-menu, .more-dropdown-menu'
+        )
+    ) {
+        return;
     }
+    if (e.pointerType !== 'mouse') {
+        e.preventDefault();
+    }
+    Promise.resolve(startPanelDragging()).catch((err) => {
+        console.error('Failed to start panel drag:', err);
+    });
 });
 
-document.getElementById('room-input')?.addEventListener('keydown', async (e) => {
+const roomInputEl = document.getElementById('room-input');
+
+roomInputEl?.addEventListener('input', () => {
+    pendingRoomDraft = roomInputEl.value;
+    syncRoomActionButton();
+});
+
+roomInputEl?.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter') {
-        const input = e.target.value.trim();
-        if (input) {
+        e.preventDefault();
+        const input = roomInputEl.value.trim();
+        setDropdownOpen(false);
+        if (input && !isConnecting) {
+            roomInputEl.blur();
             await connectTarget(input);
-            e.target.blur();
         }
     }
 });
 
 document.getElementById('room-dropdown-btn')?.addEventListener('click', async () => {
     const menu = document.getElementById('room-dropdown-menu');
-    const willOpen = menu.classList.contains('hidden');
+    const willOpen = menu ? menu.classList.contains('hidden') : false;
     setDropdownOpen(willOpen);
     if (willOpen && invoke) {
         try {
@@ -342,10 +882,39 @@ document.getElementById('room-dropdown-btn')?.addEventListener('click', async ()
     }
 });
 
-document.getElementById('theme-select')?.addEventListener('change', (e) => {
-    const theme = e.target.value;
+document.getElementById('room-switch-btn')?.addEventListener('click', async () => {
+    if (!invoke || isConnecting) return;
+    const input = (roomInputEl?.value || '').trim();
+    setDropdownOpen(false);
+    if (
+        currentRoomState.connected &&
+        (!input || input === activeRoomLabel || input === String(currentRoomState.room_id))
+    ) {
+        pendingRoomDraft = null;
+        setConnectingState(false);
+        await invoke('disconnect_room').catch(console.error);
+    } else if (input) {
+        await connectTarget(input);
+    }
+});
+
+document.getElementById('plugin-dropdown-btn')?.addEventListener('click', async () => {
+    const menu = document.getElementById('plugin-dropdown-menu');
+    const willOpen = menu ? menu.classList.contains('hidden') : false;
+    setPluginMenuOpen(willOpen);
+    if (willOpen && invoke) {
+        try {
+            const plugins = await invoke('get_plugins');
+            renderPlugins(plugins);
+        } catch (e) {
+            console.error('Failed to fetch plugins:', e);
+        }
+    }
+});
+
+document.getElementById('plugin-open-dir-btn')?.addEventListener('click', () => {
     if (invoke) {
-        invoke('change_theme', { theme }).catch(console.error);
+        invoke('open_plugins_dir').catch(console.error);
     }
 });
 
@@ -366,34 +935,6 @@ document.getElementById('more-btn')?.addEventListener('click', () => {
     setMoreMenuOpen(willOpen);
 });
 
-document.getElementById('more-open-obs-btn')?.addEventListener('click', () => {
-    setMoreMenuOpen(false);
-    if (invoke) invoke('open_obs_overlay').catch(console.error);
-});
-
-document.getElementById('more-copy-obs-btn')?.addEventListener('click', async () => {
-    setMoreMenuOpen(false);
-    try {
-        await navigator.clipboard.writeText(`http://${serverHost}:${serverPort}`);
-    } catch (e) {
-        console.error('Failed to copy OBS overlay url:', e);
-    }
-});
-
-document.getElementById('more-open-list-btn')?.addEventListener('click', () => {
-    setMoreMenuOpen(false);
-    if (invoke) invoke('open_web_list').catch(console.error);
-});
-
-document.getElementById('more-copy-list-btn')?.addEventListener('click', async () => {
-    setMoreMenuOpen(false);
-    try {
-        await navigator.clipboard.writeText(`http://${serverHost}:${serverPort}/list`);
-    } catch (e) {
-        console.error('Failed to copy web list url:', e);
-    }
-});
-
 document.getElementById('more-pin-btn')?.addEventListener('click', async () => {
     if (!invoke) return;
     try {
@@ -405,6 +946,20 @@ document.getElementById('more-pin-btn')?.addEventListener('click', async () => {
         }
     } catch (e) {
         console.error('Failed to toggle always on top:', e);
+    } finally {
+        setMoreMenuOpen(false);
+    }
+});
+
+document.getElementById('more-record-raw-btn')?.addEventListener('click', async () => {
+    if (!invoke) return;
+    try {
+        const nextState = await invoke('set_record_raw', { enabled: !recordRawEnabled });
+        updateRecordRawDisplay(nextState);
+        showToast(t(nextState ? 'toast.record_raw_on' : 'toast.record_raw_off'));
+    } catch (e) {
+        console.error('Failed to toggle record_raw:', e);
+        showToast(t('toast.error_prefix', { error: String(e) }));
     } finally {
         setMoreMenuOpen(false);
     }
@@ -442,6 +997,12 @@ document.addEventListener('click', (e) => {
         setDropdownOpen(false);
     }
 
+    const pluginMenu = document.getElementById('plugin-dropdown-menu');
+    const pluginGroup = document.querySelector('.plugin-menu-group');
+    if (pluginMenu && !pluginMenu.classList.contains('hidden') && pluginGroup && !pluginGroup.contains(e.target)) {
+        setPluginMenuOpen(false);
+    }
+
     const moreMenu = document.getElementById('more-dropdown-menu');
     const moreGroup = document.querySelector('.more-menu-group');
     if (moreMenu && !moreMenu.classList.contains('hidden') && moreGroup && !moreGroup.contains(e.target)) {
@@ -456,6 +1017,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('blur', () => {
+    stopPointerEastResize();
     closeAllMenus();
 });
 

@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "plugin-overlay",
+  "description": "Allow local plugin overlay windows to drag and close",
+  "local": false,
+  "remote": {
+    "urls": [
+      "http://localhost:*",
+      "http://127.0.0.1:*"
+    ]
+  },
+  "windows": ["plugin-overlay-*"],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-is-always-on-top"
+  ]
+}

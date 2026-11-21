@@ -4,6 +4,7 @@ pub mod config;
 pub mod event_engine;
 pub mod hub;
 pub mod model;
+pub mod plugin;
 pub mod recorder;
 pub mod server;
 pub mod state;
@@ -17,16 +18,29 @@ use crate::model::{
     AuthState, ChannelBMessage, InitialUiState, RoomInfoSnapshot, RoomOptionsPayload,
     RoomStateSnapshot,
 };
+use crate::plugin::{PluginInfo, PluginRegistry};
 use crate::recorder::Recorder;
 use crate::server::AppState;
-use crate::state::{AppPersistedState, RoomHistoryEntry, StateStore, is_valid_theme_name};
+use crate::state::{AppPersistedState, RoomHistoryEntry, StateStore};
 use anyhow::{Context, Result, anyhow};
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
+
+fn resolve_base_dir(cfg_path: &Path) -> PathBuf {
+    let parent = cfg_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    if parent.file_name().and_then(|s| s.to_str()) == Some("etc") {
+        parent.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+    } else {
+        parent
+    }
+}
 
 fn resolve_path(base_dir: &Path, raw: &str) -> PathBuf {
     let p = Path::new(raw);
@@ -61,11 +75,13 @@ pub struct DamboRuntime {
     pub log_dir: PathBuf,
     pub config: Arc<Config>,
     pub state_store: Arc<StateStore>,
+    pub plugins: Arc<PluginRegistry>,
     pub auth: Arc<AuthManager>,
     pub collector: Arc<CollectorManager>,
     pub recorder: Arc<Mutex<Recorder>>,
     pub hub: Arc<StateHub>,
     pub event_engine: Arc<EventEngine>,
+    startup_auto_connect: Arc<AtomicBool>,
     cancel: CancellationToken,
 }
 
@@ -80,10 +96,7 @@ impl DamboRuntime {
             Config::default()
         };
 
-        let base_dir = cfg_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
+        let base_dir = resolve_base_dir(&cfg_path);
 
         Ok(Self::from_parts(manager, base_dir, cfg))
     }
@@ -96,7 +109,11 @@ impl DamboRuntime {
         let log_dir = resolve_path(&base_dir, &cfg.log.path);
 
         let state_store = Arc::new(StateStore::load_or_default(state_path));
+        let startup_auto_connect = Arc::new(AtomicBool::new(
+            state_store.current_room_id().is_some_and(|id| id > 0) || cfg.bilibili.room_id > 0,
+        ));
         let effective_record_raw = state_store.record_raw().unwrap_or(cfg.record.record_raw);
+        let plugins = Arc::new(PluginRegistry::new(html_dir.clone()));
 
         let auth = Arc::new(AuthManager::new(session_path));
         let collector = Arc::new(CollectorManager::new());
@@ -117,11 +134,13 @@ impl DamboRuntime {
             log_dir,
             config: Arc::new(cfg),
             state_store,
+            plugins,
             auth,
             collector,
             recorder,
             hub,
             event_engine,
+            startup_auto_connect,
             cancel: CancellationToken::new(),
         }
     }
@@ -138,7 +157,7 @@ impl DamboRuntime {
             })
     }
 
-    /// Update and atomically persist the runtime `record_raw` toggle into `etc/state.json`.
+    /// Update and atomically persist the runtime `record_raw` toggle into `var/state.json`.
     pub fn set_record_raw(&self, enabled: bool) -> Result<()> {
         if let Ok(mut rec) = self.recorder.lock() {
             rec.set_record_raw(enabled);
@@ -241,11 +260,15 @@ impl DamboRuntime {
             event_runner.run(event_cancel).await;
         });
 
-        // 3. Axum HTTP & dual WS server
+        // 3. Plugin hot watcher & Axum HTTP/WS server
+        if let Err(e) = self.plugins.start_watching(self.cancel.child_token()) {
+            log::warn!("Plugin directory watcher disabled: {}", e);
+        }
+
         let addr = resolve_bind_addr(&self.config.server.host, self.config.server.port);
         let app_state = Arc::new(AppState {
             config: self.config.clone(),
-            state_store: self.state_store.clone(),
+            plugins: self.plugins.clone(),
             hub: self.hub.clone(),
             event_tx: self.event_engine.sender(),
             html_dir: self.html_dir.clone(),
@@ -258,15 +281,24 @@ impl DamboRuntime {
         });
 
         // 4. Auto-connect: CLI override > persisted state.json current_room_id > static config.bilibili.room_id
-        if let Some(raw) = room_override {
-            let room_id = self.switch_room(raw).await?;
-            log::info!("🎯 CLI room override connected: {}", room_id);
+        let connect_result = if let Some(raw) = room_override {
+            match self.switch_room(raw).await {
+                Ok(room_id) => {
+                    log::info!("🎯 CLI room override connected: {}", room_id);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
         } else if let Some(saved_room) = self.state_store.current_room_id().filter(|&id| id > 0) {
-            self.connect_room_internal(saved_room, false).await?;
+            self.connect_room_internal(saved_room, false).await
         } else if self.config.bilibili.room_id > 0 {
             self.connect_room_internal(self.config.bilibili.room_id, false)
-                .await?;
-        }
+                .await
+        } else {
+            Ok(())
+        };
+        self.startup_auto_connect.store(false, Ordering::Release);
+        connect_result?;
 
         Ok(())
     }
@@ -302,6 +334,7 @@ impl DamboRuntime {
     }
 
     pub async fn disconnect_room(&self) -> Result<()> {
+        self.startup_auto_connect.store(false, Ordering::Release);
         self.collector.disconnect(self.hub.clone()).await;
         self.event_engine.set_room(0, String::new());
         if let Ok(mut rec) = self.recorder.lock() {
@@ -312,45 +345,16 @@ impl DamboRuntime {
         Ok(())
     }
 
-    pub fn change_theme(&self, theme: &str) -> Result<()> {
-        let clean = theme.trim();
-        if !is_valid_theme_name(clean) {
-            return Err(anyhow!("Invalid OBS theme name: '{}'", theme));
-        }
-
-        let theme_index = self.html_dir.join(clean).join("index.html");
-        if !theme_index.exists() {
-            return Err(anyhow!(
-                "Theme '{}' does not exist at {:?}",
-                clean,
-                theme_index
-            ));
-        }
-
-        self.state_store.set_theme(clean)?;
-        Ok(())
+    pub fn list_plugins(&self) -> Vec<PluginInfo> {
+        self.plugins.list()
     }
 
-    pub fn list_themes(&self) -> Vec<String> {
-        let mut themes = Vec::new();
-        if let Ok(entries) = fs::read_dir(&self.html_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir()
-                    && let Some(name) = path.file_name().and_then(|s| s.to_str())
-                    && name != "list"
-                    && path.join("index.html").exists()
-                {
-                    themes.push(name.to_string());
-                }
-            }
-        }
-        themes.sort();
-        if let Some(pos) = themes.iter().position(|t| t == "default") {
-            let def = themes.remove(pos);
-            themes.insert(0, def);
-        }
-        themes
+    pub fn plugins_rx(&self) -> watch::Receiver<Vec<PluginInfo>> {
+        self.plugins.subscribe()
+    }
+
+    pub fn set_locale(&self, locale: Option<String>) -> Result<AppPersistedState> {
+        self.state_store.set_locale(locale)
     }
 
     pub fn remove_history_room(&self, room_id: u64) -> Result<Vec<RoomHistoryEntry>> {
@@ -377,15 +381,17 @@ impl DamboRuntime {
 
     pub fn initial_ui_state(&self) -> InitialUiState {
         let persisted = self.state_store.snapshot();
+        let room_state = self.hub.room_state();
+        let connecting = !room_state.connected
+            && (room_state.room_id > 0 || self.startup_auto_connect.load(Ordering::Acquire));
         InitialUiState {
-            room_state: self.hub.room_state(),
+            room_state,
             auth_state: self.auth.current_state(),
-            theme: persisted.theme,
-            themes: self.list_themes(),
             server_host: self.config.server.host.clone(),
             server_port: self.config.server.port,
             history_rooms: persisted.room_history,
             record_raw: self.is_record_raw_enabled(),
+            connecting,
         }
     }
 
@@ -421,6 +427,7 @@ impl DamboRuntime {
 mod tests {
     use super::*;
     use crate::model::RawBiliEvent;
+    use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
@@ -432,31 +439,34 @@ mod tests {
         let temp_dir =
             std::env::temp_dir().join(format!("dambo_rt_test_{}_{}", std::process::id(), id));
         let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(temp_dir.join("static/themes/default")).unwrap();
-        fs::create_dir_all(temp_dir.join("static/themes/sc-ticker")).unwrap();
-        fs::create_dir_all(temp_dir.join("static/themes/list")).unwrap();
+        fs::create_dir_all(temp_dir.join("etc")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/default")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/sc-ticker")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/list")).unwrap();
         fs::write(
-            temp_dir.join("static/themes/default/index.html"),
+            temp_dir.join("static/html/default/index.html"),
             "<html>d</html>",
         )
         .unwrap();
         fs::write(
-            temp_dir.join("static/themes/sc-ticker/index.html"),
+            temp_dir.join("static/html/sc-ticker/index.html"),
             "<html>s</html>",
         )
         .unwrap();
         fs::write(
-            temp_dir.join("static/themes/list/index.html"),
+            temp_dir.join("static/html/list/index.html"),
             "<html>l</html>",
         )
         .unwrap();
 
-        let raw_toml = "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\nstate_file = \"etc/state.json\"\n[event]\nwindow_ms = 60\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n";
-        let cfg_path = temp_dir.join("dambo_config.toml");
+        let raw_toml = "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/html\"\nstate_file = \"var/state.json\"\n[event]\nwindow_ms = 60\n[record]\nenabled = true\ndir = \"var/records\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n";
+        let cfg_path = temp_dir.join("etc/config.toml");
         fs::write(&cfg_path, raw_toml).unwrap();
 
         let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
-        assert_eq!(rt.list_themes(), vec!["default", "sc-ticker"]);
+        assert_eq!(rt.base_dir, temp_dir);
+        let plugin_names: Vec<String> = rt.list_plugins().into_iter().map(|p| p.name).collect();
+        assert_eq!(plugin_names, vec!["default", "list", "sc-ticker"]);
         rt.start().await.unwrap();
 
         let room_id = rt
@@ -567,11 +577,11 @@ mod tests {
         assert_eq!(snap.items.len(), 1);
         assert_eq!(snap.items[0].kind, "superchat");
 
-        rt.change_theme("sc-ticker").unwrap();
+        rt.set_locale(Some("ja".to_string())).unwrap();
         rt.set_record_raw(true).unwrap();
 
         let persisted = rt.state_store.snapshot();
-        assert_eq!(persisted.theme, "sc-ticker");
+        assert_eq!(persisted.locale.as_deref(), Some("ja"));
         assert_eq!(persisted.current_room_id, Some(21452505));
         assert_eq!(persisted.record_raw, Some(true));
         assert_eq!(persisted.room_history.len(), 1);
@@ -579,12 +589,12 @@ mod tests {
         assert_eq!(persisted.room_history[0].uname, "主播A");
         assert_eq!(persisted.room_history[0].title, "测试");
 
-        // Ensure config.toml stays strictly read-only on disk
+        // Ensure etc/config.toml stays strictly read-only on disk
         assert_eq!(fs::read_to_string(&cfg_path).unwrap(), raw_toml);
 
-        // Reloading a fresh runtime recovers theme, current_room_id, history, and record_raw from etc/state.json
+        // Reloading a fresh runtime recovers locale, current_room_id, history, and record_raw from var/state.json
         let rt_reloaded = DamboRuntime::from_config_path(&cfg_path).unwrap();
-        assert_eq!(rt_reloaded.state_store.theme(), "sc-ticker");
+        assert_eq!(rt_reloaded.state_store.locale().as_deref(), Some("ja"));
         assert_eq!(rt_reloaded.state_store.current_room_id(), Some(21452505));
         assert!(rt_reloaded.is_record_raw_enabled());
 
@@ -615,17 +625,18 @@ mod tests {
         let temp_dir =
             std::env::temp_dir().join(format!("dambo_rt_combo_{}_{}", std::process::id(), id));
         let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(temp_dir.join("static/themes/default")).unwrap();
+        fs::create_dir_all(temp_dir.join("etc")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/default")).unwrap();
         fs::write(
-            temp_dir.join("static/themes/default/index.html"),
+            temp_dir.join("static/html/default/index.html"),
             "<html>d</html>",
         )
         .unwrap();
 
-        let cfg_path = temp_dir.join("dambo_config.toml");
+        let cfg_path = temp_dir.join("etc/config.toml");
         fs::write(
             &cfg_path,
-            "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/themes\"\n[event]\nwindow_ms = 60\nmax_combo_wait_secs = 5\n[record]\nenabled = true\ndir = \"./rec\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n",
+            "[bilibili]\nroom_id = 0\n[server]\nport = 0\nhtml_dir = \"static/html\"\n[event]\nwindow_ms = 60\nmax_combo_wait_secs = 5\n[record]\nenabled = true\ndir = \"var/records\"\nfilename_pattern = \"dambo_{room_name}_%Y%m%d_%H%M%S.jsonl\"\n",
         )
         .unwrap();
 
@@ -702,6 +713,37 @@ mod tests {
         let rec_content = fs::read_to_string(rec_files[0].path()).unwrap();
         assert!(!rec_content.contains("combo_end"));
         assert!(rec_content.contains("\"kind\":\"session_end\""));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_initial_ui_state_connecting_lifecycle() {
+        let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_dir =
+            std::env::temp_dir().join(format!("dambo_rt_init_conn_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("etc")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/default")).unwrap();
+
+        let cfg_path = temp_dir.join("etc/config.toml");
+        fs::write(&cfg_path, "[bilibili]\nroom_id = 0\n").unwrap();
+
+        let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        assert!(!rt.initial_ui_state().connecting);
+
+        rt.state_store.set_current_room(Some(21465419)).unwrap();
+        let rt_resumed = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        assert!(rt_resumed.initial_ui_state().connecting);
+
+        rt_resumed.disconnect_room().await.unwrap();
+        assert!(!rt_resumed.initial_ui_state().connecting);
+
+        fs::write(&cfg_path, "[bilibili]\nroom_id = 777\n").unwrap();
+        let rt_static = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        assert!(rt_static.initial_ui_state().connecting);
+        rt_static.disconnect_room().await.unwrap();
+        assert!(!rt_static.initial_ui_state().connecting);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

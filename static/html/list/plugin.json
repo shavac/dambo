@@ -1,0 +1,8 @@
+{
+  "title": "Danmaku Monitor",
+  "description": "Interactive web danmaku monitor with smart scroll lock, sticky SuperChat/Guard header, and filters.",
+  "obs": {
+    "width": 480,
+    "height": 800
+  }
+}

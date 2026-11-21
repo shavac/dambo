@@ -7,7 +7,10 @@ Thumbs.db
 .idea/
 *.swp
 
+# --- 运行时数据（state.json, session.json, logs, records）---
+var/
 logs
+logs/
 rec
 
 # --- 环境变量与敏感密钥 ---

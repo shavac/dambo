@@ -1,0 +1,8 @@
+{
+  "title": "SC & Guard Ticker",
+  "description": "Minimal OBS overlay displaying timed countdown cards exclusively for SuperChat and Guard events.",
+  "obs": {
+    "width": 420,
+    "height": 320
+  }
+}

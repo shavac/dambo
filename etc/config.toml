@@ -1,6 +1,6 @@
 [bilibili]
 room_id = 0                    # Optional static fallback room ID; runtime room & history live in state_file
-session_file = "./etc/dambo_session.json"
+session_file = "var/session.json"
 avatar_cache_size = 2000       # In-memory LRU cache capacity for uid -> face_url
 
 # Channel A: Real-time feed configuration (serves / OBS overlay and /list web feed)
@@ -20,17 +20,17 @@ max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic batch_combo
 [server]
 host = "localhost"             # Change to "0.0.0.0" for LAN access (e.g., iPad/mobile /list)
 port = 3838                    # Adjacent to robabel's port 3737
-html_dir = "static/themes"
-state_file = "etc/state.json"  # Runtime persisted state (room_id, theme, room_history, record_raw)
+html_dir = "static/html"
+state_file = "var/state.json"  # Runtime persisted state (current_room_id, locale, room_history, record_raw)
 
 [log]
 level = "info"
-path = "./logs"
+path = "var/logs"
 
 [record]
 enabled = true                 # Enable isomorphic JSONL recording (shared with /ws/event source)
 record_raw = false             # Sidecar raw Bilibili packet capture (*_raw.jsonl with pb_decoded/dm_v2_decoded)
-dir = "./rec"
+dir = "var/records"
 # Placeholders: {room_name} (sanitized streamer name), {room_id}, and chrono strftime specifiers
 # Automatically anchors offset_ms and preserves open file across reconnects for the same live session
 filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"

@@ -6,7 +6,7 @@
 
 ### 三端职责边界
 * **`robabel`（`:3737`）**：纯听觉感知节点，输出实时 ASR 语音流（`/ws`）与 OBS 透明语音字幕（`/`）。
-* **`dambo`（`:3838`）**：纯互动感知与流量整形节点，采用「单点采集定序 -> 全量 `/ws` + 同构录制 `recorder` + 智能聚合 `/ws/event`」极简流水线，负责单直播间长连采集、全量事件同构落盘、OBS 透明弹幕挂件（`/`）、可选网页端弹幕列表（`/list`）以及面向中控的事件聚合流（`/ws/event`）。
+* **`dambo`（`:3838`）**：纯互动感知与流量整形节点，采用「单点采集定序 -> 全量 `/ws` + 同构录制 `recorder` + 智能聚合 `/ws/event`」极简流水线，负责单直播间长连采集、全量事件同构落盘、可扩展 OBS 网页插件（`/`、`/{plugin}`）以及面向中控的事件聚合流（`/ws/event`）。
 * **`robao`（中控大脑）**：有状态决策中枢，同时订阅 `3737/ws` 与 `3838/ws/event`，负责双流毫秒级时间对齐、观众生命周期状态机（进场/潜水/破冰/离场/回流）、长期记忆存储、防抢话仲裁与 LLM/TTS 回复生成。
 
 > **架构红线**：`dambo` 保持**无状态边缘管道**定位，不在内部维护观众生命周期状态机，也不包含任何 LLM 推理逻辑；底层配置与传输协议统一以纯数字 `room_id` 作为房间唯一标识。
@@ -21,49 +21,64 @@
 dambo/
 ├── Cargo.toml                  # Virtual workspace root manifest (Edition 2024)
 ├── DESIGN.md                   # Product requirements & architecture design doc
-├── dambo_config.toml           # Strictly read-only static configuration template
 ├── etc/
-│   ├── dambo_session.json      # Persisted Bilibili auth cookies
-│   └── state.json              # Runtime state (current_room_id, theme, room_history[<=20], record_raw)
+│   └── config.toml             # Strictly read-only static configuration template
+├── var/                        # Runtime artifacts (gitignored: state, auth session, logs, records)
+│   ├── state.json              # Runtime state (current_room_id, locale, room_history[<=20], record_raw)
+│   ├── session.json            # Persisted Bilibili auth cookies
+│   ├── logs/                   # Rolling application logs
+│   └── records/                # Isomorphic *.jsonl & optional *_raw.jsonl captures
 ├── dambo-core/                 # Core shared library (used by both CLI and Tauri UI)
-│   ├── Cargo.toml              # Depends on axum (ws), tower-http (fs), tokio, etc.
+│   ├── Cargo.toml              # Depends on axum (ws), notify, tokio, etc.
 │   └── src/
-│       ├── lib.rs              # DamboRuntime isomorphic pipeline dispatcher (read-only Arc<Config> + StateStore)
+│       ├── lib.rs              # DamboRuntime isomorphic pipeline dispatcher (read-only Arc<Config> + StateStore + PluginRegistry)
 │       ├── config.rs           # Strictly read-only TOML configuration loading ([event], [server].state_file, [record].record_raw)
-│       ├── state.rs            # Fault-tolerant atomic JSON persistence for etc/state.json (StateStore)
+│       ├── state.rs            # Fault-tolerant atomic JSON persistence for var/state.json (StateStore)
+│       ├── plugin.rs           # PluginRegistry: auto-discovery, plugin.json manifest & notify recursive hot-reload
 │       ├── model.rs            # RoomInfoSnapshot, RawBiliEvent (seq, msg_type), SessionSummary, Channel A/B contracts
 │       ├── auth.rs             # Bilibili cookie validation, QR generation, and polling FSM
 │       ├── collector.rs        # Single-room collector, seq sequencing, guard dedup & PB decoder
 │       ├── recorder.rs         # Isomorphic JSONL recorder, session_end summary & *_raw.jsonl sidecar
 │       ├── hub.rs              # Channel A: Real-time broadcast & protected Snapshot ring buffer (/ws)
 │       ├── event_engine.rs     # Channel B: 3-lane EventEngine & dynamic combo buckets (/ws/event)
-│       └── server.rs           # Axum HTTP static serving (/, /list) & dual WS endpoints (/ws, /ws/event)
+│       └── server.rs           # Axum HTTP unified plugin routing (/, /{plugin}, /{plugin}/{*path}) & dual WS (/ws, /ws/event)
 ├── cli/                        # Headless CLI entrypoint ([[bin]] name = "dambo", supports --record-raw)
 │   ├── Cargo.toml
 │   └── src/main.rs
-├── ui/                         # Tauri desktop frontend assets (control capsule & QR login window)
+├── ui/                         # Tauri desktop frontend assets (control capsule, Plugin dropdown & QR login popup)
 │   ├── index.html              # Main floating control capsule
 │   ├── login.html              # Standalone QR code login sub-window
 │   ├── style.css
 │   └── app.js
 ├── src-tauri/                  # Tauri v2 Rust host & system tray (name = "dambo-ui")
 │   ├── Cargo.toml
-│   ├── tauri.conf.json         # Sets "frontendDist": "../ui"
+│   ├── tauri.conf.json         # Sets "frontendDist": "../ui", default width 780
 │   ├── capabilities/default.json
+│   ├── locales/                # Trilingual desktop host i18n dictionaries (zh-CN, ja, en)
+│   │   ├── zh-CN.json
+│   │   ├── ja.json
+│   │   └── en.json
 │   └── src/
 │       ├── main.rs
+│       ├── i18n.rs             # Embedded trilingual lookup, placeholder formatting & system locale detection
 │       └── lib.rs
 └── static/
-    └── themes/                 # HTTP server (:3838) OBS overlay & /list web themes
-        ├── default/            # Default transparent OBS danmaku overlay (served at /, skips like by default)
+    └── html/                   # HTTP server (:3838) self-contained web plugins (auto-discovered by PluginRegistry)
+        ├── default/            # Default transparent OBS danmaku overlay (served at / and /default, skips like by default)
+        │   ├── plugin.json
         │   ├── index.html
         │   ├── style.css
         │   └── danmu.js
-        ├── sc-ticker/          # OBS theme showing high-priority SuperChat & Guard events only
-        └── list/               # Optional streamer web danmaku feed (served at /list, skips like by default)
+        ├── list/               # Optional streamer web danmaku feed (served at /list, skips like by default)
+        │   ├── plugin.json
+        │   ├── index.html
+        │   ├── style.css
+        │   └── feed.js
+        └── sc-ticker/          # OBS plugin showing high-priority SuperChat & Guard events only (served at /sc-ticker)
+            ├── plugin.json
             ├── index.html
             ├── style.css
-            └── feed.js
+            └── ticker.js
 ```
 
 ---
@@ -116,14 +131,15 @@ dambo/
 
 ### 3.4 基于 axum 的双通道输出架构（端口 3838）
 
-`server.rs` 使用 `axum` 搭建异步 HTTP 与双 WebSocket 服务（共享 `Arc<AppState>`，注入只读 `Arc<Config>` 与运行时 `Arc<StateStore>`），无独立 `filter.rs` 丢弃环节：
+`server.rs` 使用 `axum` 搭建异步 HTTP 与双 WebSocket 服务（共享 `Arc<AppState>`，注入只读 `Arc<Config>` 与热加载 `Arc<PluginRegistry>`），无独立 `filter.rs` 丢弃环节：
 
-#### 通道 A：网页展示与实时直通流（`http://<host>:3838/`、`/list` & `ws://<host>:3838/ws`）
+#### 通道 A：可扩展网页插件与实时直通流（`http://<host>:3838/`、`/{plugin}` & `ws://<host>:3838/ws`）
 
-* `GET /`：从 `StateStore` 读取运行时激活主题（`static/themes/<theme>/index.html`，默认为 `"default"`），支持通过托盘或胶囊面板切换并即时生效。
-* `GET /list`：返回 `static/themes/list/index.html`，提供独立网页端弹幕监看页。
-* `nest_service("/static/themes", ServeDir::new(...))`：统一注入 `Cache-Control: no-store, no-cache, must-revalidate` 响应头，防止 OBS 浏览器源缓存旧资产。
-* `GET /ws`：实时向前端推送所有标准事件（**全量保留 `face` 头像供 OBS 视觉挂件渲染**，含 `like`、`enter`、`follow`、`share`、`special_follow`、`mutual_follow` 等；内置主题默认跳过 `like` 渲染，可通过 `?show_like=1` 开启），并在 `Snapshot` 环形缓冲区（`feed.max_history`，默认 300）中**仅保留核心视觉事件（`chat`、`gift`、`superchat`、`guard`）**，跳过高频 `enter` 与 `like`，防止刷新挂件时历史视觉消息被挤没。
+* **插件自动发现与 `notify` 热重载（`plugin.rs`）**：扫描 `config.server.html_dir`（默认 `static/html/`）的一级子目录；仅接纳包含 `index.html` 且目录名合法（仅含 ASCII 字母、数字、`-`、`_`，并排除 `ws`、`api`、`sdk` 等保留路由名）的插件；解析可选清单 `plugin.json`（支持 `title`、`description` 与 `obs.{width, height}`，缺失或格式错误时记录 `warn` 日志并安全回退）；按内置插件（`default`、`list`）优先、其余按目录名字母序排列；通过 `notify` 递归监听（约 200ms 防抖）文件与目录增删改，实时刷新内存注册表并广播更新通知，无需重启服务。
+* `GET /`：统一提供默认插件 `static/html/default/index.html`。
+* `GET /{plugin}` 与 `GET /{plugin}/`：返回对应插件目录 `static/html/{plugin}/index.html`（内置含 `/default`、`/list`、`/sc-ticker`，第三方放入目录即生效）。
+* `GET /{plugin}/{*path}`：严格拦截 `..` 路径穿越；解析插件静态资产并兼容根路径相对引用向 `default/` 目录回退；统一注入 `Cache-Control: no-store, no-cache, must-revalidate` 响应头，防止 OBS 浏览器源缓存旧资产。
+* `GET /ws`：实时向前端推送所有标准事件（**全量保留 `face` 头像供 OBS 视觉挂件渲染**，含 `like`、`enter`、`follow`、`share`、`special_follow`、`mutual_follow` 等；内置插件默认跳过 `like` 渲染，可通过 `?show_like=1` 开启），并在 `Snapshot` 环形缓冲区（`feed.max_history`，默认 300）中**仅保留核心视觉事件（`chat`、`gift`、`superchat`、`guard`）**，跳过高频 `enter` 与 `like`，防止刷新挂件时历史视觉消息被挤没。
 
 #### 通道 B：robao 中控智能事件整形流（`ws://<host>:3838/ws/event`）
 
@@ -143,30 +159,32 @@ dambo/
 
 ## 4. 界面与交互设计（`dambo-ui`）
 
-1. 主控制浮窗（单行紧凑悬浮舱）：
-   * 左侧拖拽手柄 + 登录账号徽章（点击登出重扫码）+ 房间选择与三态指示灯（⚪未连 / 🟡未开播 / 🟢直播中）+ 主题切换 + 一键复制 OBS 地址（`:3838`）+ 更多菜单。
-   * 通信架构解耦：`dambo-ui` 不连接 `/ws`，全面使用 Tauri 原生 IPC（`room_state_changed`、`auth_state_changed`、`app_state_changed`）。
+1. 主控制浮窗（780px 单行紧凑悬浮舱）：
+   * 左侧拖拽手柄 + 登录账号徽章（点击登出重扫码）+ 房间选择与三态指示灯（⚪未连 / 🟡未开播 / 🟢直播中）+ 紧凑三语切换器（`中文`/`日本語`/`EN`）+ **`Plugin (N) ▾` 下拉面板** + 更多菜单。
+   * **插件下拉卡片（`Plugin`）**：基于 `PluginRegistry` 与 `plugins-updated` 事件热同步展示所有已发现插件（标题、路由 `/{name}`、简介、OBS 建议尺寸），每张卡片提供「桌面打开」（以独立无边框、透明、始终置顶桌面挂件窗口打开 `http://127.0.0.1:<port>/{name}`）与「复制 OBS URL」（复制后显示 1.5s 绿色已复制反馈），底部提供「打开插件目录」一键调起系统文件管理器。
+   * **三语宿主国际化（`i18n`）**：主面板、扫码子窗口及系统托盘全量支持简中（`zh-CN`）、日语（`ja`）与英语（`en`）实时切换（内置嵌入式词典，`static/html/` 网页插件独立保持原样）；首次未持久化语言时自动探测系统语言并规范化回退。
+   * 通信架构解耦：`dambo-ui` 不连接 `/ws`，全面使用 Tauri 原生 IPC（`room_state_changed`、`auth_state_changed`、`app_state_changed`、`plugins-updated`、`i18n-updated`）。
 2. 系统托盘（Tray Icon）：
-   * 左键切换浮窗显隐；右键菜单内嵌 **Recent Rooms** 历史房间快捷子菜单（直接读取 `StateStore` 中的 `room_history` 展示房间号/主播名/标题并一键切换）、**OBS Theme** 主题切换子菜单、`Record Raw Packets (*_raw.jsonl)` 运行时抓包开关，以及 OBS 挂件、`/list`、配置/录制/日志目录、重新登录与退出入口；所有状态变更均通过 `app_state_changed` 双向同步并原子写入 `etc/state.json`。
+   * 左键切换浮窗显隐；右键菜单全量对齐三语 i18n，内嵌 **Recent Rooms** 历史房间快捷子菜单（直接读取 `var/state.json` 中的 `room_history` 展示房间号/主播名/标题并一键切换）、**Plugin** 子菜单（内置优先 + 分割线 + 自定义插件，每项包含「桌面打开」与「复制 OBS URL」，底部「打开插件目录...」）、**Language** 三语切换子菜单（`简体中文` / `日本語` / `English` 单选联动）、`Record Raw Packets (*_raw.jsonl)` 运行时抓包开关，以及配置/录制/日志目录、重新登录与退出入口；所有状态变更均通过 IPC 双向同步并原子写入 `var/state.json`。
 
 ---
 
-## 5. 静态配置与运行时状态分离（`dambo_config.toml` & `etc/state.json`）
+## 5. 静态配置与运行时状态分离（`etc/config.toml` & `var/state.json`）
 
 * **职责边界**：
-  * `dambo_config.toml`：**全程只读（`Arc<Config>`）**，仅承载静态服务端口、日志级别、录制目录模板、`state_file` 路径及可选静态兜底 `room_id`；程序在运行期绝不回写 `dambo_config.toml`。
-  * `etc/state.json`（由 `[server].state_file` 指定，支持相对/绝对路径）：**运行时状态唯一持久化文件（`StateStore`）**；缺失或 JSON 损坏时记录 `warn` 日志并安全回退默认空状态，不阻断启动；任何变更均自动创建父目录后通过同目录临时文件 + `fs::rename` 原子替换。
-* **启动房间优先级**：CLI `--room` 覆盖 > `etc/state.json` 的 `current_room_id` > 只读 `dambo_config.toml` 的 `[bilibili].room_id`。
+  * `etc/config.toml`：**全程只读（`Arc<Config>`）**，仅承载静态服务端口、日志级别、录制目录模板、`state_file` 路径及可选静态兜底 `room_id`；`etc/` 目录下仅存放只读配置，程序绝不回写 `etc/config.toml`。
+  * `var/state.json`（由 `[server].state_file` 指定，支持相对/绝对路径）：**运行时状态唯一持久化文件（`StateStore`）**，与 `var/session.json`、`var/logs`、`var/records` 统一归口在 `var/` 目录并整体纳入 `.gitignore`；缺失或 JSON 损坏时记录 `warn` 日志并安全回退默认空状态，不阻断启动；任何变更均自动创建父目录后通过同目录临时文件 + `fs::rename` 原子替换。
+* **启动房间优先级**：CLI `--room` 覆盖 > `var/state.json` 的 `current_room_id` > 只读 `etc/config.toml` 的 `[bilibili].room_id`。
 
-### 5.1 静态配置文件模板（`dambo_config.toml`）
+### 5.1 静态配置文件模板（`etc/config.toml`）
 
 ```toml
 [bilibili]
 room_id = 0                    # Optional static fallback room ID; runtime room & history live in state_file
-session_file = "./etc/dambo_session.json"
+session_file = "var/session.json"
 avatar_cache_size = 2000       # In-memory LRU cache capacity for uid -> face_url
 
-# Channel A: Real-time feed configuration (serves / OBS overlay and /list web feed)
+# Channel A: Real-time feed configuration (serves / and /{plugin} web overlays)
 [feed]
 max_history = 300              # Max core visual items retained in Snapshot ring buffer
 show_enter = true              # Forward enter events over /ws
@@ -183,28 +201,28 @@ max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic batch_combo
 [server]
 host = "localhost"             # Change to "0.0.0.0" for LAN access (e.g., iPad/mobile /list)
 port = 3838                    # Adjacent to robabel's port 3737
-html_dir = "static/themes"
-state_file = "etc/state.json"  # Runtime persisted state (current_room_id, theme, room_history, record_raw)
+html_dir = "static/html"
+state_file = "var/state.json"  # Runtime persisted state (current_room_id, locale, room_history, record_raw)
 
 [log]
 level = "info"
-path = "./logs"
+path = "var/logs"
 
 [record]
 enabled = true                 # Enable isomorphic JSONL recording (shared with /ws/event source)
 record_raw = false             # Sidecar raw Bilibili packet capture (*_raw.jsonl with pb_decoded/dm_v2_decoded)
-dir = "./rec"
+dir = "var/records"
 # Placeholders: {room_name} (sanitized streamer name), {room_id}, and chrono strftime specifiers
 # Anchors offset_ms to live start_time*1000 and preserves open file across reconnects for the same live session
 filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 ```
 
-### 5.2 运行时持久化状态 Schema（`etc/state.json`）
+### 5.2 运行时持久化状态 Schema（`var/state.json`）
 
 ```json
 {
   "current_room_id": 21452505,
-  "theme": "default",
+  "locale": "zh-CN",
   "room_history": [
     {
       "room_id": 21452505,
@@ -217,7 +235,7 @@ filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 }
 ```
 
-* `theme` 加载时校验 `is_valid_theme_name`（禁止空串、`"list"`、`..`、`/`、`\` 与控制字符），非法则回退为 `"default"`；
+* `locale` 为可选字段（支持规范化至 `zh-CN`、`ja`、`en`），未设置时自动按系统语言探测并回退至 `en`；
 * `room_history` 每次连接或收到 `room_info` / `room_change` 时自动去重、更新主播昵称/房间标题并置顶，上限保留最近 `20` 条。
 
 ---
@@ -226,7 +244,7 @@ filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 
 ### 6.1 本地全量录制格式
 
-#### 主事件文件（`./rec/dambo_主播A_YYYYMMDD_HHMMSS.jsonl`，受 `[record].enabled` 控制）
+#### 主事件文件（`var/records/dambo_主播A_YYYYMMDD_HHMMSS.jsonl`，受 `[record].enabled` 控制）
 
 首行写入 `room_info`（`seq = 0`），中间按 `seq` 单调递增记录 100% 标准事件（含 `live`、`preparing`、`room_change`、`room_silent`、`superchat_delete`、`room_block`、`warning`、`cut_off`、`reconnected`、`chat`、`superchat`、`gift`、`guard`、`guard_enter`、`enter`、`follow`、`share`、`special_follow`、`mutual_follow`、`like`），结束时写入 `session_end` 汇总；其中 `face` 仅在付费事件（付费 `gift`、`superchat`、`guard`）中写入，其余事件自动省略：
 
@@ -240,7 +258,7 @@ filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 {"seq":6,"offset_ms":15000,"timestamp":1763280015000,"room_id":21452505,"room_uname":"主播A","kind":"session_end","uid":0,"uname":"","content":"场次结束汇总","price":0,"summary":{"chat_count":1,"like_count":1,"guard_count":1,"gift_total_coin":300,"superchat_total_coin":0,"enter_count":0,"follow_count":1,"share_count":0},"raw_cmd":"SESSION_END"}
 ```
 
-#### 旁路原始抓包文件（`./rec/dambo_主播A_YYYYMMDD_HHMMSS_raw.jsonl`，受 `[record].record_raw` 或 `--record-raw` 独立控制）
+#### 旁路原始抓包文件（`var/records/dambo_主播A_YYYYMMDD_HHMMSS_raw.jsonl`，受 `[record].record_raw` 或 `--record-raw` 独立控制）
 
 完整保存 B 站下发的原始 JSON 包；当原始节点中包含 `"pb"` 或 `"dm_v2"` Base64 字段时，自动解包并在同级附加 `"pb_decoded"` / `"dm_v2_decoded"` 明文 JSON 节点：
 
@@ -248,7 +266,7 @@ filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
 {"cmd":"INTERACT_WORD_V2","data":{"pb":"...","pb_decoded":{"1":9918273,"2":"老粉丁","5":1,"9":{"2":18,"3":"星光"}}}}
 ```
 
-### 6.2 通道 A：`ws://<host>:3838/ws`（面向 `/` OBS 挂件与 `/list` 网页列表；`dambo-ui` 解耦走原生 IPC）
+### 6.2 通道 A：`ws://<host>:3838/ws`（面向 `/` 与 `/{plugin}` 网页插件；`dambo-ui` 解耦走原生 IPC）
 
 连接成功立即推送首帧 `Snapshot`（`items` 仅包含核心视觉事件 `chat`、`gift`、`superchat`、`guard`），后续每次收到任意标准事件或房间状态变化时实时广播 `Event` / `RoomState`：
 

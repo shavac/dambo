@@ -11,7 +11,7 @@ use std::path::Path;
     about = "Dambo Danmaku & Event Controller"
 )]
 struct Args {
-    #[arg(short, long, default_value = "dambo_config.toml")]
+    #[arg(short, long, default_value = "etc/config.toml")]
     pub config: String,
 }
 
@@ -61,7 +61,7 @@ mod tests {
         let temp = std::env::temp_dir();
         std::env::set_current_dir(&temp).unwrap();
 
-        let resolved = resolve_config_path("dambo_config.toml");
+        let resolved = resolve_config_path("etc/config.toml");
         let resolved_path = Path::new(&resolved);
         let exists = resolved_path.exists();
 

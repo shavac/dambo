@@ -10,14 +10,9 @@ use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
-pub const DEFAULT_THEME: &str = "default";
 pub const MAX_ROOM_HISTORY: usize = 20;
 
 static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-fn default_theme_name() -> String {
-    DEFAULT_THEME.to_string()
-}
 
 fn now_unix_secs() -> u64 {
     SystemTime::now()
@@ -26,18 +21,25 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Validates that an OBS overlay theme name is safe for filesystem lookup and URL routing.
-pub fn is_valid_theme_name(theme: &str) -> bool {
-    !theme.is_empty()
-        && theme == theme.trim()
-        && theme != "list"
-        && !theme.contains("..")
-        && !theme.contains('/')
-        && !theme.contains('\\')
-        && !theme.chars().any(char::is_control)
+/// Normalizes an arbitrary locale tag (e.g. `zh_CN.UTF-8`, `ja-JP`, `en_US`) into
+/// one of the supported host locales (`"zh-CN"`, `"ja"`, `"en"`), or returns `None`.
+pub fn normalize_locale(raw: &str) -> Option<&'static str> {
+    let lower = raw.trim().to_ascii_lowercase().replace('_', "-");
+    if lower.is_empty() {
+        return None;
+    }
+    if lower.starts_with("zh") {
+        Some("zh-CN")
+    } else if lower.starts_with("ja") {
+        Some("ja")
+    } else if lower.starts_with("en") {
+        Some("en")
+    } else {
+        None
+    }
 }
 
-/// Entry stored in `etc/state.json` representing a recently connected room.
+/// Entry stored in `var/state.json` representing a recently connected room.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoomHistoryEntry {
     pub room_id: u64,
@@ -49,31 +51,20 @@ pub struct RoomHistoryEntry {
     pub last_used_at: u64,
 }
 
-/// Runtime state persisted separately from the strictly read-only `dambo_config.toml`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Runtime state persisted separately from the strictly read-only `etc/config.toml`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppPersistedState {
     #[serde(default)]
     pub current_room_id: Option<u64>,
-    #[serde(default = "default_theme_name")]
-    pub theme: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
     #[serde(default)]
     pub room_history: Vec<RoomHistoryEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_raw: Option<bool>,
 }
 
-impl Default for AppPersistedState {
-    fn default() -> Self {
-        Self {
-            current_room_id: None,
-            theme: default_theme_name(),
-            room_history: Vec::new(),
-            record_raw: None,
-        }
-    }
-}
-
-/// Thread-safe, fault-tolerant, atomic JSON persistence store for `etc/state.json`.
+/// Thread-safe, fault-tolerant, atomic JSON persistence store for `var/state.json`.
 pub struct StateStore {
     path: PathBuf,
     inner: RwLock<AppPersistedState>,
@@ -125,15 +116,21 @@ impl StateStore {
     }
 
     fn sanitize_state(mut state: AppPersistedState, path: &Path) -> AppPersistedState {
-        if !is_valid_theme_name(&state.theme) {
-            log::warn!(
-                "Invalid persisted theme {:?} in {:?}; resetting to '{}'",
-                state.theme,
-                path,
-                DEFAULT_THEME
-            );
-            state.theme = default_theme_name();
-        }
+        state.locale = match state.locale {
+            Some(ref raw) if !raw.trim().is_empty() => {
+                if let Some(norm) = normalize_locale(raw) {
+                    Some(norm.to_string())
+                } else {
+                    log::warn!(
+                        "Unsupported persisted locale {:?} in {:?}; resetting to auto (None)",
+                        raw,
+                        path
+                    );
+                    None
+                }
+            }
+            _ => None,
+        };
         state.current_room_id = state.current_room_id.filter(|&id| id > 0);
 
         let mut seen = HashSet::new();
@@ -176,11 +173,11 @@ impl StateStore {
             .current_room_id
     }
 
-    pub fn theme(&self) -> String {
+    pub fn locale(&self) -> Option<String> {
         self.inner
             .read()
             .expect("StateStore RwLock poisoned")
-            .theme
+            .locale
             .clone()
     }
 
@@ -281,14 +278,18 @@ impl StateStore {
         Ok(next.room_history)
     }
 
-    /// Validate and atomically persist the active OBS overlay theme.
-    pub fn set_theme(&self, theme: &str) -> Result<AppPersistedState> {
-        let clean = theme.trim();
-        if !is_valid_theme_name(clean) {
-            return Err(anyhow!("Invalid OBS theme name: '{}'", theme));
-        }
+    /// Validate and atomically persist the active host UI locale (`None` resets to system auto).
+    pub fn set_locale(&self, locale: Option<String>) -> Result<AppPersistedState> {
+        let normalized = match locale {
+            Some(ref raw) if !raw.trim().is_empty() => {
+                let norm = normalize_locale(raw)
+                    .ok_or_else(|| anyhow!("Unsupported UI locale: '{}'", raw))?;
+                Some(norm.to_string())
+            }
+            _ => None,
+        };
         self.update_and_persist(|state| {
-            state.theme = clean.to_string();
+            state.locale = normalized;
         })
     }
 
@@ -427,7 +428,7 @@ mod tests {
             id
         ));
         let _ = fs::remove_dir_all(&dir);
-        dir.join("etc").join("state.json")
+        dir.join("var").join("state.json")
     }
 
     #[test]
@@ -439,7 +440,7 @@ mod tests {
         assert!(!state_path.exists());
         let snap = store.snapshot();
         assert_eq!(snap.current_room_id, None);
-        assert_eq!(snap.theme, DEFAULT_THEME);
+        assert_eq!(snap.locale, None);
         assert!(snap.room_history.is_empty());
         assert_eq!(snap.record_raw, None);
 
@@ -449,12 +450,13 @@ mod tests {
         let corrupt_store = StateStore::load_or_default(&state_path);
         assert_eq!(corrupt_store.snapshot(), AppPersistedState::default());
 
-        // 3. Invalid theme or duplicate/zero room entries get sanitized on load
+        // 3. Unknown/invalid locale, legacy extra fields (e.g. "theme"), and duplicate/zero room entries get sanitized
         fs::write(
             &state_path,
             r#"{
                 "current_room_id": 0,
-                "theme": "../evil",
+                "theme": "default",
+                "locale": "fr-FR",
                 "room_history": [
                     {"room_id": 0, "uname": "invalid"},
                     {"room_id": 101, "uname": "主播A", "title": "第一"},
@@ -466,7 +468,7 @@ mod tests {
         let sanitized = StateStore::load_or_default(&state_path);
         let s = sanitized.snapshot();
         assert_eq!(s.current_room_id, None);
-        assert_eq!(s.theme, "default");
+        assert_eq!(s.locale, None);
         assert_eq!(s.room_history.len(), 1);
         assert_eq!(s.room_history[0].room_id, 101);
         assert_eq!(s.room_history[0].uname, "主播A");
@@ -475,23 +477,32 @@ mod tests {
     }
 
     #[test]
-    fn test_state_store_theme_and_record_raw_persistence() {
-        let state_path = temp_state_path("theme_persist");
+    fn test_normalize_locale_and_set_locale_persistence() {
+        assert_eq!(normalize_locale("zh-CN"), Some("zh-CN"));
+        assert_eq!(normalize_locale("zh_TW.UTF-8"), Some("zh-CN"));
+        assert_eq!(normalize_locale("ja"), Some("ja"));
+        assert_eq!(normalize_locale("ja_JP"), Some("ja"));
+        assert_eq!(normalize_locale("en-US"), Some("en"));
+        assert_eq!(normalize_locale("fr-FR"), None);
+        assert_eq!(normalize_locale("   "), None);
+
+        let state_path = temp_state_path("locale_persist");
         let store = StateStore::load_or_default(&state_path);
 
-        assert!(store.set_theme("../escape").is_err());
-        assert!(store.set_theme("list").is_err());
-        assert!(store.set_theme("   ").is_err());
+        assert!(store.set_locale(Some("fr-FR".to_string())).is_err());
 
-        let updated = store.set_theme("sc-ticker").unwrap();
-        assert_eq!(updated.theme, "sc-ticker");
+        let updated = store.set_locale(Some("ja_JP".to_string())).unwrap();
+        assert_eq!(updated.locale.as_deref(), Some("ja"));
         assert!(state_path.exists());
 
         store.set_record_raw(Some(true)).unwrap();
 
         let reloaded = StateStore::load_or_default(&state_path);
-        assert_eq!(reloaded.theme(), "sc-ticker");
+        assert_eq!(reloaded.locale().as_deref(), Some("ja"));
         assert_eq!(reloaded.record_raw(), Some(true));
+
+        let cleared = store.set_locale(None).unwrap();
+        assert_eq!(cleared.locale, None);
 
         let _ = fs::remove_dir_all(state_path.parent().unwrap().parent().unwrap());
     }

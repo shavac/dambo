@@ -1,8 +1,11 @@
+mod i18n;
+
 use dambo_core::DamboRuntime;
 use dambo_core::auth::QrPollStatus;
 use dambo_core::config::parse_log_level;
 use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
-use dambo_core::state::{AppPersistedState, RoomHistoryEntry};
+use dambo_core::plugin::PluginInfo;
+use dambo_core::state::{AppPersistedState, RoomHistoryEntry, normalize_locale};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,9 +21,80 @@ use tauri::{
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 use tokio_util::sync::CancellationToken;
 
+const PANEL_DEFAULT_WIDTH: f64 = 580.0;
+const PANEL_BASE_MIN_WIDTH: f64 = 520.0;
+const PANEL_MAX_WIDTH: f64 = 860.0;
+const PANEL_COLLAPSED_HEIGHT: f64 = 56.0;
+const PANEL_EXPANDED_HEIGHT: f64 = 420.0;
+
 struct AppContext {
     runtime: Arc<DamboRuntime>,
     qr_poll_cancel: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
+    panel_min_width: Arc<std::sync::Mutex<f64>>,
+    panel_expanded: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn compute_panel_width_bounds(requested_min_width: f64) -> (f64, f64) {
+    let min_w = if requested_min_width.is_finite() {
+        requested_min_width.max(PANEL_BASE_MIN_WIDTH).ceil()
+    } else {
+        PANEL_BASE_MIN_WIDTH
+    };
+    let max_w = PANEL_MAX_WIDTH.max(min_w);
+    (min_w, max_w)
+}
+
+fn clamp_panel_width(requested_width: f64, requested_min_width: f64) -> f64 {
+    let (min_w, max_w) = compute_panel_width_bounds(requested_min_width);
+    if requested_width.is_finite() {
+        requested_width.round().clamp(min_w, max_w)
+    } else {
+        min_w
+    }
+}
+
+fn current_logical_width(window: &tauri::WebviewWindow) -> f64 {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    match window.inner_size() {
+        Ok(size) if scale > 0.0 => f64::from(size.width) / scale,
+        _ => PANEL_DEFAULT_WIDTH,
+    }
+}
+
+fn apply_panel_window_bounds(
+    window: &tauri::WebviewWindow,
+    requested_min_width: f64,
+    expanded: bool,
+) -> Result<(), String> {
+    let (min_w, max_w) = compute_panel_width_bounds(requested_min_width);
+    let target_h = if expanded {
+        PANEL_EXPANDED_HEIGHT
+    } else {
+        PANEL_COLLAPSED_HEIGHT
+    };
+    let cur_w = current_logical_width(window);
+    let target_w = cur_w.clamp(min_w, max_w);
+
+    // Temporarily widen constraints so neither macOS nor Windows rejects intermediate bounds.
+    let _ = window.set_min_size(Some(Size::Logical(LogicalSize::new(
+        min_w.min(cur_w),
+        PANEL_COLLAPSED_HEIGHT,
+    ))));
+    let _ = window.set_max_size(Some(Size::Logical(LogicalSize::new(
+        max_w.max(cur_w),
+        PANEL_EXPANDED_HEIGHT,
+    ))));
+
+    window
+        .set_size(Size::Logical(LogicalSize::new(target_w, target_h)))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_min_size(Some(Size::Logical(LogicalSize::new(min_w, target_h))))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_max_size(Some(Size::Logical(LogicalSize::new(max_w, target_h))))
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]
@@ -28,6 +102,521 @@ struct QrCodePayload {
     svg: String,
     message: String,
     show_refresh: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct PluginDto {
+    name: String,
+    route: String,
+    url: String,
+    is_builtin: bool,
+    is_desktop_open: bool,
+    title: Option<String>,
+    description: Option<String>,
+    obs_width: Option<u32>,
+    obs_height: Option<u32>,
+}
+
+const PLUGIN_OVERLAY_PREFIX: &str = "plugin-overlay-";
+
+fn plugin_overlay_label(plugin_name: &str) -> String {
+    format!("{}{}", PLUGIN_OVERLAY_PREFIX, plugin_name)
+}
+
+fn is_plugin_desktop_open(
+    app: &AppHandle,
+    plugin_name: &str,
+    excluding_label: Option<&str>,
+) -> bool {
+    let label = plugin_overlay_label(plugin_name);
+    if excluding_label == Some(label.as_str()) {
+        return false;
+    }
+    app.get_webview_window(&label).is_some()
+}
+
+fn active_locale(runtime: &DamboRuntime) -> &'static str {
+    let stored = runtime.state_store.locale();
+    i18n::resolve_locale(stored.as_deref())
+}
+
+fn connect_host(host: &str) -> &str {
+    let trimmed = host.trim();
+    if trimmed.is_empty()
+        || trimmed == "0.0.0.0"
+        || trimmed == "::"
+        || trimmed == "::1"
+        || trimmed == "[::1]"
+    {
+        "localhost"
+    } else {
+        trimmed
+    }
+}
+
+fn plugin_url(runtime: &DamboRuntime, name: &str) -> String {
+    let host = connect_host(&runtime.config.server.host);
+    let port = runtime.config.server.port;
+    if name == "default" {
+        format!("http://{}:{}/default", host, port)
+    } else {
+        format!("http://{}:{}/{}", host, port, name)
+    }
+}
+
+fn build_plugin_dtos(
+    app: &AppHandle,
+    runtime: &DamboRuntime,
+    list: &[PluginInfo],
+    excluding_label: Option<&str>,
+) -> Vec<PluginDto> {
+    list.iter()
+        .map(|p| PluginDto {
+            name: p.name.clone(),
+            route: p.route.clone(),
+            url: plugin_url(runtime, &p.name),
+            is_builtin: p.is_builtin,
+            is_desktop_open: is_plugin_desktop_open(app, &p.name, excluding_label),
+            title: p.title.clone(),
+            description: p.description.clone(),
+            obs_width: p.obs_width,
+            obs_height: p.obs_height,
+        })
+        .collect()
+}
+
+fn refresh_tray_ui_excluding(
+    app: &AppHandle,
+    runtime: &DamboRuntime,
+    excluding_label: Option<&str>,
+) {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let locale = active_locale(runtime);
+        let room = runtime.hub.room_state();
+        let _ = tray.set_tooltip(Some(&format_tray_tooltip(locale, &room)));
+        if let Ok(next_menu) = build_tray_menu_excluding(app, runtime, excluding_label) {
+            let _ = tray.set_menu(Some(next_menu));
+        }
+    }
+}
+
+fn refresh_tray_ui(app: &AppHandle, runtime: &DamboRuntime) {
+    refresh_tray_ui_excluding(app, runtime, None);
+}
+
+fn sync_plugin_ui_state(app: &AppHandle, runtime: &DamboRuntime, excluding_label: Option<&str>) {
+    let list = runtime.list_plugins();
+    let dtos = build_plugin_dtos(app, runtime, &list, excluding_label);
+    let _ = app.emit_to("main", "plugins-updated", &dtos);
+    refresh_tray_ui_excluding(app, runtime, excluding_label);
+}
+
+/// Build self-contained hover drag/pin/close control capsule script injected into `plugin-overlay-*` windows.
+fn build_overlay_control_script(locale: &str) -> String {
+    let drag_title = serde_json::to_string(&i18n::t(locale, "overlay.drag_title"))
+        .unwrap_or_else(|_| "\"Drag\"".into());
+    let pin_title = serde_json::to_string(&i18n::t(locale, "overlay.pin_title"))
+        .unwrap_or_else(|_| "\"Pin on top\"".into());
+    let unpin_title = serde_json::to_string(&i18n::t(locale, "overlay.unpin_title"))
+        .unwrap_or_else(|_| "\"Unpin from top\"".into());
+    let close_title = serde_json::to_string(&i18n::t(locale, "overlay.close_title"))
+        .unwrap_or_else(|_| "\"Close (Esc)\"".into());
+
+    format!(
+        r#"(() => {{
+  if (window.__DAMBO_OVERLAY_CTRL__) return;
+  window.__DAMBO_OVERLAY_CTRL__ = true;
+
+  const DRAG_TITLE = {drag_title};
+  const PIN_TITLE = {pin_title};
+  const UNPIN_TITLE = {unpin_title};
+  const CLOSE_TITLE = {close_title};
+
+  function invokeWindowCmd(cmd, arg) {{
+    const api = window.__TAURI__?.window?.getCurrentWindow?.();
+    if (cmd === 'start_dragging') {{
+      if (api && typeof api.startDragging === 'function') {{
+        return api.startDragging().catch(() => window.__TAURI_INTERNALS__?.invoke?.('plugin:window|start_dragging'));
+      }}
+      return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|start_dragging');
+    }}
+    if (cmd === 'is_always_on_top') {{
+      if (api && typeof api.isAlwaysOnTop === 'function') {{
+        return api.isAlwaysOnTop().catch(() => window.__TAURI_INTERNALS__?.invoke?.('plugin:window|is_always_on_top'));
+      }}
+      return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|is_always_on_top');
+    }}
+    if (cmd === 'set_always_on_top') {{
+      const value = Boolean(arg);
+      if (api && typeof api.setAlwaysOnTop === 'function') {{
+        return api.setAlwaysOnTop(value).catch(() => window.__TAURI_INTERNALS__?.invoke?.('plugin:window|set_always_on_top', {{ value }}));
+      }}
+      return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|set_always_on_top', {{ value }});
+    }}
+    if (cmd === 'close') {{
+      if (api && typeof api.close === 'function') {{
+        return api.close().catch(() => {{
+          if (typeof api.destroy === 'function') return api.destroy();
+          return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|close');
+        }});
+      }}
+      const p = window.__TAURI_INTERNALS__?.invoke?.('plugin:window|close');
+      if (p && typeof p.catch === 'function') {{
+        return p.catch(() => window.__TAURI_INTERNALS__?.invoke?.('plugin:window|destroy'));
+      }}
+      return p;
+    }}
+  }}
+
+  function triggerDrag() {{
+    Promise.resolve(invokeWindowCmd('start_dragging')).catch((err) => {{
+      console.error('[dambo overlay] drag failed:', err);
+    }});
+  }}
+
+  function triggerClose() {{
+    Promise.resolve(invokeWindowCmd('close')).catch((err) => {{
+      console.error('[dambo overlay] close failed:', err);
+    }});
+  }}
+
+  function mount() {{
+    if (document.getElementById('dambo-overlay-host')) return;
+    const host = document.createElement('div');
+    host.id = 'dambo-overlay-host';
+    host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;background:transparent;';
+
+    const shadow = host.attachShadow({{ mode: 'open' }});
+    shadow.innerHTML = `
+      <style>
+        .dambo-root {{
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          user-select: none;
+          -webkit-user-select: none;
+        }}
+        .dambo-frame {{
+          position: fixed;
+          inset: 0;
+          border: 1.5px dashed rgba(255, 255, 255, 0.36);
+          border-radius: 10px;
+          box-sizing: border-box;
+          pointer-events: none;
+          opacity: 0;
+          transition: opacity 0.16s ease;
+        }}
+        .dambo-bar {{
+          position: fixed;
+          top: 8px;
+          right: 8px;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 4px;
+          border-radius: 9999px;
+          background: rgba(18, 20, 26, 0.84);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+          pointer-events: none;
+          opacity: 0;
+          transition: opacity 0.16s ease;
+        }}
+        .dambo-root.visible .dambo-frame {{
+          opacity: 1;
+        }}
+        .dambo-root.visible .dambo-bar {{
+          opacity: 1;
+          pointer-events: auto;
+        }}
+        .dambo-btn {{
+          width: 24px;
+          height: 24px;
+          padding: 0;
+          margin: 0;
+          border: none;
+          border-radius: 9999px;
+          background: rgba(255, 255, 255, 0.08);
+          color: rgba(245, 247, 250, 0.92);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          transition: background 0.15s ease, color 0.15s ease;
+        }}
+        .dambo-btn:hover {{
+          background: rgba(255, 255, 255, 0.2);
+          color: #ffffff;
+        }}
+        .dambo-drag {{
+          cursor: grab;
+          touch-action: none;
+        }}
+        .dambo-drag:active {{
+          cursor: grabbing;
+        }}
+        .dambo-pin {{
+          cursor: pointer;
+        }}
+        .dambo-pin .dambo-pin-icon {{
+          transition: transform 0.16s ease, opacity 0.16s ease;
+        }}
+        .dambo-pin:not(.pinned) {{
+          color: rgba(245, 247, 250, 0.52);
+          background: rgba(255, 255, 255, 0.06);
+        }}
+        .dambo-pin:not(.pinned) .dambo-pin-icon {{
+          transform: rotate(45deg);
+        }}
+        .dambo-pin.pinned {{
+          color: #38bdf8;
+          background: rgba(56, 189, 248, 0.24);
+        }}
+        .dambo-pin.pinned:hover {{
+          background: rgba(56, 189, 248, 0.34);
+          color: #7dd3fc;
+        }}
+        .dambo-pin.pinned .dambo-pin-icon {{
+          transform: rotate(0deg);
+        }}
+        .dambo-close {{
+          cursor: pointer;
+        }}
+        .dambo-close:hover {{
+          background: rgba(239, 68, 68, 0.85);
+          color: #ffffff;
+        }}
+      </style>
+      <div id="dambo-root" class="dambo-root">
+        <div class="dambo-frame"></div>
+        <div id="dambo-bar" class="dambo-bar">
+          <button type="button" id="dambo-drag-btn" class="dambo-btn dambo-drag">
+            <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden="true">
+              <circle cx="3" cy="2.5" r="1.15" />
+              <circle cx="7" cy="2.5" r="1.15" />
+              <circle cx="3" cy="7" r="1.15" />
+              <circle cx="7" cy="7" r="1.15" />
+              <circle cx="3" cy="11.5" r="1.15" />
+              <circle cx="7" cy="11.5" r="1.15" />
+            </svg>
+          </button>
+          <button type="button" id="dambo-pin-btn" class="dambo-btn dambo-pin pinned" aria-pressed="true">
+            <svg class="dambo-pin-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M16 4V5L14 7V12L17 15V17H13V22H11V17H7V15L10 12V7L8 5V4H16Z" />
+            </svg>
+          </button>
+          <button type="button" id="dambo-close-btn" class="dambo-btn dambo-close">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+              <line x1="6" y1="6" x2="18" y2="18" />
+              <line x1="18" y1="6" x2="6" y2="18" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    `;
+
+    const rootEl = shadow.getElementById('dambo-root');
+    const barEl = shadow.getElementById('dambo-bar');
+    const dragBtn = shadow.getElementById('dambo-drag-btn');
+    const pinBtn = shadow.getElementById('dambo-pin-btn');
+    const closeBtn = shadow.getElementById('dambo-close-btn');
+    dragBtn.title = DRAG_TITLE;
+    dragBtn.setAttribute('aria-label', DRAG_TITLE);
+    closeBtn.title = CLOSE_TITLE;
+    closeBtn.setAttribute('aria-label', CLOSE_TITLE);
+
+    let isPinned = true;
+    const renderPinState = (pinned) => {{
+      isPinned = Boolean(pinned);
+      pinBtn.classList.toggle('pinned', isPinned);
+      const title = isPinned ? UNPIN_TITLE : PIN_TITLE;
+      pinBtn.title = title;
+      pinBtn.setAttribute('aria-label', title);
+      pinBtn.setAttribute('aria-pressed', String(isPinned));
+    }};
+    renderPinState(true);
+    Promise.resolve(invokeWindowCmd('is_always_on_top'))
+      .then((val) => {{
+        if (typeof val === 'boolean') renderPinState(val);
+      }})
+      .catch(() => {{}});
+
+    let touchHideTimer = null;
+    const clearHideTimer = () => {{
+      if (touchHideTimer !== null) {{
+        clearTimeout(touchHideTimer);
+        touchHideTimer = null;
+      }}
+    }};
+    const showControls = (autoHideMs) => {{
+      rootEl.classList.add('visible');
+      clearHideTimer();
+      if (autoHideMs && autoHideMs > 0) {{
+        touchHideTimer = setTimeout(() => {{
+          rootEl.classList.remove('visible');
+          touchHideTimer = null;
+        }}, autoHideMs);
+      }}
+    }};
+    const hideControls = () => {{
+      clearHideTimer();
+      rootEl.classList.remove('visible');
+    }};
+
+    const onPointerEnter = (e) => {{
+      if (e.pointerType === 'mouse' || !e.pointerType) {{
+        showControls(0);
+      }}
+    }};
+    const onPointerDownWindow = (e) => {{
+      if (e.pointerType && e.pointerType !== 'mouse') {{
+        showControls(4000);
+      }}
+    }};
+
+    document.addEventListener('pointerenter', onPointerEnter, true);
+    document.addEventListener('pointermove', onPointerEnter, true);
+    document.addEventListener('pointerdown', onPointerDownWindow, true);
+    document.documentElement.addEventListener('pointerleave', (e) => {{
+      if (e.pointerType === 'mouse' || !e.pointerType) hideControls();
+    }});
+    document.documentElement.addEventListener('mouseleave', hideControls);
+    window.addEventListener('blur', hideControls);
+
+    barEl.addEventListener('pointerenter', () => showControls(0));
+    dragBtn.addEventListener('pointerdown', (e) => {{
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      if (e.pointerType && e.pointerType !== 'mouse') showControls(4000);
+      triggerDrag();
+    }});
+    const stopBubble = (e) => {{
+      e.stopPropagation();
+    }};
+    pinBtn.addEventListener('pointerdown', stopBubble);
+    pinBtn.addEventListener('mousedown', stopBubble);
+    pinBtn.addEventListener('click', (e) => {{
+      e.stopPropagation();
+      e.preventDefault();
+      if (e.pointerType && e.pointerType !== 'mouse') showControls(4000);
+      const next = !isPinned;
+      Promise.resolve(invokeWindowCmd('set_always_on_top', next))
+        .then(() => {{
+          renderPinState(next);
+        }})
+        .catch((err) => {{
+          console.error('[dambo overlay] set_always_on_top failed:', err);
+        }});
+    }});
+    closeBtn.addEventListener('pointerdown', stopBubble);
+    closeBtn.addEventListener('mousedown', stopBubble);
+    closeBtn.addEventListener('click', (e) => {{
+      e.stopPropagation();
+      e.preventDefault();
+      triggerClose();
+    }});
+    window.addEventListener('keydown', (e) => {{
+      if (e.key === 'Escape') triggerClose();
+    }}, true);
+
+    (document.documentElement || document.body).appendChild(host);
+  }}
+
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', mount, {{ once: true }});
+  }} else {{
+    mount();
+  }}
+}})();"#,
+        drag_title = drag_title,
+        pin_title = pin_title,
+        unpin_title = unpin_title,
+        close_title = close_title
+    )
+}
+
+fn open_plugin_desktop_window(
+    app: &AppHandle,
+    runtime: &DamboRuntime,
+    plugin_name: &str,
+) -> Result<(), String> {
+    let plugin = runtime
+        .plugins
+        .get(plugin_name)
+        .ok_or_else(|| format!("Plugin '{}' not found", plugin_name))?;
+
+    let label = plugin_overlay_label(&plugin.name);
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.show();
+        let _ = win.set_focus();
+        sync_plugin_ui_state(app, runtime, None);
+        return Ok(());
+    }
+
+    let raw_url = plugin_url(runtime, &plugin.name);
+    let parsed_url: tauri::Url = raw_url
+        .parse()
+        .map_err(|e| format!("Invalid plugin URL '{}': {}", raw_url, e))?;
+
+    let width = f64::from(plugin.obs_width.unwrap_or(420));
+    let height = f64::from(plugin.obs_height.unwrap_or(720));
+    let locale = active_locale(runtime);
+
+    WebviewWindowBuilder::new(app, &label, WebviewUrl::External(parsed_url))
+        .title(plugin.display_title())
+        .inner_size(width, height)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .shadow(false)
+        .initialization_script(build_overlay_control_script(locale))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    sync_plugin_ui_state(app, runtime, None);
+    Ok(())
+}
+
+fn close_plugin_desktop_window(
+    app: &AppHandle,
+    runtime: &DamboRuntime,
+    plugin_name: &str,
+) -> Result<(), String> {
+    let label = plugin_overlay_label(plugin_name);
+    if let Some(win) = app.get_webview_window(&label)
+        && win.close().is_err()
+    {
+        win.destroy().map_err(|e| e.to_string())?;
+    }
+    sync_plugin_ui_state(app, runtime, Some(&label));
+    Ok(())
+}
+
+fn open_plugins_directory(runtime: &DamboRuntime) {
+    open_dir_in_os(&runtime.html_dir);
+}
+
+fn apply_locale_change(
+    app: &AppHandle,
+    runtime: &DamboRuntime,
+    locale_raw: &str,
+) -> Result<i18n::I18nPayload, String> {
+    let norm = normalize_locale(locale_raw)
+        .ok_or_else(|| format!("Unsupported locale: '{}'", locale_raw))?;
+    runtime
+        .set_locale(Some(norm.to_string()))
+        .map_err(|e| e.to_string())?;
+    refresh_tray_ui(app, runtime);
+
+    if let Some(qr_win) = app.get_webview_window("bili-qr-login") {
+        let _ = qr_win.set_title(&i18n::t(norm, "qr.window_title"));
+    }
+
+    let payload = i18n::build_payload(norm);
+    let _ = app.emit("i18n-updated", &payload);
+    Ok(payload)
 }
 
 fn format_room_identity(state: &RoomStateSnapshot) -> String {
@@ -43,17 +632,17 @@ fn format_room_identity(state: &RoomStateSnapshot) -> String {
     }
 }
 
-fn format_tray_tooltip(state: &RoomStateSnapshot) -> String {
+fn format_tray_tooltip(locale: &str, state: &RoomStateSnapshot) -> String {
     if state.room_id == 0 {
-        return "Dambo · Disconnected".to_string();
+        return i18n::t(locale, "tray.tooltip_disconnected");
     }
     let identity = format_room_identity(state);
     if !state.connected {
-        format!("Dambo · {} · Disconnected", identity)
+        i18n::t_fmt(locale, "tray.tooltip_offline_room", &[("room", &identity)])
     } else if state.is_live {
-        format!("Dambo · {} · Live", identity)
+        i18n::t_fmt(locale, "tray.tooltip_live", &[("room", &identity)])
     } else {
-        format!("Dambo · {} · Offline", identity)
+        i18n::t_fmt(locale, "tray.tooltip_standby", &[("room", &identity)])
     }
 }
 
@@ -174,15 +763,16 @@ fn open_config_file_in_os(runtime: &DamboRuntime) {
     }
 }
 
-fn ensure_qr_window(app: &AppHandle) -> Result<bool, String> {
+fn ensure_qr_window(app: &AppHandle, locale: &str) -> Result<bool, String> {
     if let Some(win) = app.get_webview_window("bili-qr-login") {
+        let _ = win.set_title(&i18n::t(locale, "qr.window_title"));
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(false);
     }
 
     WebviewWindowBuilder::new(app, "bili-qr-login", WebviewUrl::App("login.html".into()))
-        .title("Bilibili QR Sign In")
+        .title(i18n::t(locale, "qr.window_title"))
         .inner_size(320.0, 380.0)
         .resizable(false)
         .always_on_top(true)
@@ -207,19 +797,21 @@ async fn start_qr_poll_flow(
         next
     };
 
+    let locale = active_locale(&runtime);
     let mut qr = match runtime.auth.generate_qr().await {
         Ok(q) => q,
         Err(e) => {
+            let err_str = e.to_string();
             let _ = app.emit_to(
                 "bili-qr-login",
                 "qr_code_updated",
                 QrCodePayload {
                     svg: String::new(),
-                    message: format!("Failed to load QR code: {}", e),
+                    message: i18n::t_fmt(locale, "qr.load_failed", &[("error", &err_str)]),
                     show_refresh: true,
                 },
             );
-            return Err(e.to_string());
+            return Err(err_str);
         }
     };
 
@@ -228,7 +820,7 @@ async fn start_qr_poll_flow(
         "qr_code_updated",
         QrCodePayload {
             svg: qr.svg.clone(),
-            message: "Scan with the Bilibili mobile app".to_string(),
+            message: i18n::t(locale, "qr.scan_prompt"),
             show_refresh: false,
         },
     );
@@ -244,6 +836,7 @@ async fn start_qr_poll_flow(
                 break;
             }
 
+            let cur_locale = active_locale(&runtime);
             match runtime.auth.poll_qr(&qr.qrcode_key).await {
                 Ok(QrPollStatus::Waiting) => {}
                 Ok(QrPollStatus::Scanned) => {
@@ -252,7 +845,7 @@ async fn start_qr_poll_flow(
                         "qr_code_updated",
                         QrCodePayload {
                             svg: String::new(),
-                            message: "Scanned — please confirm on your phone".to_string(),
+                            message: i18n::t(cur_locale, "qr.scanned_confirm"),
                             show_refresh: false,
                         },
                     );
@@ -265,18 +858,23 @@ async fn start_qr_poll_flow(
                             "qr_code_updated",
                             QrCodePayload {
                                 svg: qr.svg.clone(),
-                                message: "QR code expired — refreshed automatically".to_string(),
+                                message: i18n::t(cur_locale, "qr.expired_refreshed"),
                                 show_refresh: false,
                             },
                         );
                     }
                     Err(e) => {
+                        let err_str = e.to_string();
                         let _ = app.emit_to(
                             "bili-qr-login",
                             "qr_code_updated",
                             QrCodePayload {
                                 svg: String::new(),
-                                message: format!("Failed to refresh QR code: {}", e),
+                                message: i18n::t_fmt(
+                                    cur_locale,
+                                    "qr.refresh_failed",
+                                    &[("error", &err_str)],
+                                ),
                                 show_refresh: true,
                             },
                         );
@@ -304,12 +902,17 @@ async fn start_qr_poll_flow(
                     break;
                 }
                 Err(e) => {
+                    let err_str = e.to_string();
                     let _ = app.emit_to(
                         "bili-qr-login",
                         "qr_code_updated",
                         QrCodePayload {
                             svg: String::new(),
-                            message: format!("Failed to check login status: {}", e),
+                            message: i18n::t_fmt(
+                                cur_locale,
+                                "qr.poll_failed",
+                                &[("error", &err_str)],
+                            ),
                             show_refresh: true,
                         },
                     );
@@ -328,6 +931,51 @@ async fn get_initial_state(ctx: State<'_, AppContext>) -> Result<InitialUiState,
 }
 
 #[tauri::command]
+async fn get_plugins(app: AppHandle, ctx: State<'_, AppContext>) -> Result<Vec<PluginDto>, String> {
+    let list = ctx.runtime.list_plugins();
+    Ok(build_plugin_dtos(&app, &ctx.runtime, &list, None))
+}
+
+#[tauri::command]
+async fn open_plugin_desktop(
+    app: AppHandle,
+    plugin_name: String,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    open_plugin_desktop_window(&app, &ctx.runtime, &plugin_name)
+}
+
+#[tauri::command]
+async fn close_plugin_desktop(
+    app: AppHandle,
+    plugin_name: String,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    close_plugin_desktop_window(&app, &ctx.runtime, &plugin_name)
+}
+
+#[tauri::command]
+async fn open_plugins_dir(ctx: State<'_, AppContext>) -> Result<(), String> {
+    open_plugins_directory(&ctx.runtime);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_i18n(ctx: State<'_, AppContext>) -> Result<i18n::I18nPayload, String> {
+    let locale = active_locale(&ctx.runtime);
+    Ok(i18n::build_payload(locale))
+}
+
+#[tauri::command]
+async fn set_locale(
+    app: AppHandle,
+    locale: String,
+    ctx: State<'_, AppContext>,
+) -> Result<i18n::I18nPayload, String> {
+    apply_locale_change(&app, &ctx.runtime, &locale)
+}
+
+#[tauri::command]
 async fn switch_room(target: String, ctx: State<'_, AppContext>) -> Result<u64, String> {
     ctx.runtime
         .switch_room(&target)
@@ -341,11 +989,6 @@ async fn disconnect_room(ctx: State<'_, AppContext>) -> Result<(), String> {
         .disconnect_room()
         .await
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn change_theme(theme: String, ctx: State<'_, AppContext>) -> Result<(), String> {
-    ctx.runtime.change_theme(&theme).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -372,27 +1015,59 @@ async fn set_record_raw(enabled: bool, ctx: State<'_, AppContext>) -> Result<boo
 }
 
 #[tauri::command]
-async fn set_dropdown_expanded(window: tauri::WebviewWindow, expanded: bool) -> Result<(), String> {
-    let height = if expanded { 380.0 } else { 56.0 };
+async fn set_dropdown_expanded(
+    window: tauri::WebviewWindow,
+    expanded: bool,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    ctx.panel_expanded
+        .store(expanded, std::sync::atomic::Ordering::Relaxed);
+    let min_w = ctx
+        .panel_min_width
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(PANEL_BASE_MIN_WIDTH);
+    apply_panel_window_bounds(&window, min_w, expanded)
+}
+
+#[tauri::command]
+async fn sync_panel_min_width(
+    window: tauri::WebviewWindow,
+    min_width: f64,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    if let Ok(mut guard) = ctx.panel_min_width.lock() {
+        *guard = min_width;
+    }
+    let expanded = ctx
+        .panel_expanded
+        .load(std::sync::atomic::Ordering::Relaxed);
+    apply_panel_window_bounds(&window, min_width, expanded)
+}
+
+#[tauri::command]
+async fn set_panel_width(
+    window: tauri::WebviewWindow,
+    width: f64,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    let min_w = ctx
+        .panel_min_width
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(PANEL_BASE_MIN_WIDTH);
+    let expanded = ctx
+        .panel_expanded
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let target_w = clamp_panel_width(width, min_w);
+    let target_h = if expanded {
+        PANEL_EXPANDED_HEIGHT
+    } else {
+        PANEL_COLLAPSED_HEIGHT
+    };
     window
-        .set_size(Size::Logical(LogicalSize::new(740.0, height)))
+        .set_size(Size::Logical(LogicalSize::new(target_w, target_h)))
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn open_obs_overlay(ctx: State<'_, AppContext>) -> Result<(), String> {
-    let cfg = ctx.runtime.config_snapshot();
-    let url = format!("http://{}:{}/", cfg.server.host, cfg.server.port);
-    open_in_os(&url);
-    Ok(())
-}
-
-#[tauri::command]
-async fn open_web_list(ctx: State<'_, AppContext>) -> Result<(), String> {
-    let cfg = ctx.runtime.config_snapshot();
-    let url = format!("http://{}:{}/list", cfg.server.host, cfg.server.port);
-    open_in_os(&url);
-    Ok(())
 }
 
 #[tauri::command]
@@ -428,7 +1103,8 @@ async fn open_qr_login(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(),
     if ctx.runtime.auth.current_state().is_login {
         let _ = ctx.runtime.auth.logout();
     }
-    let created_new = ensure_qr_window(&app)?;
+    let locale = active_locale(&ctx.runtime);
+    let created_new = ensure_qr_window(&app, locale)?;
     if !created_new {
         start_qr_poll_flow(app, ctx.runtime.clone(), ctx.qr_poll_cancel.clone()).await?;
     }
@@ -515,14 +1191,54 @@ fn format_history_menu_label(entry: &RoomHistoryEntry) -> String {
     }
 }
 
-fn build_tray_menu(app: &AppHandle, runtime: &DamboRuntime) -> tauri::Result<Menu<tauri::Wry>> {
-    let persisted = runtime.state_store.snapshot();
-    let themes = runtime.list_themes();
-    let server_port = runtime.config.server.port;
+fn append_plugin_submenus<'a>(
+    app: &'a AppHandle,
+    mut plugin_sub: SubmenuBuilder<'a, tauri::Wry, AppHandle>,
+    plugins: &[&PluginInfo],
+    locale: &str,
+    excluding_label: Option<&str>,
+) -> tauri::Result<SubmenuBuilder<'a, tauri::Wry, AppHandle>> {
+    for p in plugins {
+        let is_open = is_plugin_desktop_open(app, &p.name, excluding_label);
+        let sub_label = if is_open {
+            format!("● {} ({})", p.display_title(), p.route)
+        } else {
+            format!("{} ({})", p.display_title(), p.route)
+        };
+        let (toggle_id, toggle_label) = if is_open {
+            (
+                format!("plugin:close_desktop:{}", p.name),
+                i18n::t(locale, "tray.plugin_close_desktop"),
+            )
+        } else {
+            (
+                format!("plugin:open_desktop:{}", p.name),
+                i18n::t(locale, "tray.plugin_open_desktop"),
+            )
+        };
+        let item_sub = SubmenuBuilder::new(app, sub_label)
+            .text(toggle_id, toggle_label)
+            .text(
+                format!("plugin:copy_url:{}", p.name),
+                i18n::t(locale, "tray.plugin_copy_url"),
+            );
+        plugin_sub = plugin_sub.item(&item_sub.build()?);
+    }
+    Ok(plugin_sub)
+}
 
-    let mut recent_sub = SubmenuBuilder::new(app, "Recent Rooms");
+fn build_tray_menu_excluding(
+    app: &AppHandle,
+    runtime: &DamboRuntime,
+    excluding_label: Option<&str>,
+) -> tauri::Result<Menu<tauri::Wry>> {
+    let persisted = runtime.state_store.snapshot();
+    let locale = i18n::resolve_locale(persisted.locale.as_deref());
+    let plugins = runtime.list_plugins();
+
+    let mut recent_sub = SubmenuBuilder::new(app, i18n::t(locale, "tray.recent_rooms"));
     if persisted.room_history.is_empty() {
-        let empty = MenuItemBuilder::with_id("recent_empty", "No Recent Rooms")
+        let empty = MenuItemBuilder::with_id("recent_empty", i18n::t(locale, "tray.recent_empty"))
             .enabled(false)
             .build(app)?;
         recent_sub = recent_sub.item(&empty);
@@ -539,50 +1255,57 @@ fn build_tray_menu(app: &AppHandle, runtime: &DamboRuntime) -> tauri::Result<Men
     }
     let recent_menu = recent_sub.build()?;
 
-    let mut theme_sub = SubmenuBuilder::new(app, "OBS Theme");
-    for theme_name in themes {
-        let item = CheckMenuItemBuilder::with_id(format!("theme:{}", theme_name), &theme_name)
-            .checked(persisted.theme == theme_name)
+    let mut plugin_sub = SubmenuBuilder::new(app, i18n::t(locale, "tray.plugin_menu"));
+    let builtin_plugins: Vec<&PluginInfo> = plugins.iter().filter(|p| p.is_builtin).collect();
+    let custom_plugins: Vec<&PluginInfo> = plugins.iter().filter(|p| !p.is_builtin).collect();
+
+    if plugins.is_empty() {
+        let empty = MenuItemBuilder::with_id("plugin_empty", i18n::t(locale, "tray.plugin_empty"))
+            .enabled(false)
             .build(app)?;
-        theme_sub = theme_sub.item(&item);
+        plugin_sub = plugin_sub.item(&empty);
+    } else {
+        plugin_sub =
+            append_plugin_submenus(app, plugin_sub, &builtin_plugins, locale, excluding_label)?;
+        if !builtin_plugins.is_empty() && !custom_plugins.is_empty() {
+            plugin_sub = plugin_sub.item(&PredefinedMenuItem::separator(app)?);
+        }
+        plugin_sub =
+            append_plugin_submenus(app, plugin_sub, &custom_plugins, locale, excluding_label)?;
     }
-    let theme_menu = theme_sub.build()?;
+    plugin_sub = plugin_sub
+        .item(&PredefinedMenuItem::separator(app)?)
+        .text("plugin:open_dir", i18n::t(locale, "tray.plugin_open_dir"));
+    let plugin_menu = plugin_sub.build()?;
+
+    let mut lang_sub = SubmenuBuilder::new(app, i18n::t(locale, "tray.language_menu"));
+    for &(code, native_label) in i18n::SUPPORTED_LOCALES {
+        let item = CheckMenuItemBuilder::with_id(format!("i18n:set_locale:{}", code), native_label)
+            .checked(locale == code)
+            .build(app)?;
+        lang_sub = lang_sub.item(&item);
+    }
+    let lang_menu = lang_sub.build()?;
 
     let record_raw_item =
-        CheckMenuItemBuilder::with_id("toggle_record_raw", "Record Raw Packets (*_raw.jsonl)")
+        CheckMenuItemBuilder::with_id("toggle_record_raw", i18n::t(locale, "tray.record_raw"))
             .checked(runtime.is_record_raw_enabled())
             .build(app)?;
 
     MenuBuilder::new(app)
-        .text("toggle_panel", "Show / Hide Panel")
+        .text("toggle_panel", i18n::t(locale, "tray.toggle_panel"))
         .item(&PredefinedMenuItem::separator(app)?)
         .item(&recent_menu)
-        .item(&theme_menu)
+        .item(&plugin_menu)
+        .item(&lang_menu)
         .item(&record_raw_item)
         .item(&PredefinedMenuItem::separator(app)?)
-        .text(
-            "open_obs_overlay",
-            format!("Open OBS Overlay (:{})", server_port),
-        )
-        .text(
-            "copy_obs_url",
-            format!("Copy OBS Overlay URL (:{})", server_port),
-        )
-        .text(
-            "open_web_list",
-            format!("Open Danmaku Monitor (:{}/list)", server_port),
-        )
-        .text(
-            "copy_list_url",
-            format!("Copy Danmaku Monitor URL (:{}/list)", server_port),
-        )
+        .text("relogin", i18n::t(locale, "tray.relogin"))
+        .text("open_config_file", i18n::t(locale, "tray.open_config"))
+        .text("open_rec_dir", i18n::t(locale, "tray.open_records"))
+        .text("open_log_dir", i18n::t(locale, "tray.open_logs"))
         .item(&PredefinedMenuItem::separator(app)?)
-        .text("relogin", "Re-login")
-        .text("open_config_file", "Open Config File")
-        .text("open_rec_dir", "Open Recordings Folder")
-        .text("open_log_dir", "Open Logs Folder")
-        .item(&PredefinedMenuItem::separator(app)?)
-        .text("quit", "Quit Dambo")
+        .text("quit", i18n::t(locale, "tray.quit"))
         .build()
 }
 
@@ -594,23 +1317,44 @@ pub fn run(config_path: &str) {
     let log_level = runtime.config_snapshot().log.level_filter();
     let qr_poll_cancel = Arc::new(tokio::sync::Mutex::new(None::<CancellationToken>));
 
+    let rt_win_event = runtime.clone();
+
     tauri::Builder::default()
         .plugin(build_log_plugin(log_level, &runtime.log_dir))
         .manage(AppContext {
             runtime: runtime.clone(),
             qr_poll_cancel: qr_poll_cancel.clone(),
+            panel_min_width: Arc::new(std::sync::Mutex::new(PANEL_BASE_MIN_WIDTH)),
+            panel_expanded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+        .on_window_event(move |window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed)
+                && window.label().starts_with(PLUGIN_OVERLAY_PREFIX)
+            {
+                let destroyed_label = window.label().to_string();
+                let app_c = window.app_handle().clone();
+                let rt_c = rt_win_event.clone();
+                tauri::async_runtime::spawn(async move {
+                    sync_plugin_ui_state(&app_c, &rt_c, Some(&destroyed_label));
+                });
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_initial_state,
+            get_plugins,
+            open_plugin_desktop,
+            close_plugin_desktop,
+            open_plugins_dir,
+            get_i18n,
+            set_locale,
             switch_room,
             disconnect_room,
-            change_theme,
             fetch_room_options,
             remove_history_room,
             set_record_raw,
             set_dropdown_expanded,
-            open_obs_overlay,
-            open_web_list,
+            sync_panel_min_width,
+            set_panel_width,
             open_config_file,
             open_folder,
             set_always_on_top,
@@ -623,7 +1367,7 @@ pub fn run(config_path: &str) {
         .setup(move |app| {
             let app_handle = app.handle().clone();
 
-            // 1. Start dambo-core pipeline & Axum dual-channel server
+            // 1. Start dambo-core pipeline, plugin watcher & Axum dual-channel server
             let rt_start = runtime.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = rt_start.start().await {
@@ -636,7 +1380,7 @@ pub fn run(config_path: &str) {
             let app_auth_init = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 if rt_auth_init.auth.current_session().is_none() {
-                    let _ = ensure_qr_window(&app_auth_init);
+                    let _ = ensure_qr_window(&app_auth_init, active_locale(&rt_auth_init));
                     return;
                 }
                 let retry_delays_secs = [2u64, 5, 10];
@@ -644,7 +1388,7 @@ pub fn run(config_path: &str) {
                     match rt_auth_init.auth.validate_session().await {
                         Ok(state) => {
                             if !state.is_login {
-                                let _ = ensure_qr_window(&app_auth_init);
+                                let _ = ensure_qr_window(&app_auth_init, active_locale(&rt_auth_init));
                             }
                             return;
                         }
@@ -671,12 +1415,16 @@ pub fn run(config_path: &str) {
             // 3. IPC forwarder for room_state_changed (NO /ws subscription in dambo-ui!)
             let mut room_rx = runtime.room_state_rx();
             let app_room = app_handle.clone();
+            let rt_room = runtime.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     let state: RoomStateSnapshot = room_rx.borrow().clone();
                     let _ = app_room.emit_to("main", "room_state_changed", &state);
                     if let Some(tray) = app_room.tray_by_id("main-tray") {
-                        let _ = tray.set_tooltip(Some(&format_tray_tooltip(&state)));
+                        let _ = tray.set_tooltip(Some(&format_tray_tooltip(
+                            active_locale(&rt_room),
+                            &state,
+                        )));
                     }
                     if room_rx.changed().await.is_err() {
                         break;
@@ -697,15 +1445,16 @@ pub fn run(config_path: &str) {
                 }
             });
 
-            // 5. Build system tray icon & dynamic state menu synced with etc/state.json
-            let menu = build_tray_menu(&app_handle, &runtime)?;
+            // 5. Build system tray icon & localized Plugin / Language submenus
+            let init_locale = active_locale(&runtime);
+            let menu = build_tray_menu_excluding(&app_handle, &runtime, None)?;
 
             let rt_menu = runtime.clone();
             let qr_menu = qr_poll_cancel.clone();
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .tooltip("Dambo · Disconnected")
+                .tooltip(i18n::t(init_locale, "tray.tooltip_disconnected"))
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -717,7 +1466,6 @@ pub fn run(config_path: &str) {
                     }
                 })
                 .on_menu_event(move |app, event| {
-                    let cfg = rt_menu.config_snapshot();
                     let menu_id = event.id().as_ref();
                     if let Some(room_str) = menu_id.strip_prefix("room:") {
                         let rt_c = rt_menu.clone();
@@ -729,41 +1477,50 @@ pub fn run(config_path: &str) {
                         });
                         return;
                     }
-                    if let Some(theme_name) = menu_id.strip_prefix("theme:") {
-                        if let Err(e) = rt_menu.change_theme(theme_name) {
-                            log::warn!("Tray change_theme('{}') failed: {}", theme_name, e);
+                    if let Some(plugin_name) = menu_id.strip_prefix("plugin:open_desktop:") {
+                        if let Err(e) = open_plugin_desktop_window(app, &rt_menu, plugin_name) {
+                            log::warn!(
+                                "Tray open_plugin_desktop('{}') failed: {}",
+                                plugin_name,
+                                e
+                            );
+                        }
+                        return;
+                    }
+                    if let Some(plugin_name) = menu_id.strip_prefix("plugin:close_desktop:") {
+                        if let Err(e) = close_plugin_desktop_window(app, &rt_menu, plugin_name) {
+                            log::warn!(
+                                "Tray close_plugin_desktop('{}') failed: {}",
+                                plugin_name,
+                                e
+                            );
+                        }
+                        return;
+                    }
+                    if let Some(plugin_name) = menu_id.strip_prefix("plugin:copy_url:") {
+                        copy_to_clipboard(&plugin_url(&rt_menu, plugin_name));
+                        return;
+                    }
+                    if let Some(locale_code) = menu_id.strip_prefix("i18n:set_locale:") {
+                        if let Err(e) = apply_locale_change(app, &rt_menu, locale_code) {
+                            log::warn!("Tray set_locale('{}') failed: {}", locale_code, e);
                         }
                         return;
                     }
                     match menu_id {
                         "toggle_panel" => toggle_main_window(app),
+                        "plugin:open_dir" => open_plugins_directory(&rt_menu),
                         "toggle_record_raw" => {
                             let next = !rt_menu.is_record_raw_enabled();
                             if let Err(e) = rt_menu.set_record_raw(next) {
                                 log::warn!("Tray set_record_raw({}) failed: {}", next, e);
                             }
                         }
-                        "open_obs_overlay" => {
-                            let url = format!("http://{}:{}/", cfg.server.host, cfg.server.port);
-                            open_in_os(&url);
-                        }
-                        "copy_obs_url" => {
-                            let url = format!("http://{}:{}", cfg.server.host, cfg.server.port);
-                            copy_to_clipboard(&url);
-                        }
-                        "open_web_list" => {
-                            let url = format!("http://{}:{}/list", cfg.server.host, cfg.server.port);
-                            open_in_os(&url);
-                        }
-                        "copy_list_url" => {
-                            let url = format!("http://{}:{}/list", cfg.server.host, cfg.server.port);
-                            copy_to_clipboard(&url);
-                        }
                         "relogin" => {
                             if rt_menu.auth.current_state().is_login {
                                 let _ = rt_menu.auth.logout();
                             }
-                            if let Ok(false) = ensure_qr_window(app) {
+                            if let Ok(false) = ensure_qr_window(app, active_locale(&rt_menu)) {
                                 let app_c = app.clone();
                                 let rt_c = rt_menu.clone();
                                 let qr_c = qr_menu.clone();
@@ -793,7 +1550,7 @@ pub fn run(config_path: &str) {
             }
             tray_builder.build(app)?;
 
-            // 6. Refresh tray menu and notify UI capsule whenever etc/state.json changes
+            // 6. Refresh tray menu and notify UI capsule whenever var/state.json changes
             let mut state_rx = runtime.state_rx();
             let app_state_sync = app_handle.clone();
             let rt_state_sync = runtime.clone();
@@ -801,11 +1558,17 @@ pub fn run(config_path: &str) {
                 while state_rx.changed().await.is_ok() {
                     let persisted: AppPersistedState = state_rx.borrow().clone();
                     let _ = app_state_sync.emit_to("main", "app_state_changed", &persisted);
-                    if let Some(tray) = app_state_sync.tray_by_id("main-tray")
-                        && let Ok(next_menu) = build_tray_menu(&app_state_sync, &rt_state_sync)
-                    {
-                        let _ = tray.set_menu(Some(next_menu));
-                    }
+                    refresh_tray_ui(&app_state_sync, &rt_state_sync);
+                }
+            });
+
+            // 7. Hot-reload tray Plugin submenu and push `plugins-updated` to UI on static/html/ changes
+            let mut plugins_rx = runtime.plugins_rx();
+            let app_plugins_sync = app_handle.clone();
+            let rt_plugins_sync = runtime.clone();
+            tauri::async_runtime::spawn(async move {
+                while plugins_rx.changed().await.is_ok() {
+                    sync_plugin_ui_state(&app_plugins_sync, &rt_plugins_sync, None);
                 }
             });
 
@@ -813,4 +1576,53 @@ pub fn run(config_path: &str) {
         })
         .run(tauri::generate_context!())
         .expect("error while running dambo tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_plugin_overlay_label_and_injected_control_script() {
+        assert_eq!(plugin_overlay_label("default"), "plugin-overlay-default");
+
+        let zh_script = build_overlay_control_script(i18n::LOCALE_ZH_CN);
+        assert!(zh_script.contains("dambo-overlay-host"));
+        assert!(zh_script.contains("attachShadow"));
+        assert!(zh_script.contains("plugin:window|start_dragging"));
+        assert!(zh_script.contains("plugin:window|is_always_on_top"));
+        assert!(zh_script.contains("plugin:window|set_always_on_top"));
+        assert!(zh_script.contains("plugin:window|close"));
+        assert!(zh_script.contains("dambo-pin-btn"));
+        assert!(zh_script.contains("rotate(45deg)"));
+        assert!(zh_script.contains("Escape"));
+        assert!(zh_script.contains("拖动窗口"));
+        assert!(zh_script.contains("置顶窗口"));
+        assert!(zh_script.contains("取消置顶"));
+        assert!(zh_script.contains("关闭窗口 (Esc)"));
+
+        let ja_script = build_overlay_control_script(i18n::LOCALE_JA);
+        assert!(ja_script.contains("ウィンドウをドラッグ"));
+        assert!(ja_script.contains("常に最前面に表示"));
+        assert!(ja_script.contains("最前面表示を解除"));
+        assert!(ja_script.contains("ウィンドウを閉じる (Esc)"));
+    }
+
+    #[test]
+    fn test_compute_panel_width_bounds() {
+        assert_eq!(compute_panel_width_bounds(400.0), (520.0, 860.0));
+        assert_eq!(compute_panel_width_bounds(600.2), (601.0, 860.0));
+        assert_eq!(compute_panel_width_bounds(920.0), (920.0, 920.0));
+        assert_eq!(compute_panel_width_bounds(f64::NAN), (520.0, 860.0));
+    }
+
+    #[test]
+    fn test_clamp_panel_width() {
+        assert_eq!(clamp_panel_width(480.0, 520.0), 520.0);
+        assert_eq!(clamp_panel_width(640.4, 520.0), 640.0);
+        assert_eq!(clamp_panel_width(640.6, 520.0), 641.0);
+        assert_eq!(clamp_panel_width(999.0, 520.0), 860.0);
+        assert_eq!(clamp_panel_width(600.0, 620.0), 620.0);
+        assert_eq!(clamp_panel_width(f64::NAN, 540.0), 540.0);
+    }
 }

@@ -203,7 +203,7 @@ fn default_true() -> bool {
     true
 }
 fn default_session_file() -> String {
-    "./dambo_session.json".to_string()
+    "var/session.json".to_string()
 }
 fn default_avatar_cache_size() -> usize {
     2000
@@ -230,19 +230,19 @@ fn default_port() -> u16 {
     3838
 }
 fn default_html_dir() -> String {
-    "static/themes".to_string()
+    "static/html".to_string()
 }
 fn default_state_file() -> String {
-    "etc/state.json".to_string()
+    "var/state.json".to_string()
 }
 fn default_log_level() -> String {
     "info".to_string()
 }
 fn default_log_path() -> String {
-    "./logs".to_string()
+    "var/logs".to_string()
 }
 fn default_record_dir() -> String {
-    "./rec".to_string()
+    "var/records".to_string()
 }
 fn default_filename_pattern() -> String {
     "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl".to_string()
@@ -280,7 +280,11 @@ mod tests {
         assert_eq!(def.event.buffer_capacity, 512);
         assert_eq!(def.event.min_passthrough_chars, 4);
         assert_eq!(def.event.max_combo_wait_secs, 8);
-        assert_eq!(def.server.state_file, "etc/state.json");
+        assert_eq!(def.bilibili.session_file, "var/session.json");
+        assert_eq!(def.server.html_dir, "static/html");
+        assert_eq!(def.server.state_file, "var/state.json");
+        assert_eq!(def.log.path, "var/logs");
+        assert_eq!(def.record.dir, "var/records");
         assert!(!def.record.record_raw);
 
         // Explicit [event] + [server].state_file + [record].record_raw = true
