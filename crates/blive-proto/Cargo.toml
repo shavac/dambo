@@ -37,3 +37,4 @@ url = "2.3.1"
 
 [build-dependencies]
 prost-build = "0.13"
+protoc-bin-vendored = "3"
