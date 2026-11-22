@@ -5,11 +5,7 @@ use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(name = "dambo-ui")]
-#[command(
-    author = "kshava",
-    version = "0.1.0",
-    about = "Dambo Danmaku & Event Controller"
-)]
+#[command(author = "kshava", version, about = "Dambo Danmaku & Event Controller")]
 struct Args {
     #[arg(short, long, default_value = "etc/config.toml")]
     pub config: String,

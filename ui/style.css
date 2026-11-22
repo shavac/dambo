@@ -31,6 +31,8 @@ html, body {
     height: 100%;
     background: transparent !important;
     overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
     cursor: default;
 }
 

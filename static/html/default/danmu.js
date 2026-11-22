@@ -413,6 +413,7 @@
         while (container.children.length > MAX_ITEMS) {
             container.removeChild(container.firstChild);
         }
+        container.scrollTop = container.scrollHeight;
     }
 
     const client = Dambo.connect({

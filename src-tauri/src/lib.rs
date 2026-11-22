@@ -272,6 +272,29 @@ fn build_overlay_control_script(locale: &str) -> String {
       }}
       return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|start_dragging');
     }}
+    if (cmd === 'outer_position') {{
+      if (api && typeof api.outerPosition === 'function') {{
+        return api.outerPosition().catch(() => window.__TAURI_INTERNALS__?.invoke?.('plugin:window|outer_position'));
+      }}
+      return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|outer_position');
+    }}
+    if (cmd === 'scale_factor') {{
+      if (api && typeof api.scaleFactor === 'function') {{
+        return api.scaleFactor().catch(() => window.__TAURI_INTERNALS__?.invoke?.('plugin:window|scale_factor'));
+      }}
+      return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|scale_factor');
+    }}
+    if (cmd === 'set_position') {{
+      const x = Math.round(arg.x);
+      const y = Math.round(arg.y);
+      const PhysicalPositionCtor = window.__TAURI__?.window?.PhysicalPosition || window.__TAURI__?.dpi?.PhysicalPosition;
+      if (api && typeof api.setPosition === 'function' && PhysicalPositionCtor) {{
+        return api.setPosition(new PhysicalPositionCtor(x, y)).catch(() =>
+          window.__TAURI_INTERNALS__?.invoke?.('plugin:window|set_position', {{ value: {{ Physical: {{ x, y }} }} }})
+        );
+      }}
+      return window.__TAURI_INTERNALS__?.invoke?.('plugin:window|set_position', {{ value: {{ Physical: {{ x, y }} }} }});
+    }}
     if (cmd === 'is_always_on_top') {{
       if (api && typeof api.isAlwaysOnTop === 'function') {{
         return api.isAlwaysOnTop().catch(() => window.__TAURI_INTERNALS__?.invoke?.('plugin:window|is_always_on_top'));
@@ -353,6 +376,7 @@ fn build_overlay_control_script(locale: &str) -> String {
           border: 1px solid rgba(255, 255, 255, 0.18);
           box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
           pointer-events: none;
+          touch-action: none;
           opacity: 0;
           transition: opacity 0.16s ease;
         }}
@@ -364,8 +388,8 @@ fn build_overlay_control_script(locale: &str) -> String {
           pointer-events: auto;
         }}
         .dambo-btn {{
-          width: 24px;
-          height: 24px;
+          width: 26px;
+          height: 26px;
           padding: 0;
           margin: 0;
           border: none;
@@ -376,6 +400,9 @@ fn build_overlay_control_script(locale: &str) -> String {
           align-items: center;
           justify-content: center;
           transition: background 0.15s ease, color 0.15s ease;
+        }}
+        .dambo-btn svg {{
+          pointer-events: none;
         }}
         .dambo-btn:hover {{
           background: rgba(255, 255, 255, 0.2);
@@ -390,6 +417,7 @@ fn build_overlay_control_script(locale: &str) -> String {
         }}
         .dambo-pin {{
           cursor: pointer;
+          touch-action: manipulation;
         }}
         .dambo-pin .dambo-pin-icon {{
           transition: transform 0.16s ease, opacity 0.16s ease;
@@ -414,6 +442,7 @@ fn build_overlay_control_script(locale: &str) -> String {
         }}
         .dambo-close {{
           cursor: pointer;
+          touch-action: manipulation;
         }}
         .dambo-close:hover {{
           background: rgba(239, 68, 68, 0.85);
@@ -496,6 +525,132 @@ fn build_overlay_control_script(locale: &str) -> String {
       rootEl.classList.remove('visible');
     }};
 
+    let activeTouchDrag = null;
+    const stopTouchDrag = (keepVisible) => {{
+      if (!activeTouchDrag) return;
+      const drag = activeTouchDrag;
+      activeTouchDrag = null;
+      if (drag.rafId !== null) {{
+        cancelAnimationFrame(drag.rafId);
+      }}
+      window.removeEventListener('pointermove', drag.onMove);
+      window.removeEventListener('pointerup', drag.onEnd);
+      window.removeEventListener('pointercancel', drag.onEnd);
+      dragBtn.removeEventListener('lostpointercapture', drag.onEnd);
+      try {{
+        if (dragBtn.hasPointerCapture?.(drag.pointerId)) {{
+          dragBtn.releasePointerCapture(drag.pointerId);
+        }}
+      }} catch (_) {{}}
+      if (keepVisible) {{
+        showControls(4000);
+      }}
+    }};
+
+    const startTouchDrag = (startEvent) => {{
+      stopTouchDrag(false);
+      showControls(0);
+
+      const pointerId = startEvent.pointerId;
+      const startScreenX = startEvent.screenX;
+      const startScreenY = startEvent.screenY;
+      let latestDx = 0;
+      let latestDy = 0;
+      let lastSentDx = 0;
+      let lastSentDy = 0;
+      let dirty = false;
+      let inFlight = false;
+      let rafId = null;
+
+      try {{
+        dragBtn.setPointerCapture(pointerId);
+      }} catch (_) {{}}
+
+      const initPromise = Promise.all([
+        Promise.resolve(invokeWindowCmd('outer_position')),
+        Promise.resolve(invokeWindowCmd('scale_factor')),
+      ]).catch((err) => {{
+        console.error('[dambo overlay] failed to read window origin:', err);
+        return null;
+      }});
+
+      const pumpMove = async () => {{
+        if (inFlight || !dirty) return;
+        inFlight = true;
+        try {{
+          const info = await initPromise;
+          if (!info || !info[0]) return;
+          const origin = info[0];
+          const scale = Number(info[1]) > 0 ? Number(info[1]) : (window.devicePixelRatio || 1);
+          while (dirty) {{
+            dirty = false;
+            const dx = latestDx;
+            const dy = latestDy;
+            if (dx === lastSentDx && dy === lastSentDy) continue;
+            lastSentDx = dx;
+            lastSentDy = dy;
+            try {{
+              await invokeWindowCmd('set_position', {{
+                x: origin.x + dx * scale,
+                y: origin.y + dy * scale,
+              }});
+            }} catch (err) {{
+              console.error('[dambo overlay] set_position failed:', err);
+            }}
+          }}
+        }} finally {{
+          inFlight = false;
+          if (dirty) {{
+            pumpMove();
+          }}
+        }}
+      }};
+
+      const flushMove = () => {{
+        rafId = null;
+        if (activeTouchDrag) {{
+          activeTouchDrag.rafId = null;
+        }}
+        pumpMove();
+      }};
+
+      const onMove = (ev) => {{
+        if (ev.pointerId !== pointerId) return;
+        const dx = ev.screenX - startScreenX;
+        const dy = ev.screenY - startScreenY;
+        if (dx === latestDx && dy === latestDy) return;
+        latestDx = dx;
+        latestDy = dy;
+        dirty = true;
+        if (rafId === null && !inFlight) {{
+          rafId = requestAnimationFrame(flushMove);
+          if (activeTouchDrag) {{
+            activeTouchDrag.rafId = rafId;
+          }}
+        }}
+      }};
+
+      const onEnd = (ev) => {{
+        if (ev && ev.pointerId !== undefined && ev.pointerId !== pointerId) return;
+        if (dirty) {{
+          pumpMove();
+        }}
+        stopTouchDrag(true);
+      }};
+
+      activeTouchDrag = {{
+        pointerId,
+        onMove,
+        onEnd,
+        rafId: null,
+      }};
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onEnd);
+      window.addEventListener('pointercancel', onEnd);
+      dragBtn.addEventListener('lostpointercapture', onEnd);
+    }};
+
     const onPointerEnter = (e) => {{
       if (e.pointerType === 'mouse' || !e.pointerType) {{
         showControls(0);
@@ -503,7 +658,7 @@ fn build_overlay_control_script(locale: &str) -> String {
     }};
     const onPointerDownWindow = (e) => {{
       if (e.pointerType && e.pointerType !== 'mouse') {{
-        showControls(4000);
+        showControls(activeTouchDrag ? 0 : 4000);
       }}
     }};
 
@@ -514,15 +669,21 @@ fn build_overlay_control_script(locale: &str) -> String {
       if (e.pointerType === 'mouse' || !e.pointerType) hideControls();
     }});
     document.documentElement.addEventListener('mouseleave', hideControls);
-    window.addEventListener('blur', hideControls);
+    window.addEventListener('blur', () => {{
+      stopTouchDrag(false);
+      hideControls();
+    }});
 
     barEl.addEventListener('pointerenter', () => showControls(0));
     dragBtn.addEventListener('pointerdown', (e) => {{
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       e.stopPropagation();
       e.preventDefault();
-      if (e.pointerType && e.pointerType !== 'mouse') showControls(4000);
-      triggerDrag();
+      if (e.pointerType === 'mouse') {{
+        triggerDrag();
+        return;
+      }}
+      startTouchDrag(e);
     }});
     const stopBubble = (e) => {{
       e.stopPropagation();
@@ -1158,7 +1319,16 @@ async fn move_panel_by(
 
     window
         .run_on_main_thread(move || {
-            let origin = origin_store.lock().ok().and_then(|g| *g);
+            let origin = match origin_store.lock().ok().and_then(|g| *g) {
+                Some(pos) => Some(pos),
+                None => {
+                    let pos = win.outer_position().ok();
+                    if let (Some(p), Ok(mut guard)) = (pos, origin_store.lock()) {
+                        *guard = Some(p);
+                    }
+                    pos
+                }
+            };
             let res = if let Some(origin) = origin {
                 let scale = win.scale_factor().unwrap_or(1.0);
                 let target = tauri::PhysicalPosition::new(
@@ -1710,9 +1880,14 @@ mod tests {
         assert!(zh_script.contains("dambo-overlay-host"));
         assert!(zh_script.contains("attachShadow"));
         assert!(zh_script.contains("plugin:window|start_dragging"));
+        assert!(zh_script.contains("plugin:window|outer_position"));
+        assert!(zh_script.contains("plugin:window|scale_factor"));
+        assert!(zh_script.contains("plugin:window|set_position"));
         assert!(zh_script.contains("plugin:window|is_always_on_top"));
         assert!(zh_script.contains("plugin:window|set_always_on_top"));
         assert!(zh_script.contains("plugin:window|close"));
+        assert!(zh_script.contains("touch-action: none;"));
+        assert!(zh_script.contains("setPointerCapture"));
         assert!(zh_script.contains("dambo-pin-btn"));
         assert!(zh_script.contains("rotate(45deg)"));
         assert!(zh_script.contains("Escape"));

@@ -1,3 +1,9 @@
+:root {
+    --capsule-bg: rgba(18, 20, 26, 0.75);
+    --capsule-border: rgba(255, 255, 255, 0.12);
+    --hairline-divider: rgba(255, 255, 255, 0.1);
+}
+
 * {
     margin: 0;
     padding: 0;
@@ -17,8 +23,14 @@ html, body {
     flex-direction: column;
     width: 100%;
     height: 100%;
-    padding: 12px;
-    gap: 8px;
+    min-height: 100vh;
+    background: var(--capsule-bg);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid var(--capsule-border);
+    border-radius: 10px;
+    padding: 10px 0 6px;
+    gap: 6px;
     overflow: hidden;
 }
 
@@ -30,7 +42,7 @@ html, body {
     align-items: flex-start;
     gap: 6px;
     width: 100%;
-    max-width: 92%;
+    padding: 0 12px;
 }
 .sc-pin-bar.hidden {
     display: none;
@@ -106,40 +118,68 @@ html, body {
 .danmaku-container {
     flex: 1 1 auto;
     min-height: 0;
+    width: 100%;
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
-    align-items: flex-start;
+    align-items: stretch;
     padding: 0;
-    gap: 8px;
-    overflow: hidden;
+    gap: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+}
+.danmaku-container::-webkit-scrollbar {
+    display: none;
+}
+.danmaku-container > :first-child {
+    margin-top: auto;
 }
 
 .danmaku-item {
+    position: relative;
     display: block;
-    background: rgba(18, 20, 26, 0.75);
-    backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 8px;
-    padding: 6px 12px;
+    width: 100%;
+    max-width: 100%;
+    background: transparent;
+    border: none;
+    border-left: 3px solid transparent;
+    border-radius: 0;
+    padding: 8px 12px;
     color: #ffffff;
     font-size: 14px;
     line-height: 1.5;
-    max-width: 90%;
     word-break: break-word;
     overflow-wrap: anywhere;
+    text-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.78),
+        0 0 6px rgba(0, 0, 0, 0.45);
     animation: slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+.danmaku-item:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: 0;
+    height: 1px;
+    background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0) 0%,
+        var(--hairline-divider) 12%,
+        var(--hairline-divider) 88%,
+        rgba(255, 255, 255, 0) 100%
+    );
+    pointer-events: none;
 }
 
 @keyframes slideIn {
     from {
         opacity: 0;
-        transform: translateY(12px) scale(0.96);
+        transform: translateY(10px);
     }
     to {
         opacity: 1;
-        transform: translateY(0) scale(1);
+        transform: translateY(0);
     }
 }
 
@@ -159,6 +199,8 @@ html, body {
     flex-shrink: 0;
     height: 34px;
     width: 100%;
+    padding: 4px 12px 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
     display: flex;
     align-items: center;
     justify-content: flex-start;
@@ -286,14 +328,17 @@ html, body {
 .item-enter {
     display: inline-flex;
     align-items: center;
-    padding: 4px 10px;
+    padding: 2px 0;
     font-size: 12px;
-    height: 30px;
-    background: rgba(18, 20, 26, 0.56);
-    border-color: rgba(148, 163, 184, 0.22);
+    height: 26px;
+    background: transparent;
+    border: none;
     gap: 6px;
     animation: enterIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     white-space: nowrap;
+}
+.item-enter::after {
+    display: none;
 }
 .item-enter.fade-out {
     opacity: 0;
@@ -328,7 +373,7 @@ html, body {
     color: rgba(148, 163, 184, 0.9);
 }
 
-/* SuperChat 2-row inline card */
+/* SuperChat 2-row inline card (left accent stripe + soft red ambient glow) */
 .item-superchat,
 .item-super_chat,
 .item-sc {
@@ -336,10 +381,14 @@ html, body {
     flex-direction: column;
     align-items: flex-start;
     gap: 4px;
-    padding: 8px 12px;
-    background: linear-gradient(135deg, rgba(220, 38, 38, 0.88), rgba(153, 27, 27, 0.88));
-    border-color: rgba(254, 202, 202, 0.48);
-    box-shadow: 0 4px 14px rgba(185, 28, 28, 0.35);
+    padding: 9px 12px;
+    border-left: 3px solid rgba(248, 113, 113, 0.92);
+    background: linear-gradient(
+        90deg,
+        rgba(220, 38, 38, 0.22) 0%,
+        rgba(185, 28, 28, 0.08) 72%,
+        rgba(220, 38, 38, 0) 100%
+    );
 }
 .sc-header {
     display: flex;
@@ -363,9 +412,9 @@ html, body {
 }
 .price-sc {
     margin-left: auto;
-    background: rgba(254, 240, 138, 0.18);
+    background: rgba(254, 240, 138, 0.16);
     color: #fef08a;
-    border-color: rgba(254, 240, 138, 0.45);
+    border-color: rgba(254, 240, 138, 0.42);
 }
 .sc-body {
     color: #ffffff;
@@ -376,16 +425,20 @@ html, body {
     overflow-wrap: anywhere;
 }
 
-/* Guard / Captain buy message */
+/* Guard / Captain buy message (left accent stripe + soft violet ambient glow) */
 .item-guard {
-    background: linear-gradient(135deg, rgba(109, 40, 217, 0.88), rgba(67, 56, 202, 0.88));
-    border-color: rgba(221, 214, 254, 0.5);
-    box-shadow: 0 3px 12px rgba(109, 40, 217, 0.35);
+    border-left: 3px solid rgba(167, 139, 250, 0.92);
+    background: linear-gradient(
+        90deg,
+        rgba(124, 58, 237, 0.22) 0%,
+        rgba(91, 33, 182, 0.08) 72%,
+        rgba(124, 58, 237, 0) 100%
+    );
 }
 .badge-guard {
-    background: rgba(250, 204, 21, 0.2);
+    background: rgba(250, 204, 21, 0.18);
     color: #fde047;
-    border: 1px solid rgba(250, 204, 21, 0.45);
+    border: 1px solid rgba(250, 204, 21, 0.42);
 }
 .item-guard .sender-name {
     color: #ede9fe;
@@ -395,14 +448,18 @@ html, body {
     color: #fef08a;
 }
 
-/* Gift message */
+/* Gift message (left accent stripe + soft amber ambient glow) */
 .item-gift {
-    background: linear-gradient(135deg, rgba(217, 119, 6, 0.86), rgba(180, 83, 9, 0.86));
-    border-color: rgba(254, 215, 170, 0.45);
-    box-shadow: 0 3px 10px rgba(180, 83, 9, 0.3);
+    border-left: 3px solid rgba(251, 191, 36, 0.88);
+    background: linear-gradient(
+        90deg,
+        rgba(217, 119, 6, 0.2) 0%,
+        rgba(180, 83, 9, 0.06) 72%,
+        rgba(217, 119, 6, 0) 100%
+    );
 }
 .badge-gift {
-    background: rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.14);
     color: #fef3c7;
     padding: 1px 5px;
 }
@@ -414,17 +471,26 @@ html, body {
     color: #ffffff;
 }
 
-/* Follow / share / like interaction pills */
+/* Follow / share / like interaction rows */
 .item-interaction {
-    background: rgba(18, 24, 34, 0.72);
-    border-color: rgba(56, 189, 248, 0.28);
-    padding: 5px 10px;
+    border-left: 3px solid rgba(56, 189, 248, 0.45);
+    background: linear-gradient(
+        90deg,
+        rgba(56, 189, 248, 0.07) 0%,
+        rgba(56, 189, 248, 0) 80%
+    );
+    padding: 7px 12px;
     font-size: 13px;
 }
 .item-follow,
 .item-special_follow,
 .item-mutual_follow {
-    border-color: rgba(244, 114, 182, 0.38);
+    border-left-color: rgba(244, 114, 182, 0.58);
+    background: linear-gradient(
+        90deg,
+        rgba(244, 114, 182, 0.08) 0%,
+        rgba(244, 114, 182, 0) 80%
+    );
 }
 .item-interaction .sender-name {
     color: #e2e8f0;
@@ -436,14 +502,22 @@ html, body {
 
 /* System & moderation notices */
 .item-system {
-    background: rgba(30, 41, 59, 0.82);
-    border-color: rgba(148, 163, 184, 0.35);
-    padding: 5px 11px;
+    border-left: 3px solid rgba(148, 163, 184, 0.48);
+    background: linear-gradient(
+        90deg,
+        rgba(148, 163, 184, 0.08) 0%,
+        rgba(148, 163, 184, 0) 80%
+    );
+    padding: 7px 12px;
     font-size: 13px;
 }
 .item-alert {
-    background: rgba(153, 27, 27, 0.85);
-    border-color: rgba(252, 165, 165, 0.45);
+    border-left-color: rgba(248, 113, 113, 0.85);
+    background: linear-gradient(
+        90deg,
+        rgba(185, 28, 28, 0.18) 0%,
+        rgba(185, 28, 28, 0) 85%
+    );
 }
 .system-text {
     color: #f1f5f9;

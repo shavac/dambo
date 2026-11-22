@@ -9,7 +9,7 @@ use std::time::Duration;
 #[command(name = "dambo")]
 #[command(
     author = "kshava",
-    version = "0.1.0",
+    version,
     about = "Bilibili live danmaku collector, lossless recorder, and event-shaping node"
 )]
 struct Args {

@@ -766,20 +766,40 @@ function startPointerEastResize(handle, startEvent) {
     const startScreenX = startEvent.screenX;
     const startWidth = window.innerWidth;
     let lastSentWidth = Math.round(startWidth);
-    let pendingWidth = null;
+    let pendingWidth = lastSentWidth;
+    let dirty = false;
+    let inFlight = false;
     let rafId = null;
+
+    const pumpWidth = async () => {
+        if (inFlight || !dirty) return;
+        inFlight = true;
+        try {
+            while (dirty) {
+                dirty = false;
+                const targetWidth = pendingWidth;
+                if (targetWidth === lastSentWidth) continue;
+                lastSentWidth = targetWidth;
+                try {
+                    await invoke('set_panel_width', { width: targetWidth });
+                } catch (err) {
+                    console.error('Failed to resize panel width:', err);
+                }
+            }
+        } finally {
+            inFlight = false;
+            if (dirty) {
+                pumpWidth();
+            }
+        }
+    };
 
     const flushWidth = () => {
         rafId = null;
         if (activePointerResize) {
             activePointerResize.rafId = null;
         }
-        if (pendingWidth === null || pendingWidth === lastSentWidth) return;
-        const targetWidth = pendingWidth;
-        lastSentWidth = targetWidth;
-        invoke('set_panel_width', { width: targetWidth }).catch((err) => {
-            console.error('Failed to resize panel width:', err);
-        });
+        pumpWidth();
     };
 
     const onMove = (ev) => {
@@ -790,8 +810,11 @@ function startPointerEastResize(handle, startEvent) {
             lastSyncedPanelMinWidth,
             Math.min(maxWidth, Math.round(startWidth + deltaX))
         );
-        pendingWidth = clamped;
-        if (rafId === null) {
+        if (clamped !== pendingWidth) {
+            pendingWidth = clamped;
+            dirty = true;
+        }
+        if (dirty && rafId === null && !inFlight) {
             rafId = requestAnimationFrame(flushWidth);
             if (activePointerResize) {
                 activePointerResize.rafId = rafId;
@@ -801,8 +824,8 @@ function startPointerEastResize(handle, startEvent) {
 
     const onEnd = (ev) => {
         if (ev && ev.pointerId !== undefined && ev.pointerId !== pointerId) return;
-        if (pendingWidth !== null && pendingWidth !== lastSentWidth) {
-            flushWidth();
+        if (dirty) {
+            pumpWidth();
         }
         stopPointerEastResize();
     };
@@ -866,9 +889,7 @@ function stopPointerPanelMove() {
         // Ignore if capture is already released
     }
 
-    if (invoke) {
-        invoke('end_panel_move').catch(() => {});
-    }
+    drag.endWhenIdle();
 }
 
 function startPointerPanelMove(target, startEvent) {
@@ -878,36 +899,77 @@ function startPointerPanelMove(target, startEvent) {
     const pointerId = startEvent.pointerId;
     const startScreenX = startEvent.screenX;
     const startScreenY = startEvent.screenY;
+    let latestDx = 0;
+    let latestDy = 0;
     let lastSentDx = 0;
     let lastSentDy = 0;
-    let pendingDx = 0;
-    let pendingDy = 0;
+    let dirty = false;
+    let inFlight = false;
+    let finished = false;
+    let endSent = false;
     let rafId = null;
 
-    invoke('begin_panel_move').catch((err) => {
+    try {
+        target.setPointerCapture(pointerId);
+    } catch (_) {
+        // Window listeners continue tracking if capture fails
+    }
+
+    const beginPromise = Promise.resolve(invoke('begin_panel_move')).catch((err) => {
         console.error('Failed to begin pointer panel move:', err);
     });
+
+    const finalizeBackendMove = () => {
+        if (endSent) return;
+        endSent = true;
+        invoke('end_panel_move').catch(() => {});
+    };
+
+    const pumpMove = async () => {
+        if (inFlight || !dirty) return;
+        inFlight = true;
+        try {
+            await beginPromise;
+            while (dirty) {
+                dirty = false;
+                const dx = latestDx;
+                const dy = latestDy;
+                if (dx === lastSentDx && dy === lastSentDy) continue;
+                lastSentDx = dx;
+                lastSentDy = dy;
+                try {
+                    await invoke('move_panel_by', { dx, dy });
+                } catch (err) {
+                    console.error('Failed to move panel:', err);
+                }
+            }
+        } finally {
+            inFlight = false;
+            if (dirty) {
+                pumpMove();
+            } else if (finished) {
+                finalizeBackendMove();
+            }
+        }
+    };
 
     const flushMove = () => {
         rafId = null;
         if (activePointerMove) {
             activePointerMove.rafId = null;
         }
-        if (pendingDx === lastSentDx && pendingDy === lastSentDy) return;
-        const dx = pendingDx;
-        const dy = pendingDy;
-        lastSentDx = dx;
-        lastSentDy = dy;
-        invoke('move_panel_by', { dx, dy }).catch((err) => {
-            console.error('Failed to move panel:', err);
-        });
+        pumpMove();
     };
 
     const onMove = (ev) => {
         if (ev.pointerId !== pointerId) return;
-        pendingDx = Math.round(ev.screenX - startScreenX);
-        pendingDy = Math.round(ev.screenY - startScreenY);
-        if (rafId === null) {
+        const dx = ev.screenX - startScreenX;
+        const dy = ev.screenY - startScreenY;
+        if (dx === latestDx && dy === latestDy) return;
+        latestDx = dx;
+        latestDy = dy;
+        dirty = true;
+        if (rafId === null && !inFlight) {
             rafId = requestAnimationFrame(flushMove);
             if (activePointerMove) {
                 activePointerMove.rafId = rafId;
@@ -917,8 +979,9 @@ function startPointerPanelMove(target, startEvent) {
 
     const onEnd = (ev) => {
         if (ev && ev.pointerId !== undefined && ev.pointerId !== pointerId) return;
-        if (pendingDx !== lastSentDx || pendingDy !== lastSentDy) {
-            flushMove();
+        finished = true;
+        if (dirty) {
+            pumpMove();
         }
         stopPointerPanelMove();
     };
@@ -929,19 +992,33 @@ function startPointerPanelMove(target, startEvent) {
         onMove,
         onEnd,
         rafId: null,
+        endWhenIdle: () => {
+            finished = true;
+            if (!inFlight && !dirty) {
+                finalizeBackendMove();
+            }
+        },
     };
-
-    try {
-        target.setPointerCapture(pointerId);
-    } catch (_) {
-        // Window listeners continue tracking if capture fails
-    }
 
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onEnd);
     window.addEventListener('pointercancel', onEnd);
     target.addEventListener('lostpointercapture', onEnd);
 }
+
+const dragHandleEl = document.getElementById('drag-handle');
+dragHandleEl?.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    if (e.pointerType !== 'mouse') {
+        startPointerPanelMove(dragHandleEl, e);
+        return;
+    }
+    Promise.resolve(startPanelDragging()).catch((err) => {
+        console.error('Failed to start panel drag:', err);
+    });
+});
 
 const podContainerEl = document.querySelector('.pod-container');
 podContainerEl?.addEventListener('pointerdown', (e) => {

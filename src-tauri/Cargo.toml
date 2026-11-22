@@ -1,6 +1,6 @@
 [package]
 name = "dambo-ui"
-version = "0.99.0"
+version.workspace = true
 description = "dambo ui"
 authors = ["kshava"]
 edition = "2024"
