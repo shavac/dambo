@@ -64,17 +64,37 @@
         parentEl.appendChild(medal);
     }
 
-    function appendUserIdentity(parentEl, item, showAvatar = true) {
+    function appendGuardBadge(parentEl, item) {
+        const guardName = Dambo.utils.guardLevelName(item?.guard_level);
+        if (!guardName) return false;
+        const badge = document.createElement('span');
+        badge.className = `guard-role-badge guard-level-${Number(item.guard_level)}`;
+        badge.innerText = `⚓ ${guardName}`;
+        parentEl.appendChild(badge);
+        return true;
+    }
+
+    function appendUserIdentity(parentEl, item, options = {}) {
+        const showAvatar = options !== false && options?.showAvatar !== false;
+        const showGuard = options?.showGuard !== false;
+        const showColon = Boolean(options?.showColon);
+
         const identity = document.createElement('span');
-        identity.className = 'user-identity';
+        identity.className = showColon ? 'user-identity has-colon' : 'user-identity';
         if (showAvatar) {
             appendAvatar(identity, item.face);
         }
         appendMedal(identity, item);
+        if (showGuard) {
+            appendGuardBadge(identity, item);
+        }
         const name = document.createElement('span');
         name.className = 'sender-name';
         name.innerText = item.uname || 'Viewer';
         identity.appendChild(name);
+        if (showColon) {
+            appendSpan(identity, 'name-colon', '：');
+        }
         parentEl.appendChild(identity);
     }
 
@@ -126,6 +146,7 @@
         }
 
         appendMedal(div, item);
+        appendGuardBadge(div, item);
         appendSpan(div, 'sender-name', item.uname || 'Viewer');
         appendSpan(div, 'event-action', item.content || '进入直播间');
 
@@ -172,7 +193,7 @@
 
         const header = document.createElement('div');
         header.className = 'sc-pin-header';
-        appendUserIdentity(header, item, true);
+        appendUserIdentity(header, item, { showAvatar: true, showGuard: !isGuard });
         const cnyText = Dambo.utils.formatPrice(item.price);
         const badgeText = isGuard
             ? (cnyText ? `⚓ 舰队 ${cnyText}` : '⚓ 舰队')
@@ -236,6 +257,9 @@
 
         appendAvatar(div, item.face);
         appendMedal(div, item);
+        if (spec.kind !== 'guard') {
+            appendGuardBadge(div, item);
+        }
         appendSpan(div, `event-badge ${spec.badgeClass}`, spec.badgeText);
         appendSpan(div, 'sender-name', item.uname || 'Viewer');
         appendSpan(div, 'event-action', spec.actionText);
@@ -254,7 +278,7 @@
 
         const header = document.createElement('div');
         header.className = 'sc-header';
-        appendUserIdentity(header, item, true);
+        appendUserIdentity(header, item, { showAvatar: true });
         const priceText = Dambo.utils.formatPrice(item.price) || '¥0';
         appendSpan(header, 'price-badge price-sc', `SC ${priceText}`);
         div.appendChild(header);
@@ -274,7 +298,10 @@
 
         appendAvatar(div, item.face);
         appendMedal(div, item);
-        appendSpan(div, 'event-icon', icon);
+        const hasGuard = appendGuardBadge(div, item);
+        if (!(kind === 'guard_enter' && hasGuard)) {
+            appendSpan(div, 'event-icon', icon);
+        }
         appendSpan(div, 'sender-name', item.uname || 'Viewer');
         appendSpan(div, 'event-action', item.content || fallbackAction);
         return div;
@@ -317,7 +344,7 @@
         const div = document.createElement('div');
         div.className = 'danmaku-item item-chat';
 
-        appendUserIdentity(div, item, true);
+        appendUserIdentity(div, item, { showAvatar: true, showColon: true });
 
         const content = document.createElement('span');
         content.className = 'danmaku-content';

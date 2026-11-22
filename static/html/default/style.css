@@ -213,11 +213,11 @@ html, body {
 
 .avatar {
     display: inline-block;
-    width: 20px;
-    height: 20px;
+    width: 1.4em;
+    height: 1.4em;
     border-radius: 50%;
     object-fit: cover;
-    vertical-align: middle;
+    vertical-align: -0.32em;
     margin-right: 6px;
     background: rgba(255, 255, 255, 0.1);
 }
@@ -225,7 +225,7 @@ html, body {
 .medal-badge {
     display: inline-flex;
     align-items: center;
-    vertical-align: middle;
+    vertical-align: -2px;
     font-size: 11px;
     font-weight: 600;
     line-height: 1.2;
@@ -236,17 +236,55 @@ html, body {
     margin-right: 6px;
 }
 
+.guard-role-badge {
+    display: inline-flex;
+    align-items: center;
+    vertical-align: -3px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    padding: 1px 5px;
+    border-radius: 4px;
+    margin-right: 6px;
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    background: rgba(56, 189, 248, 0.22);
+    color: #7dd3fc;
+}
+
+.guard-role-badge.guard-level-2 {
+    border-color: rgba(192, 132, 252, 0.52);
+    background: rgba(168, 85, 247, 0.24);
+    color: #e9d5ff;
+}
+
+.guard-role-badge.guard-level-1 {
+    border-color: rgba(251, 191, 36, 0.6);
+    background: rgba(245, 158, 11, 0.26);
+    color: #fde68a;
+}
+
 .sender-name {
     display: inline-block;
     max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    vertical-align: middle;
-    line-height: 1.35;
+    vertical-align: text-bottom;
+    line-height: 1.25;
     margin-right: 6px;
     color: #94a3b8;
     font-weight: 500;
+}
+
+.user-identity.has-colon .sender-name {
+    margin-right: 0;
+}
+
+.name-colon {
+    display: inline;
+    color: #94a3b8;
+    font-weight: 500;
+    margin-right: 4px;
 }
 
 .danmaku-content {
@@ -257,25 +295,26 @@ html, body {
 .danmaku-emot {
     height: 1.35em;
     width: auto;
-    vertical-align: middle;
+    vertical-align: -0.28em;
     margin: 0 2px;
     display: inline-block;
 }
 
 .danmaku-sticker {
-    display: block;
-    height: 48px;
+    display: inline-block;
+    height: 36px;
     width: auto;
-    max-width: 150px;
+    max-width: 140px;
     object-fit: contain;
     border-radius: 6px;
-    margin-top: 4px;
+    vertical-align: -0.9em;
+    margin: 0 2px;
 }
 
 /* Shared badges & inline helpers */
 .event-icon {
     display: inline-block;
-    vertical-align: middle;
+    vertical-align: -1px;
     font-size: 13px;
     line-height: 1;
     margin-right: 6px;
@@ -284,7 +323,7 @@ html, body {
 .event-badge {
     display: inline-flex;
     align-items: center;
-    vertical-align: middle;
+    vertical-align: -2px;
     gap: 3px;
     font-size: 11px;
     font-weight: 700;
@@ -296,7 +335,7 @@ html, body {
 
 .event-action {
     display: inline;
-    vertical-align: middle;
+    vertical-align: baseline;
     color: rgba(226, 232, 240, 0.85);
     font-size: 13px;
     margin-right: 6px;
@@ -304,7 +343,7 @@ html, body {
 
 .event-highlight {
     display: inline;
-    vertical-align: middle;
+    vertical-align: baseline;
     color: #ffffff;
     font-weight: 700;
     margin-right: 6px;
@@ -313,7 +352,7 @@ html, body {
 .price-badge {
     display: inline-flex;
     align-items: center;
-    vertical-align: middle;
+    vertical-align: -3px;
     font-size: 11px;
     font-weight: 700;
     line-height: 1.2;
@@ -352,16 +391,24 @@ html, body {
     margin-right: 0;
 }
 .item-enter .medal-badge,
+.item-enter .guard-role-badge,
 .item-enter .event-icon,
 .item-enter .event-action,
 .sc-header .avatar,
 .sc-header .medal-badge,
+.sc-header .guard-role-badge,
 .sc-header .sender-name,
 .sc-pin-header .avatar,
 .sc-pin-header .medal-badge,
+.sc-pin-header .guard-role-badge,
 .sc-pin-header .sender-name {
     margin-right: 0;
     flex-shrink: 0;
+}
+.item-enter .sender-name,
+.sc-header .sender-name,
+.sc-pin-header .sender-name {
+    line-height: 1.35;
 }
 .item-enter .sender-name {
     color: #cbd5e1;
