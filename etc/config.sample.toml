@@ -1,0 +1,38 @@
+# Dambo sample configuration template (read-only at runtime).
+# Copy to `etc/config.toml` for local customization; release packages include `etc/config.toml` automatically.
+
+[bilibili]
+room_id = 1994820762                    # Optional fallback room ID (0 = disconnected until set in UI/CLI)
+session_file = "var/session.json"
+avatar_cache_size = 2000       # In-memory LRU cache capacity for uid -> face_url
+
+# Channel A: Real-time visual feed (/ws, OBS overlays & web plugins)
+[feed]
+max_history = 300              # Max core visual items retained in Snapshot ring buffer
+show_enter = true              # Forward viewer room-enter events over /ws
+show_medal = true              # Attach fan medal badge and level
+
+# Channel B: Prioritized & aggregated event stream (/ws/event)
+[event]
+window_ms = 2500               # Reservoir batching window in milliseconds
+dedup_enabled = true           # Deduplicate and count repeated short/emote chat messages
+buffer_capacity = 512          # Bounded ingress queue capacity for backpressure protection
+min_passthrough_chars = 4      # Effective char count threshold for 0ms quality-chat passthrough
+max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic gift combo aggregation
+
+[server]
+host = "localhost"             # Use "0.0.0.0" to allow LAN access (e.g., tablet/phone /list/)
+port = 3838                    # HTTP & WebSocket server port
+html_dir = "static/html"       # Plugin root directory watched for hot reload
+state_file = "var/state.json"  # Runtime persisted state (current_room_id, locale, room_history, record_raw)
+
+[log]
+level = "warn"                 # off | error | warn | info | debug | trace
+path = "var/logs"
+
+[record]
+enabled = true                 # Enable lossless JSONL event recording
+record_raw = false             # Sidecar raw packet capture (*_raw.jsonl)
+dir = "var/records"
+# Placeholders: {room_name} (sanitized streamer name), {room_id}, and chrono strftime specifiers
+filename_pattern = "dambo_{room_name}_%Y%m%d_%H%M%S.jsonl"
