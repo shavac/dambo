@@ -3,29 +3,20 @@
     const MAX_CARDS = 8;
     const seenIds = new Set();
 
-    function durationForItem(item) {
-        if (item.kind === 'guard') return 90000;
-        const cny = (item.price || 0) / 1000;
-        if (cny >= 1000) return 300000;
-        if (cny >= 500) return 180000;
-        if (cny >= 100) return 120000;
-        return 60000;
-    }
-
     function formatPrice(item) {
-        const cny = (item.price || 0) / 1000;
+        const priceText = Dambo.utils.formatPrice(item.price);
         if (item.kind === 'guard') {
-            return cny > 0 ? `Guard ¥${cny.toFixed(0)}` : 'Guard';
+            return priceText ? `Guard ${priceText}` : 'Guard';
         }
-        return `SC ¥${cny % 1 === 0 ? cny.toFixed(0) : cny.toFixed(1)}`;
+        return `SC ${priceText || '¥0'}`;
     }
 
     function addTickerCard(item) {
-        if (!item || (item.kind !== 'superchat' && item.kind !== 'super_chat' && item.kind !== 'guard')) return;
+        if (!item || (!Dambo.utils.isSuperChat(item.kind) && item.kind !== 'guard')) return;
         if (item.id && seenIds.has(item.id)) return;
         if (item.id) seenIds.add(item.id);
 
-        const durationMs = durationForItem(item);
+        const durationMs = Dambo.utils.superChatDurationMs(item);
         const createdAt = item.timestamp || Date.now();
         const remainingMs = Math.max(5000, createdAt + durationMs - Date.now());
         if (createdAt + durationMs <= Date.now()) return;
@@ -40,7 +31,12 @@
 
         const avatar = document.createElement('img');
         avatar.className = 'card-avatar';
-        avatar.src = item.face || 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="%2394a3b8"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
+        avatar.src = item.face || Dambo.utils.DEFAULT_AVATAR_SVG;
+        avatar.onerror = () => {
+            if (avatar.src !== Dambo.utils.DEFAULT_AVATAR_SVG) {
+                avatar.src = Dambo.utils.DEFAULT_AVATAR_SVG;
+            }
+        };
         header.appendChild(avatar);
 
         const meta = document.createElement('div');
@@ -97,27 +93,16 @@
         }, remainingMs);
     }
 
-    function connect() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    const client = Dambo.connect({
+        channel: 'feed',
+        replaySnapshot: false,
+    });
 
-        ws.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'Snapshot' && msg.data?.items) {
-                    stack.innerHTML = '';
-                    msg.data.items.forEach(addTickerCard);
-                } else if (msg.type === 'Event' && msg.data) {
-                    addTickerCard(msg.data);
-                }
-            } catch (e) {
-                console.error('Failed to parse sc-ticker event:', e);
-            }
-        };
+    client.on('snapshot', (snapshotData) => {
+        stack.innerHTML = '';
+        (snapshotData.items || []).forEach(addTickerCard);
+    });
 
-        ws.onclose = () => setTimeout(connect, 2000);
-        ws.onerror = () => ws.close();
-    }
-
-    connect();
+    client.on('superchat', addTickerCard);
+    client.on('guard', addTickerCard);
 })();

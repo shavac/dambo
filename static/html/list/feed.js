@@ -11,11 +11,7 @@
     let isUserScrolledUp = false;
     let unreadCount = 0;
     let allItems = [];
-    const SHOW_LIKE = new URLSearchParams(window.location.search).get('show_like') === '1';
-
-    function isSuperChatKind(kind) {
-        return kind === 'superchat' || kind === 'super_chat';
-    }
+    const SHOW_LIKE = Dambo.utils.getQueryBool('show_like', false);
 
     // Filter switching
     document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -50,74 +46,16 @@
 
     function matchFilter(item) {
         if (currentFilter === 'chat') return item.kind === 'chat';
-        if (currentFilter === 'gift_sc') return item.kind === 'gift' || isSuperChatKind(item.kind) || item.kind === 'guard';
+        if (currentFilter === 'gift_sc') return item.kind === 'gift' || Dambo.utils.isSuperChat(item.kind) || item.kind === 'guard';
         if (currentFilter === 'medal') return !!item.medal_name;
         return true;
     }
 
-    function escapeRegExp(str) {
-        return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
     function appendChatWithEmotes(parentEl, item) {
-        if (item.emoticon) {
-            const sticker = document.createElement('img');
-            sticker.className = 'feed-sticker';
-            sticker.src = item.emoticon;
-            sticker.alt = item.content || 'Sticker';
-            sticker.loading = 'lazy';
-            sticker.onerror = () => {
-                sticker.replaceWith(document.createTextNode(item.content || ''));
-            };
-            parentEl.appendChild(sticker);
-            return;
-        }
-
-        const text = item.content || '';
-        const emots = item.emots;
-        if (!emots || typeof emots !== 'object') {
-            parentEl.innerText = text;
-            return;
-        }
-
-        const keys = Object.keys(emots).filter((k) => k && emots[k]);
-        if (keys.length === 0) {
-            parentEl.innerText = text;
-            return;
-        }
-
-        keys.sort((a, b) => b.length - a.length);
-        const pattern = new RegExp(keys.map(escapeRegExp).join('|'), 'g');
-        let lastIdx = 0;
-        let match;
-        while ((match = pattern.exec(text)) !== null) {
-            if (match.index > lastIdx) {
-                parentEl.appendChild(document.createTextNode(text.slice(lastIdx, match.index)));
-            }
-            const token = match[0];
-            const img = document.createElement('img');
-            img.className = 'feed-emot';
-            img.src = emots[token];
-            img.alt = token;
-            img.title = token;
-            img.loading = 'lazy';
-            img.onerror = () => {
-                img.replaceWith(document.createTextNode(token));
-            };
-            parentEl.appendChild(img);
-            lastIdx = pattern.lastIndex;
-        }
-        if (lastIdx < text.length) {
-            parentEl.appendChild(document.createTextNode(text.slice(lastIdx)));
-        }
-    }
-
-    function formatRoomBadge(state) {
-        if (!state || !state.room_id) return 'Disconnected';
-        const head = state.room_uname ? `${state.room_id}(${state.room_uname})` : `${state.room_id}`;
-        const label = state.room_title ? `${head}: ${state.room_title}` : head;
-        if (!state.connected) return `${label} · Disconnected`;
-        return state.is_live ? label : `${label} · Offline`;
+        Dambo.utils.renderContent(parentEl, item, {
+            stickerClass: 'feed-sticker',
+            emotClass: 'feed-emot',
+        });
     }
 
     function createFeedRow(item) {
@@ -128,8 +66,13 @@
 
         const avatar = document.createElement('img');
         avatar.className = 'feed-avatar';
-        avatar.src = item.face || 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="%2364748b"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
+        avatar.src = item.face || Dambo.utils.DEFAULT_AVATAR_SVG;
         avatar.loading = 'lazy';
+        avatar.onerror = () => {
+            if (avatar.src !== Dambo.utils.DEFAULT_AVATAR_SVG) {
+                avatar.src = Dambo.utils.DEFAULT_AVATAR_SVG;
+            }
+        };
         row.appendChild(avatar);
 
         const body = document.createElement('div');
@@ -154,8 +97,9 @@
 
         const text = document.createElement('div');
         text.className = 'feed-text';
-        if (isSuperChatKind(item.kind)) {
-            text.innerText = `[SC ￥${(item.price || 0) / 1000}] ${item.content}`;
+        if (Dambo.utils.isSuperChat(item.kind)) {
+            const priceText = Dambo.utils.formatPrice(item.price) || '¥0';
+            text.innerText = `[SC ${priceText}] ${item.content}`;
         } else if (item.kind === 'gift') {
             text.innerText = `[Gift] ${item.content}`;
         } else if (item.kind === 'guard') {
@@ -217,7 +161,7 @@
         allItems.push(item);
         if (allItems.length > 500) allItems.shift();
 
-        if (isSuperChatKind(item.kind) || item.kind === 'guard') {
+        if (Dambo.utils.isSuperChat(item.kind) || item.kind === 'guard') {
             addStickySC(item);
         }
 
@@ -235,36 +179,29 @@
         }
     }
 
-    function connect() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const client = Dambo.connect({
+        channel: 'feed',
+        replaySnapshot: false,
+        showLike: SHOW_LIKE,
+    });
 
-        const ws = new WebSocket(wsUrl);
+    client.on('snapshot', (snapshotData) => {
+        roomStatusBadge.innerText = Dambo.utils.formatRoomBadge(snapshotData);
+        allItems = (snapshotData.items || []).filter(
+            (it) => it && (it.kind !== 'like' || SHOW_LIKE)
+        );
+        reapplyFilter();
+    });
 
-        ws.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'Snapshot' && msg.data) {
-                    roomStatusBadge.innerText = formatRoomBadge(msg.data);
-                    allItems = (msg.data.items || []).filter(
-                        (it) => it && (it.kind !== 'like' || SHOW_LIKE)
-                    );
-                    reapplyFilter();
-                } else if (msg.type === 'Event' && msg.data) {
-                    appendItem(msg.data);
-                } else if (msg.type === 'RoomState' && msg.data) {
-                    roomStatusBadge.innerText = formatRoomBadge(msg.data);
-                }
-            } catch (e) {
-                console.error("Failed to parse event:", e);
-            }
-        };
+    client.on('event', (item) => {
+        appendItem(item);
+    });
 
-        ws.onclose = () => {
-            roomStatusBadge.innerText = "Disconnected, reconnecting...";
-            setTimeout(connect, 2000);
-        };
-    }
+    client.on('room_state', (state) => {
+        roomStatusBadge.innerText = Dambo.utils.formatRoomBadge(state);
+    });
 
-    connect();
+    client.on('reconnect', () => {
+        roomStatusBadge.innerText = 'Disconnected, reconnecting...';
+    });
 })();

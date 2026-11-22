@@ -2,23 +2,18 @@
     const scPinBar = document.getElementById('sc-pin-bar');
     const container = document.getElementById('danmaku-container');
     const enterDock = document.getElementById('enter-dock');
-    const SHOW_LIKE = new URLSearchParams(window.location.search).get('show_like') === '1';
-
-    function isSuperChatKind(kind) {
-        return kind === 'superchat' || kind === 'super_chat';
-    }
+    const SHOW_LIKE = Dambo.utils.getQueryBool('show_like', false);
 
     const MAX_ITEMS = 60;
     const MAX_PIN_CARDS = 4;
     const ENTER_TTL_MS = 3000;
     const FADE_MS = 280;
-    const DEFAULT_AVATAR_SVG = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="%2364748b"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
+    const DEFAULT_AVATAR_SVG = Dambo.utils.DEFAULT_AVATAR_SVG;
 
     const activeTimers = new Set();
     const seenPinKeys = new Set();
     let enterDismissTimer = null;
     let enterRemoveTimer = null;
-    let ws = null;
 
     function clearEnterTimers() {
         if (enterDismissTimer !== null) {
@@ -48,17 +43,6 @@
         }
     }
 
-    function escapeRegExp(str) {
-        return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
-    function formatCny(price) {
-        if (!price || price <= 0) return '';
-        const cny = price / 1000;
-        const formatted = Number.isInteger(cny) ? String(cny) : String(parseFloat(cny.toFixed(2)));
-        return `¥${formatted}`;
-    }
-
     function appendAvatar(parentEl, faceUrl) {
         const avatar = document.createElement('img');
         avatar.className = 'avatar';
@@ -81,14 +65,17 @@
     }
 
     function appendUserIdentity(parentEl, item, showAvatar = true) {
+        const identity = document.createElement('span');
+        identity.className = 'user-identity';
         if (showAvatar) {
-            appendAvatar(parentEl, item.face);
+            appendAvatar(identity, item.face);
         }
-        appendMedal(parentEl, item);
+        appendMedal(identity, item);
         const name = document.createElement('span');
         name.className = 'sender-name';
         name.innerText = item.uname || 'Viewer';
-        parentEl.appendChild(name);
+        identity.appendChild(name);
+        parentEl.appendChild(identity);
     }
 
     function appendSpan(parentEl, className, text) {
@@ -100,56 +87,10 @@
     }
 
     function appendContentWithEmotes(parentEl, item) {
-        if (item.emoticon) {
-            const sticker = document.createElement('img');
-            sticker.className = 'danmaku-sticker';
-            sticker.src = item.emoticon;
-            sticker.alt = item.content || 'Sticker';
-            sticker.loading = 'lazy';
-            sticker.onerror = () => {
-                sticker.replaceWith(document.createTextNode(item.content || ''));
-            };
-            parentEl.appendChild(sticker);
-            return;
-        }
-
-        const text = item.content || '';
-        const emots = item.emots;
-        if (!emots || typeof emots !== 'object') {
-            parentEl.innerText = text;
-            return;
-        }
-
-        const keys = Object.keys(emots).filter((k) => k && emots[k]);
-        if (keys.length === 0) {
-            parentEl.innerText = text;
-            return;
-        }
-
-        keys.sort((a, b) => b.length - a.length);
-        const pattern = new RegExp(keys.map(escapeRegExp).join('|'), 'g');
-        let lastIdx = 0;
-        let match;
-        while ((match = pattern.exec(text)) !== null) {
-            if (match.index > lastIdx) {
-                parentEl.appendChild(document.createTextNode(text.slice(lastIdx, match.index)));
-            }
-            const token = match[0];
-            const img = document.createElement('img');
-            img.className = 'danmaku-emot';
-            img.src = emots[token];
-            img.alt = token;
-            img.title = token;
-            img.loading = 'lazy';
-            img.onerror = () => {
-                img.replaceWith(document.createTextNode(token));
-            };
-            parentEl.appendChild(img);
-            lastIdx = pattern.lastIndex;
-        }
-        if (lastIdx < text.length) {
-            parentEl.appendChild(document.createTextNode(text.slice(lastIdx)));
-        }
+        Dambo.utils.renderContent(parentEl, item, {
+            stickerClass: 'danmaku-sticker',
+            emotClass: 'danmaku-emot',
+        });
     }
 
     function showEnterInDock(item, options) {
@@ -210,21 +151,12 @@
         return `${item.kind}:${item.uid || 0}:${item.timestamp || 0}:${item.content || ''}`;
     }
 
-    function durationForPinned(item) {
-        if (item.kind === 'guard') return 90000;
-        const cny = (item.price || 0) / 1000;
-        if (cny >= 1000) return 300000;
-        if (cny >= 500) return 180000;
-        if (cny >= 100) return 120000;
-        return 60000;
-    }
-
     function addPinnedHighlight(item, options) {
-        if (!scPinBar || (!isSuperChatKind(item.kind) && item.kind !== 'guard')) return;
+        if (!scPinBar || (!Dambo.utils.isSuperChat(item.kind) && item.kind !== 'guard')) return;
         const key = pinnedHighlightKey(item);
         if (seenPinKeys.has(key)) return;
 
-        const totalMs = durationForPinned(item);
+        const totalMs = Dambo.utils.superChatDurationMs(item);
         let remainingMs = totalMs;
         if (options?.isSnapshot) {
             if (!item.timestamp) return;
@@ -241,7 +173,7 @@
         const header = document.createElement('div');
         header.className = 'sc-pin-header';
         appendUserIdentity(header, item, true);
-        const cnyText = formatCny(item.price);
+        const cnyText = Dambo.utils.formatPrice(item.price);
         const badgeText = isGuard
             ? (cnyText ? `⚓ 舰队 ${cnyText}` : '⚓ 舰队')
             : `SC ${cnyText || '¥0'}`;
@@ -309,7 +241,7 @@
         appendSpan(div, 'event-action', spec.actionText);
         appendSpan(div, 'event-highlight', item.content || spec.fallbackContent);
 
-        const cny = formatCny(item.price);
+        const cny = Dambo.utils.formatPrice(item.price);
         if (cny) {
             appendSpan(div, 'price-badge', cny);
         }
@@ -323,7 +255,7 @@
         const header = document.createElement('div');
         header.className = 'sc-header';
         appendUserIdentity(header, item, true);
-        const priceText = formatCny(item.price) || '¥0';
+        const priceText = Dambo.utils.formatPrice(item.price) || '¥0';
         appendSpan(header, 'price-badge price-sc', `SC ${priceText}`);
         div.appendChild(header);
 
@@ -414,7 +346,7 @@
             return;
         }
 
-        if (isSuperChatKind(kind) || kind === 'guard') {
+        if (Dambo.utils.isSuperChat(kind) || kind === 'guard') {
             addPinnedHighlight(item, options);
         }
 
@@ -483,50 +415,35 @@
         }
     }
 
-    function connect() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const client = Dambo.connect({
+        channel: 'feed',
+        replaySnapshot: false,
+        showLike: SHOW_LIKE,
+    });
 
-        ws = new WebSocket(wsUrl);
+    client.on('snapshot', (snapshotData) => {
+        clearAllState();
+        const items = snapshotData?.items;
+        if (!Array.isArray(items)) return;
 
-        ws.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'Snapshot' && msg.data?.items) {
-                    clearAllState();
-                    const now = Date.now();
-                    const items = msg.data.items;
+        const now = Date.now();
+        const streamItems = items
+            .filter((it) => it && it.kind !== 'enter')
+            .slice(-MAX_ITEMS);
+        streamItems.forEach((it) => renderItem(it, { isSnapshot: true }));
 
-                    const streamItems = items
-                        .filter((it) => it && it.kind !== 'enter')
-                        .slice(-MAX_ITEMS);
-                    streamItems.forEach((it) => renderItem(it, { isSnapshot: true }));
-
-                    for (let i = items.length - 1; i >= 0; i--) {
-                        const it = items[i];
-                        if (it && it.kind === 'enter') {
-                            if (it.timestamp && now - it.timestamp < ENTER_TTL_MS) {
-                                showEnterInDock(it, { isSnapshot: true });
-                            }
-                            break;
-                        }
-                    }
-                } else if (msg.type === 'Event' && msg.data) {
-                    renderItem(msg.data, { isSnapshot: false });
+        for (let i = items.length - 1; i >= 0; i--) {
+            const it = items[i];
+            if (it && it.kind === 'enter') {
+                if (it.timestamp && now - it.timestamp < ENTER_TTL_MS) {
+                    showEnterInDock(it, { isSnapshot: true });
                 }
-            } catch (e) {
-                console.error("Failed to parse ws event:", e);
+                break;
             }
-        };
+        }
+    });
 
-        ws.onclose = () => {
-            setTimeout(connect, 2000);
-        };
-
-        ws.onerror = () => {
-            ws.close();
-        };
-    }
-
-    connect();
+    client.on('event', (item, meta) => {
+        renderItem(item, meta || { isSnapshot: false });
+    });
 })();

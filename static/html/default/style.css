@@ -116,9 +116,7 @@ html, body {
 }
 
 .danmaku-item {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
+    display: block;
     background: rgba(18, 20, 26, 0.75);
     backdrop-filter: blur(8px);
     border: 1px solid rgba(255, 255, 255, 0.12);
@@ -126,9 +124,10 @@ html, body {
     padding: 6px 12px;
     color: #ffffff;
     font-size: 14px;
-    line-height: 1.4;
+    line-height: 1.5;
     max-width: 90%;
-    word-break: break-all;
+    word-break: break-word;
+    overflow-wrap: anywhere;
     animation: slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
@@ -166,41 +165,57 @@ html, body {
     overflow: hidden;
 }
 
+.user-identity {
+    display: inline;
+}
+
 .avatar {
-    width: 24px;
-    height: 24px;
+    display: inline-block;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
     object-fit: cover;
-    flex-shrink: 0;
+    vertical-align: middle;
+    margin-right: 6px;
     background: rgba(255, 255, 255, 0.1);
 }
 
 .medal-badge {
     display: inline-flex;
     align-items: center;
+    vertical-align: middle;
     font-size: 11px;
     font-weight: 600;
+    line-height: 1.2;
     padding: 1px 5px;
     border-radius: 4px;
     background: linear-gradient(135deg, #4f46e5, #06b6d4);
     color: #ffffff;
-    flex-shrink: 0;
+    margin-right: 6px;
 }
 
 .sender-name {
+    display: inline-block;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+    line-height: 1.35;
+    margin-right: 6px;
     color: #94a3b8;
     font-weight: 500;
-    flex-shrink: 0;
 }
 
 .danmaku-content {
+    display: inline;
     color: #f8fafc;
 }
 
 .danmaku-emot {
-    height: 1.45em;
+    height: 1.35em;
     width: auto;
-    vertical-align: -0.3em;
+    vertical-align: middle;
     margin: 0 2px;
     display: inline-block;
 }
@@ -212,53 +227,65 @@ html, body {
     max-width: 150px;
     object-fit: contain;
     border-radius: 6px;
-    margin-top: 2px;
+    margin-top: 4px;
 }
 
 /* Shared badges & inline helpers */
 .event-icon {
+    display: inline-block;
+    vertical-align: middle;
     font-size: 13px;
     line-height: 1;
-    flex-shrink: 0;
+    margin-right: 6px;
 }
 
 .event-badge {
     display: inline-flex;
     align-items: center;
+    vertical-align: middle;
     gap: 3px;
     font-size: 11px;
     font-weight: 700;
+    line-height: 1.2;
     padding: 1px 6px;
     border-radius: 999px;
-    flex-shrink: 0;
+    margin-right: 6px;
 }
 
 .event-action {
+    display: inline;
+    vertical-align: middle;
     color: rgba(226, 232, 240, 0.85);
     font-size: 13px;
-    flex-shrink: 0;
+    margin-right: 6px;
 }
 
 .event-highlight {
+    display: inline;
+    vertical-align: middle;
     color: #ffffff;
     font-weight: 700;
+    margin-right: 6px;
 }
 
 .price-badge {
     display: inline-flex;
     align-items: center;
+    vertical-align: middle;
     font-size: 11px;
     font-weight: 700;
+    line-height: 1.2;
     padding: 1px 6px;
     border-radius: 999px;
     background: rgba(0, 0, 0, 0.28);
     color: #fde68a;
     border: 1px solid rgba(253, 224, 71, 0.35);
-    flex-shrink: 0;
 }
 
 /* Enter room notification pinned inside fixed .enter-dock */
 .item-enter {
+    display: inline-flex;
+    align-items: center;
     padding: 4px 10px;
     font-size: 12px;
     height: 30px;
@@ -276,10 +303,25 @@ html, body {
 .item-enter .avatar {
     width: 18px;
     height: 18px;
+    flex-shrink: 0;
+    margin-right: 0;
+}
+.item-enter .medal-badge,
+.item-enter .event-icon,
+.item-enter .event-action,
+.sc-header .avatar,
+.sc-header .medal-badge,
+.sc-header .sender-name,
+.sc-pin-header .avatar,
+.sc-pin-header .medal-badge,
+.sc-pin-header .sender-name {
+    margin-right: 0;
+    flex-shrink: 0;
 }
 .item-enter .sender-name {
     color: #cbd5e1;
     font-weight: 600;
+    margin-right: 0;
 }
 .item-enter .event-action {
     font-size: 12px;
@@ -290,6 +332,7 @@ html, body {
 .item-superchat,
 .item-super_chat,
 .item-sc {
+    display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 4px;
@@ -304,6 +347,13 @@ html, body {
     gap: 7px;
     width: 100%;
     flex-wrap: wrap;
+}
+.sc-header .user-identity,
+.sc-pin-header .user-identity {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
 }
 .item-superchat .sender-name,
 .item-super_chat .sender-name,
@@ -321,7 +371,9 @@ html, body {
     color: #ffffff;
     font-size: 14px;
     font-weight: 500;
-    line-height: 1.4;
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: anywhere;
 }
 
 /* Guard / Captain buy message */

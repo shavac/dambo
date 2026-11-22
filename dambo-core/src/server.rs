@@ -27,6 +27,20 @@ pub struct AppState {
     pub html_dir: PathBuf,
 }
 
+/// Embedded official pure-Web Plugin SDK served at `GET /sdk/dambo.js`.
+pub const DAMBO_SDK_JS: &str = include_str!("../assets/dambo.js");
+
+async fn serve_sdk_js() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        DAMBO_SDK_JS,
+    )
+        .into_response()
+}
+
 async fn no_cache_middleware(req: Request<Body>, next: Next) -> Response {
     let mut res = next.run(req).await;
     if res.status() != StatusCode::SWITCHING_PROTOCOLS {
@@ -259,10 +273,11 @@ async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-/// Build the unified Axum router serving `/`, `/{plugin}`, `/{plugin}/{*path}`, `/ws`, and `/ws/event`.
+/// Build the unified Axum router serving `/`, `/sdk/dambo.js`, `/{plugin}`, `/{plugin}/{*path}`, `/ws`, and `/ws/event`.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(serve_root))
+        .route("/sdk/dambo.js", get(serve_sdk_js))
         .route("/ws", get(ws_channel_a))
         .route("/ws/event", get(ws_channel_b))
         .route("/{plugin}", get(serve_plugin_root))
@@ -418,6 +433,14 @@ mod tests {
         let traversal_res = http_get_raw(addr, "/default/..%2F..%2Fetc%2Fpasswd").await;
         assert!(traversal_res.contains("404 Not Found"));
 
+        let sdk_res = http_get_raw(addr, "/sdk/dambo.js").await;
+        assert!(sdk_res.contains("200 OK"));
+        let sdk_res_lower = sdk_res.to_lowercase();
+        assert!(sdk_res_lower.contains("content-type: application/javascript; charset=utf-8"));
+        assert!(sdk_res_lower.contains("cache-control: no-store, no-cache, must-revalidate"));
+        assert!(sdk_res.contains("class DamboClient"));
+        assert!(sdk_res.contains("function connect(options)"));
+
         // 2. Verify /ws Snapshot + real-time Event
         let ws_a_url = format!("ws://{}/ws", addr);
         let (mut ws_a, _) = tokio_tungstenite::connect_async(&ws_a_url).await.unwrap();
@@ -495,5 +518,17 @@ mod tests {
         cancel.cancel();
         let _ = srv_handle.await;
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_sdk_reference_copy_matches_embedded_asset() {
+        let ref_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/sdk/dambo.js");
+        assert!(
+            ref_path.is_file(),
+            "Missing IDE reference SDK at {:?}",
+            ref_path
+        );
+        let ref_content = fs::read_to_string(&ref_path).unwrap();
+        assert_eq!(ref_content, DAMBO_SDK_JS);
     }
 }
