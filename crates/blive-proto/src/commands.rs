@@ -2,6 +2,7 @@
 //! Stateless Bilibili live command, room metadata, SuperChat, and cookie protocol parsers.
 
 use crate::models::{RawBiliEvent, RoomInfoSnapshot, now_unix_ms};
+pub use crate::pb::normalize_bili_url;
 use crate::pb::{
     EventDm, PbExtractedUser, decode_dm, decode_interact_word, decode_send_gift,
     extract_event_user_info,
@@ -86,15 +87,6 @@ fn value_as_non_empty_string(v: &Value) -> Option<String> {
             .or_else(|| v.as_i64().filter(|&n| n > 0).map(|n| n as u64))
             .map(|n| n.to_string())
     })
-}
-
-pub fn normalize_bili_url(url: &str) -> String {
-    let trimmed = url.trim();
-    if let Some(rest) = trimmed.strip_prefix("http://") {
-        format!("https://{}", rest)
-    } else {
-        trimmed.to_string()
-    }
 }
 
 fn extract_danmu_emoticon(info: &[Value]) -> Option<String> {
@@ -566,44 +558,6 @@ fn parse_send_gift_v2_events(
         return Vec::new();
     };
     let now = now_unix_ms();
-    let mut base_ev = RawBiliEvent {
-        timestamp: now,
-        room_id,
-        room_uname: room_uname.to_string(),
-        kind: "gift".to_string(),
-        raw_cmd: raw_cmd.to_string(),
-        ..Default::default()
-    };
-
-    let parsed_json = parse_gift_data(data, &mut base_ev)
-        || data
-            .get("data")
-            .map(|inner| parse_gift_data(inner, &mut base_ev))
-            .unwrap_or(false)
-        || data
-            .get("gift_list")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .map(|first| {
-                let ok = parse_gift_data(first, &mut base_ev);
-                if let Some(uinfo) = data.get("sender_uinfo") {
-                    apply_extracted_user(&mut base_ev, extract_uinfo_fields(uinfo));
-                }
-                if base_ev.batch_combo_id.is_none() {
-                    base_ev.batch_combo_id = data.get("batch_combo_id").and_then(non_empty_str);
-                }
-                if base_ev.combo_stay_time == 0 {
-                    base_ev.combo_stay_time = data
-                        .get("combo_stay_time")
-                        .and_then(value_as_u64)
-                        .unwrap_or(0);
-                }
-                ok
-            })
-            .unwrap_or(false);
-    if parsed_json {
-        return vec![base_ev];
-    }
 
     let Some(pb_b64) = data
         .get("pb")
@@ -634,12 +588,12 @@ fn parse_send_gift_v2_events(
             base_user.medal_name = Some(mn.to_string());
             base_user.medal_level = (medal.level > 0).then_some(medal.level);
         }
+        if base_user.guard_level.is_none() && medal.guard_level > 0 {
+            base_user.guard_level = u8::try_from(medal.guard_level).ok();
+        }
     }
     if let Some(uinfo) = decoded.sender_uinfo.as_ref() {
         apply_extracted_user(&mut base_user, extract_event_user_info(uinfo));
-    }
-    if let Some(uinfo) = data.get("sender_uinfo").or_else(|| data.get("uinfo")) {
-        apply_extracted_user(&mut base_user, extract_uinfo_fields(uinfo));
     }
 
     let outer_combo_id = data.get("batch_combo_id").and_then(non_empty_str);
@@ -1050,7 +1004,12 @@ fn parse_single_bili_cmd_json(
             ev.msg_type = Some(decoded.msg_type);
             ev.guard_level = (decoded.guard_type > 0)
                 .then(|| u8::try_from(decoded.guard_type).ok())
-                .flatten();
+                .flatten()
+                .or_else(|| {
+                    (decoded.privilege_type > 0)
+                        .then(|| u8::try_from(decoded.privilege_type).ok())
+                        .flatten()
+                });
             if let Some(m) = decoded.medal {
                 let mn = m.name.trim().to_string();
                 if !mn.is_empty() {
@@ -1063,9 +1022,6 @@ fn parse_single_bili_cmd_json(
             }
             if let Some(uinfo) = decoded.uinfo.as_ref() {
                 apply_extracted_user(&mut ev, extract_event_user_info(uinfo));
-            }
-            if let Some(uinfo) = data.get("uinfo") {
-                apply_extracted_user(&mut ev, extract_uinfo_fields(uinfo));
             }
             ev.kind = kind.to_string();
             ev.content = content.to_string();
@@ -1410,9 +1366,9 @@ mod tests {
             "data": { "pb": BASE64_STANDARD.encode(iw_msg.encode_to_vec()) }
         });
         let enriched = enrich_raw_json_with_pb_decoded(&raw_pb);
-        assert_eq!(enriched["data"]["pb_decoded"]["1"], 9918273);
-        assert_eq!(enriched["data"]["pb_decoded"]["2"], "老粉丁");
-        assert_eq!(enriched["data"]["pb_decoded"]["9"]["3"], "星光");
+        assert_eq!(enriched["data"]["pb_decoded"]["uid"], 9918273);
+        assert_eq!(enriched["data"]["pb_decoded"]["username"], "老粉丁");
+        assert_eq!(enriched["data"]["pb_decoded"]["medal"]["name"], "星光");
 
         // msg_type == 4 maps independently to special_follow
         let ev_special_follow =
@@ -1476,6 +1432,7 @@ mod tests {
                 level: 25,
                 name: "薇她命".to_string(),
                 is_lighted: Some(true),
+                ..Default::default()
             }),
             gift_items: vec![pb_item],
             ..Default::default()
@@ -1597,5 +1554,51 @@ mod tests {
             assert_eq!(ev.medal_level, Some(10 + msg_type));
             assert_eq!(ev.guard_level, Some(3));
         }
+    }
+
+    #[test]
+    fn test_decode_real_captured_pb_packets() {
+        use crate::pb::decode_online_rank;
+
+        // Real INTERACT_WORD_V2 capture with medal + v2 hex colors (tag 18 is "#FFFFFF") + relation_tail
+        let iw_b64 = "CIXKg4wBEg3oi6boib7phZLkuLZfIgEBKAEwmpmatwc4j8CG2AZAwPzk8p80SisI87yE6gQQBxoG546J5Y+LIJ739QIowIGDBjDAgYMGOMCBgwZgwPb0CmhQYgB42/+/9s/phPUYmgEAsgHOAQiFyoOMARJbCg3oi6boib7phZLkuLZfEkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS9lMWE4ZTI0ZmZjNmFhMTc0NjA3YWY2OWMxODVlMzQ2MWE3NTg0MjA5LmpwZxpjCgbnjonlj4sQBxjAgYMGIMCBgwYowIGDBjCe9/UCOPLBGVDzvITqBGBQegkjOTE5Mjk4Q0OCAQkjOTE5Mjk4Q0OKAQkjOTE5Mjk4Q0OSAQcjRkZGRkZGmgEJIzkxOTI5OEU2IgIIHDIAugF5CkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvbGl2ZS9iOWRlNWQ1MTAxMjVjNmYxNGNkNjgzOTFkNWE0ODc4ZmUxNjM1NmIzLnBuZxIpVEHluLjnnIvkvaDnmoTnm7Tmkq3vvIzkvYbov5jmsqHmnInlhbPms6gYAcIBAA==";
+        let iw_payload = json!({
+            "cmd": "INTERACT_WORD_V2",
+            "data": { "pb": iw_b64 }
+        });
+        let ev_iw =
+            parse_bili_cmd_json("INTERACT_WORD_V2", &iw_payload, 1994820762, "主播").unwrap();
+        assert_eq!(ev_iw.kind, "enter");
+        assert_eq!(ev_iw.uid, 293659909);
+        assert_eq!(ev_iw.uname, "苦艾酒丶_");
+        assert_eq!(ev_iw.medal_name.as_deref(), Some("玉友"));
+        assert_eq!(ev_iw.medal_level, Some(7));
+        assert_eq!(ev_iw.timestamp, 1795268623936);
+
+        // Real SEND_GIFT_V2 capture with blind_gift, 2 gift_items, gift medal, and sender_uinfo (tag 18 string)
+        let sg_b64 = "CIa9+sABEgtIZW5jeea4hee8mBpKaHR0cHM6Ly9pMS5oZHNsYi5jb20vYmZzL2ZhY2UvOGE4N2RjMmUxZjZjMTJkY2YxN2IxZTMwMWRmYTEzYmY2OGJhODAyNC5qcGdCKAjrvv4JKDUyB+WWj2/nsbM4i8L9B0CLwv0HSISh/wdQ1ND/B1gBYAFKIAiLARD7+wEaDOW/g+WKqOebsuebkioG54iG5Ye6MJh1UuwECP76ARIJ5qOJ6Iqx57OWGAYgAiioRjCoRjiQvwVCBGdvbGRKEzQ4NDE2MDg4NDA4OTIwMDU4ODhQy+mG2AZYAWIkYmNmYWRkZGEtNTU1NC00ZWNiLWI5NDMtNWY4OWViNGQ2OWEzaApw8KUDeAiFAQAAgD+IAQGSAQbmipXlloLAAbHeEeoBGAoN5rSb5biMUm9zZXR0ZRCEl4CS+e/KBooC0QEIhJeAkvnvygYSxQEKDea0m+W4jFJvc2V0dGUSSmh0dHBzOi8vaTIuaGRzbGIuY29tL2Jmcy9mYWNlLzQ3ZjI3Nzk3NzA0NzQ5MTI4ZmI1OTI1NzhlNjljZjk2MjBjNWU0ZjMuanBnMlsKDea0m+W4jFJvc2V0dGUSSmh0dHBzOi8vaTIuaGRzbGIuY29tL2Jmcy9mYWNlLzQ3ZjI3Nzk3NzA0NzQ5MTI4ZmI1OTI1NzhlNjljZjk2MjBjNWU0ZjMuanBnOgsg////////////AZICAhACmgLlAQpKaHR0cHM6Ly9zMS5oZHNsYi5jb20vYmZzL2xpdmUvYjU1NTY4MmFmNDE1NTFjMjhmOGFkMTlkYzVjNGVkODc5NDNjODRmNC5wbmcSS2h0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9saXZlLzNkZmI3NTMwNjVjOTY3NjUzZGMzNWJlMWRmODUzMjIxODhhODg2MjUud2VicCpKaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2xpdmUvOTc2NTJhNzI0YzYxMGIzZTdkZjJmNDlhNGZjODI3NjlhNGIwYzA2Mi5naWagAqhGqgICCAJS7wQIgPsBEgzniLHlv4PmirHmnpUYBCACKIB9MIB9OODUA0IEZ29sZEoTNDg0MTYwODg0MDg5MjAwNTg4OVDL6YbYBlgBYiQyN2JhZDU1Yi1jYTE4LTQwNDEtOWRmNi03OTRmNWNiMjc2NTloCnCA9AN4CIUBAACAP4gBAZIBBuaKleWWgsABld8R6gEYCg3mtJvluIxSb3NldHRlEISXgJL578oGigLRAQiEl4CS+e/KBhLFAQoN5rSb5biMUm9zZXR0ZRJKaHR0cHM6Ly9pMi5oZHNsYi5jb20vYmZzL2ZhY2UvNDdmMjc3OTc3MDQ3NDkxMjhmYjU5MjU3OGU2OWNmOTYyMGM1ZTRmMy5qcGcyWwoN5rSb5biMUm9zZXR0ZRJKaHR0cHM6Ly9pMi5oZHNsYi5jb20vYmZzL2ZhY2UvNDdmMjc3OTc3MDQ3NDkxMjhmYjU5MjU3OGU2OWNmOTYyMGM1ZTRmMy5qcGc6CyD///////////8BkgICEAKaAuUBCkpodHRwczovL3MxLmhkc2xiLmNvbS9iZnMvbGl2ZS84MjQ3MTRjODMwOTY2ZDdiZWMzODFlMzVlZjgwOGIxZjQ3OGUyMWVlLnBuZxJLaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2xpdmUvMzJjOGVlNDI1NjY1MDE4MjJkOGVjYzY4YjMzY2QyYzY0OTM3MjY2YS53ZWJwKkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvbGl2ZS9hZTgwZDgwZWE3NThmZjA4ZmI0ZTJjNDIyNmFiN2I1MDExYjcyOGE2LmdpZqACgH2qAgIIAlgBagIIM3r9AgiGvfrAARLBAQoLSGVuY3nmuIXnvJgSSmh0dHBzOi8vaTEuaGRzbGIuY29tL2Jmcy9mYWNlLzhhODdkYzJlMWY2YzEyZGNmMTdiMWUzMDFkZmExM2JmNjhiYTgwMjQuanBnMlkKC0hlbmN55riF57yYEkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS84YTg3ZGMyZTFmNmMxMmRjZjE3YjFlMzAxZGZhMTNiZjY4YmE4MDI0LmpwZzoLIP///////////wEasAEKB+WWj2/nsbMQNRiLwv0HIISh/wco1ND/BzCLwv0HSAFQ677+CVgBYILpvQNqSmh0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9saXZlL2JmNGY1ZWE0YjU0Y2E3YmIzNThkZWM0ZTZjNGFmY2MzMDBjMTJlYjkucG5negkjRUM0RjZFOTmCAQkjRUM0RjZFOTmKAQcjRjE4MDg3kgEHI0ZGRkZGRpoBCSNFQzRGNkVFNg==";
+        let sg_payload = json!({
+            "cmd": "SEND_GIFT_V2",
+            "data": { "pb": sg_b64 }
+        });
+        let sg_events = parse_bili_cmd_events("SEND_GIFT_V2", &sg_payload, 21465419, "洛希Rosette");
+        assert_eq!(sg_events.len(), 2);
+        assert_eq!(sg_events[0].uid, 404659846);
+        assert_eq!(sg_events[0].uname, "Hency清缘");
+        assert_eq!(sg_events[0].medal_name.as_deref(), Some("喏o米"));
+        assert_eq!(sg_events[0].medal_level, Some(53));
+        assert_eq!(sg_events[0].guard_level, Some(1));
+        assert_eq!(sg_events[0].content, "棉花糖 x6");
+        assert_eq!(sg_events[0].price, 90000);
+        assert_eq!(sg_events[1].content, "爱心抱枕 x4");
+        assert_eq!(sg_events[1].price, 60000);
+
+        // Real ONLINE_RANK_V3 capture
+        let or_b64 = "CgtvbmxpbmVfcmFuaxqTAwj5tOPIBhJKaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2ZhY2UvNzNhZWUyZTE1MTA0YzVjMmY0NjI2YjE2ZjdhMDlkMDY3OTVjMTFlNC5qcGcaAjExIgzljYPpnaLnmb7mgKcoAUKqAgj5tOPIBhKfAgoM5Y2D6Z2i55m+5oCnEkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvZmFjZS83M2FlZTJlMTUxMDRjNWMyZjQ2MjZiMTZmN2EwOWQwNjc5NWMxMWU0LmpwZypaCgzljYPpnaLnmb7mgKcSSmh0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9mYWNlLzczYWVlMmUxNTEwNGM1YzJmNDYyNmIxNmY3YTA5ZDA2Nzk1YzExZTQuanBnMloKDOWNg+mdoueZvuaApxJKaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2ZhY2UvNzNhZWUyZTE1MTA0YzVjMmY0NjI2YjE2ZjdhMDlkMDY3OTVjMTFlNC5qcGc6CyD///////////8BMgAazQMI8ajdAxJKaHR0cHM6Ly9pMS5oZHNsYi5jb20vYmZzL2ZhY2UvZTdmNjBlMWQ3MzI2ZjQ4MzkwZmZmODI3OGIxZjZmMDMyM2MwYTg5OC5qcGcaAjEwIhvmiJHlpoLkvZXojrflj5blpKfph4/noazluIEoAkLWAgjxqN0DEswCChvmiJHlpoLkvZXojrflj5blpKfph4/noazluIESSmh0dHBzOi8vaTEuaGRzbGIuY29tL2Jmcy9mYWNlL2U3ZjYwZTFkNzMyNmY0ODM5MGZmZjgyNzhiMWY2ZjAzMjNjMGE4OTguanBnKmkKG+aIkeWmguS9leiOt+WPluWkp+mHj+ehrOW4gRJKaHR0cHM6Ly9pMS5oZHNsYi5jb20vYmZzL2ZhY2UvZTdmNjBlMWQ3MzI2ZjQ4MzkwZmZmODI3OGIxZjZmMDMyM2MwYTg5OC5qcGcyaQob5oiR5aaC5L2V6I635Y+W5aSn6YeP56Gs5biBEkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS9lN2Y2MGUxZDczMjZmNDgzOTBmZmY4Mjc4YjFmNmYwMzIzYzBhODk4LmpwZzoLIP///////////wEyABqQAwjjx/YWEkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS9iZTViMGZiYTg4MzI0ZjE2MmI2ZjRiMjQ4M2Y4OTAzM2NkMzMxZDg1LmpwZxoBMyIM6YaJ6Iie6Z2S5rOTKANCqQII48f2FhKfAgoM6YaJ6Iie6Z2S5rOTEkpodHRwczovL2kxLmhkc2xiLmNvbS9iZnMvZmFjZS9iZTViMGZiYTg4MzI0ZjE2MmI2ZjRiMjQ4M2Y4OTAzM2NkMzMxZDg1LmpwZypaCgzphonoiJ7pnZLms5MSSmh0dHBzOi8vaTEuaGRzbGIuY29tL2Jmcy9mYWNlL2JlNWIwZmJhODgzMjRmMTYyYjZmNGIyNDgzZjg5MDMzY2QzMzFkODUuanBnMloKDOmGieiInumdkuazkxJKaHR0cHM6Ly9pMS5oZHNsYi5jb20vYmZzL2ZhY2UvYmU1YjBmYmE4ODMyNGYxNjJiNmY0YjI0ODNmODkwMzNjZDMzMWQ4NS5qcGc6CyD///////////8BMgAakAMIs9WMBRJKaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2ZhY2UvMTFhNTQxODBjYTk4MWFiZjhiMGVkOTlmOWQ5NGIwOTI0MGIyMDlkNC5qcGcaATIiDOWupOWGhemfreiPnCgEQqkCCLPVjAUSnwIKDOWupOWGhemfreiPnBJKaHR0cHM6Ly9pMC5oZHNsYi5jb20vYmZzL2ZhY2UvMTFhNTQxODBjYTk4MWFiZjhiMGVkOTlmOWQ5NGIwOTI0MGIyMDlkNC5qcGcqWgoM5a6k5YaF6Z+t6I+cEkpodHRwczovL2kwLmhkc2xiLmNvbS9iZnMvZmFjZS8xMWE1NDE4MGNhOTgxYWJmOGIwZWQ5OWY5ZDk0YjA5MjQwYjIwOWQ0LmpwZzJaCgzlrqTlhoXpn63oj5wSSmh0dHBzOi8vaTAuaGRzbGIuY29tL2Jmcy9mYWNlLzExYTU0MTgwY2E5ODFhYmY4YjBlZDk5ZjlkOTRiMDkyNDBiMjA5ZDQuanBnOgsg////////////ATIAGv4CCJajbBJJaHR0cDovL2kyLmhkc2xiLmNvbS9iZnMvZmFjZS82OGY4MGVkZTYyNzM0MWNjMTZiNjAyMjRiMjUxMDQ3ZjQxNGM3MDU1LmpwZxoBMSIJ57+M5Y6f54K5KAVCnAIIlqNsEpMCCgnnv4zljp/ngrkSSWh0dHA6Ly9pMi5oZHNsYi5jb20vYmZzL2ZhY2UvNjhmODBlZGU2MjczNDFjYzE2YjYwMjI0YjI1MTA0N2Y0MTRjNzA1NS5qcGcqVgoJ57+M5Y6f54K5EklodHRwOi8vaTIuaGRzbGIuY29tL2Jmcy9mYWNlLzY4ZjgwZWRlNjI3MzQxY2MxNmI2MDIyNGIyNTEwNDdmNDE0YzcwNTUuanBnMlYKCee/jOWOn+eCuRJJaHR0cDovL2kyLmhkc2xiLmNvbS9iZnMvZmFjZS82OGY4MGVkZTYyNzM0MWNjMTZiNjAyMjRiMjUxMDQ3ZjQxNGM3MDU1LmpwZzoLIP///////////wEyABqWAwjJ9JePBxJKaHR0cHM6Ly9pMi5oZHNsYi5jb20vYmZzL2ZhY2UvZDY2ZTU0ZDdmN2Y1MjRhMTc3Yjg4Zjg2YWMyNGFkMjgwZTY3ODJmZi5qcGcaATEiDeaYn+iIsOmVvy00MTYoBkKtAgjJ9JePBxKiAgoN5pif6Iiw6ZW/LTQxNhJKaHR0cHM6Ly9pMi5oZHNsYi5jb20vYmZzL2ZhY2UvZDY2ZTU0ZDdmN2Y1MjRhMTc3Yjg4Zjg2YWMyNGFkMjgwZTY3ODJmZi5qcGcqWwoN5pif6Iiw6ZW/LTQxNhJKaHR0cHM6Ly9pMi5oZHNsYi5jb20vYmZzL2ZhY2UvZDY2ZTU0ZDdmN2Y1MjRhMTc3Yjg4Zjg2YWMyNGFkMjgwZTY3ODJmZi5qcGcyWwoN5pif6Iiw6ZW/LTQxNhJKaHR0cHM6Ly9pMi5oZHNsYi5jb20vYmZzL2ZhY2UvZDY2ZTU0ZDdmN2Y1MjRhMTc3Yjg4Zjg2YWMyNGFkMjgwZTY3ODJmZi5qcGc6CyD///////////8BMgAangMIlbPV+AQSSmh0dHBzOi8vaTIuaGRzbGIuY29tL2Jmcy9mYWNlLzNkNTAyYmQ3YzFjODFjYmZlMDAxZGVlMmVhMWMwYWRkZWRlNmI1MDIuanBnGgExIg9FcnJpbmdEZWdyZWU4NTIoB0KzAgiVs9X4BBKoAgoPRXJyaW5nRGVncmVlODUyEkpodHRwczovL2kyLmhkc2xiLmNvbS9iZnMvZmFjZS8zZDUwMmJkN2MxYzgxY2JmZTAwMWRlZTJlYTFjMGFkZGVkZTZiNTAyLmpwZypdCg9FcnJpbmdEZWdyZWU4NTISSmh0dHBzOi8vaTIuaGRzbGIuY29tL2Jmcy9mYWNlLzNkNTAyYmQ3YzFjODFjYmZlMDAxZGVlMmVhMWMwYWRkZWRlNmI1MDIuanBnMl0KD0VycmluZ0RlZ3JlZTg1MhJKaHR0cHM6Ly9pMi5oZHNsYi5jb20vYmZzL2ZhY2UvM2Q1MDJiZDdjMWM4MWNiZmUwMDFkZWUyZWExYzBhZGRlZGU2YjUwMi5qcGc6CyD///////////8BMgA=";
+        let or_bytes = BASE64_STANDARD.decode(or_b64).unwrap();
+        let rank = decode_online_rank(&or_bytes).unwrap();
+        assert_eq!(rank.rank_type, "online_rank");
+        assert!(!rank.online_list.is_empty());
+        assert_eq!(rank.online_list[0].uname, "千面百性");
     }
 }

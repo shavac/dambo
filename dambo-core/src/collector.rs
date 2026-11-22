@@ -11,7 +11,7 @@ pub use blive_proto::commands::{
     parse_active_super_chats_json, parse_bili_cmd_events, parse_bili_cmd_json,
     parse_bili_live_time_to_unix_secs, parse_room_get_info_json, parse_room_input,
 };
-pub use blive_proto::pb::{decode_pb_to_json, enrich_raw_json_with_pb_decoded};
+pub use blive_proto::pb::enrich_raw_json_with_pb_decoded;
 pub use blive_proto::websocket::{FrameDecodeResult, decode_bili_frames};
 use blive_proto::websocket::{Operation, connect_result, init_server, make_packet};
 use clru::CLruCache;
