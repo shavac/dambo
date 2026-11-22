@@ -61,40 +61,71 @@ fn current_logical_width(window: &tauri::WebviewWindow) -> f64 {
     }
 }
 
-fn apply_panel_window_bounds(
+fn compute_panel_height_bounds() -> (f64, f64) {
+    (PANEL_COLLAPSED_HEIGHT, PANEL_EXPANDED_HEIGHT)
+}
+
+fn apply_panel_window_bounds_sync(
     window: &tauri::WebviewWindow,
     requested_min_width: f64,
     expanded: bool,
+    explicit_width: Option<f64>,
 ) -> Result<(), String> {
     let (min_w, max_w) = compute_panel_width_bounds(requested_min_width);
+    let (min_h, max_h) = compute_panel_height_bounds();
     let target_h = if expanded {
         PANEL_EXPANDED_HEIGHT
     } else {
         PANEL_COLLAPSED_HEIGHT
     };
-    let cur_w = current_logical_width(window);
-    let target_w = cur_w.clamp(min_w, max_w);
+    let top_left = window.outer_position().ok();
+    let target_w = match explicit_width {
+        Some(width) => clamp_panel_width(width, requested_min_width),
+        None => current_logical_width(window).clamp(min_w, max_w),
+    };
 
-    // Temporarily widen constraints so neither macOS nor Windows rejects intermediate bounds.
-    let _ = window.set_min_size(Some(Size::Logical(LogicalSize::new(
-        min_w.min(cur_w),
-        PANEL_COLLAPSED_HEIGHT,
-    ))));
-    let _ = window.set_max_size(Some(Size::Logical(LogicalSize::new(
-        max_w.max(cur_w),
-        PANEL_EXPANDED_HEIGHT,
-    ))));
-
+    window
+        .set_min_size(Some(Size::Logical(LogicalSize::new(min_w, min_h))))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_max_size(Some(Size::Logical(LogicalSize::new(max_w, max_h))))
+        .map_err(|e| e.to_string())?;
     window
         .set_size(Size::Logical(LogicalSize::new(target_w, target_h)))
         .map_err(|e| e.to_string())?;
-    window
-        .set_min_size(Some(Size::Logical(LogicalSize::new(min_w, target_h))))
-        .map_err(|e| e.to_string())?;
-    window
-        .set_max_size(Some(Size::Logical(LogicalSize::new(max_w, target_h))))
-        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(pos) = top_left {
+        let _ = window.set_position(tauri::Position::Physical(pos));
+    }
+
     Ok(())
+}
+
+async fn apply_panel_window_bounds_on_main(
+    window: tauri::WebviewWindow,
+    ctx: &AppContext,
+    explicit_width: Option<f64>,
+) -> Result<(), String> {
+    let win = window.clone();
+    let panel_min_width = ctx.panel_min_width.clone();
+    let panel_expanded = ctx.panel_expanded.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+    window
+        .run_on_main_thread(move || {
+            let min_w = panel_min_width
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(PANEL_BASE_MIN_WIDTH);
+            let expanded = panel_expanded.load(std::sync::atomic::Ordering::Acquire);
+            let res = apply_panel_window_bounds_sync(&win, min_w, expanded, explicit_width);
+            let _ = tx.send(res);
+        })
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Panel resize task dropped before completing on main thread".to_string())?
 }
 
 #[derive(Clone, Serialize)]
@@ -1021,13 +1052,8 @@ async fn set_dropdown_expanded(
     ctx: State<'_, AppContext>,
 ) -> Result<(), String> {
     ctx.panel_expanded
-        .store(expanded, std::sync::atomic::Ordering::Relaxed);
-    let min_w = ctx
-        .panel_min_width
-        .lock()
-        .map(|g| *g)
-        .unwrap_or(PANEL_BASE_MIN_WIDTH);
-    apply_panel_window_bounds(&window, min_w, expanded)
+        .store(expanded, std::sync::atomic::Ordering::Release);
+    apply_panel_window_bounds_on_main(window, &ctx, None).await
 }
 
 #[tauri::command]
@@ -1039,10 +1065,7 @@ async fn sync_panel_min_width(
     if let Ok(mut guard) = ctx.panel_min_width.lock() {
         *guard = min_width;
     }
-    let expanded = ctx
-        .panel_expanded
-        .load(std::sync::atomic::Ordering::Relaxed);
-    apply_panel_window_bounds(&window, min_width, expanded)
+    apply_panel_window_bounds_on_main(window, &ctx, None).await
 }
 
 #[tauri::command]
@@ -1051,23 +1074,7 @@ async fn set_panel_width(
     width: f64,
     ctx: State<'_, AppContext>,
 ) -> Result<(), String> {
-    let min_w = ctx
-        .panel_min_width
-        .lock()
-        .map(|g| *g)
-        .unwrap_or(PANEL_BASE_MIN_WIDTH);
-    let expanded = ctx
-        .panel_expanded
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let target_w = clamp_panel_width(width, min_w);
-    let target_h = if expanded {
-        PANEL_EXPANDED_HEIGHT
-    } else {
-        PANEL_COLLAPSED_HEIGHT
-    };
-    window
-        .set_size(Size::Logical(LogicalSize::new(target_w, target_h)))
-        .map_err(|e| e.to_string())
+    apply_panel_window_bounds_on_main(window, &ctx, Some(width)).await
 }
 
 #[tauri::command]
@@ -1614,6 +1621,9 @@ mod tests {
         assert_eq!(compute_panel_width_bounds(600.2), (601.0, 860.0));
         assert_eq!(compute_panel_width_bounds(920.0), (920.0, 920.0));
         assert_eq!(compute_panel_width_bounds(f64::NAN), (520.0, 860.0));
+        let (min_h, max_h) = compute_panel_height_bounds();
+        assert_eq!((min_h, max_h), (56.0, 420.0));
+        assert!(min_h < max_h);
     }
 
     #[test]
