@@ -5,6 +5,10 @@ pub use blive_proto::models::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 /// Channel A Snapshot item (/ws)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotItem {
@@ -34,6 +38,10 @@ pub struct SnapshotItem {
     pub guard_level: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ids: Option<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_combo_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub combo_stay_time: u64,
     pub timestamp: u64,
 }
 
@@ -54,7 +62,7 @@ pub struct SnapshotData {
 #[serde(tag = "type", content = "data")]
 pub enum ChannelAMessage {
     Snapshot(SnapshotData),
-    Event(SnapshotItem),
+    Event(Box<SnapshotItem>),
     RoomState(RoomStateSnapshot),
 }
 

@@ -39,7 +39,7 @@ html, body {
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 6px;
     width: 100%;
     padding: 0 12px;
@@ -52,9 +52,8 @@ html, body {
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    min-width: 240px;
-    max-width: 100%;
+    gap: 4px;
+    width: 100%;
     padding: 7px 11px 9px;
     border-radius: 9px;
     border: 1px solid rgba(255, 255, 255, 0.28);
@@ -81,22 +80,30 @@ html, body {
     display: flex;
     align-items: center;
     gap: 6px;
+    width: 100%;
+    min-width: 0;
     font-size: 12px;
 }
+.sc-pin-header .user-identity {
+    flex: 1 1 auto;
+    min-width: 0;
+}
 .sc-pin-header .avatar {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
 }
 .sc-pin-header .sender-name {
     color: #fef08a;
     font-weight: 700;
+    font-size: 13px;
 }
 .sc-pin-body {
     font-size: 13px;
     font-weight: 500;
-    line-height: 1.35;
+    line-height: 1.45;
     color: #ffffff;
     word-break: break-word;
+    overflow-wrap: anywhere;
 }
 .sc-pin-progress-track {
     position: absolute;
@@ -147,7 +154,7 @@ html, body {
     padding: 8px 12px;
     color: #ffffff;
     font-size: 14px;
-    line-height: 1.5;
+    line-height: 20px;
     word-break: break-word;
     overflow-wrap: anywhere;
     text-shadow:
@@ -194,6 +201,153 @@ html, body {
     }
 }
 
+/* Unified user-identity cluster: pixel-aligned centerline across chat, gift, guard, SC, and enter dock */
+.user-identity {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    max-width: 100%;
+    vertical-align: middle;
+}
+.user-identity.has-colon {
+    margin-right: 4px;
+}
+
+.avatar {
+    display: block;
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.medal-badge,
+.guard-role-badge,
+.event-badge,
+.price-badge {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    height: 18px;
+    font-size: 11px;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.medal-badge {
+    font-weight: 600;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: linear-gradient(135deg, #4f46e5, #06b6d4);
+    color: #ffffff;
+}
+
+.guard-role-badge {
+    font-weight: 700;
+    padding: 0 5px;
+    border-radius: 4px;
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    background: rgba(56, 189, 248, 0.22);
+    color: #7dd3fc;
+}
+.guard-role-badge.guard-level-2 {
+    border-color: rgba(192, 132, 252, 0.52);
+    background: rgba(168, 85, 247, 0.24);
+    color: #e9d5ff;
+}
+.guard-role-badge.guard-level-1 {
+    border-color: rgba(251, 191, 36, 0.6);
+    background: rgba(245, 158, 11, 0.26);
+    color: #fde68a;
+}
+
+.sender-name {
+    display: block;
+    min-width: 0;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 20px;
+    color: #94a3b8;
+    font-weight: 500;
+}
+
+.name-colon {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-left: -4px;
+    line-height: 20px;
+    color: #94a3b8;
+    font-weight: 500;
+}
+
+.danmaku-content {
+    vertical-align: middle;
+    color: #f8fafc;
+}
+
+.danmaku-emot {
+    display: inline-block;
+    height: 1.35em;
+    width: auto;
+    vertical-align: middle;
+    margin: 0 2px;
+}
+
+.danmaku-sticker {
+    display: inline-block;
+    height: 36px;
+    width: auto;
+    max-width: 140px;
+    object-fit: contain;
+    border-radius: 6px;
+    vertical-align: middle;
+    margin: 2px;
+}
+
+/* Shared inline/flex event helpers */
+.event-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.event-badge {
+    gap: 3px;
+    font-weight: 700;
+    padding: 0 6px;
+    border-radius: 999px;
+}
+
+.event-action {
+    color: rgba(226, 232, 240, 0.85);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+.event-highlight {
+    color: #ffffff;
+    font-weight: 700;
+    line-height: 20px;
+}
+
+.price-badge {
+    font-weight: 700;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.28);
+    color: #fde68a;
+    border: 1px solid rgba(253, 224, 71, 0.35);
+}
+
 /* Fixed-height bottom dock for room-enter notifications so danmaku never shifts down */
 .enter-dock {
     flex-shrink: 0;
@@ -207,216 +361,40 @@ html, body {
     overflow: hidden;
 }
 
-.user-identity {
-    display: inline;
-}
-
-.avatar {
-    display: inline-block;
-    width: 1.4em;
-    height: 1.4em;
-    border-radius: 50%;
-    object-fit: cover;
-    vertical-align: -0.32em;
-    margin-right: 6px;
-    background: rgba(255, 255, 255, 0.1);
-}
-
-.medal-badge {
-    display: inline-flex;
-    align-items: center;
-    vertical-align: -2px;
-    font-size: 11px;
-    font-weight: 600;
-    line-height: 1.2;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: linear-gradient(135deg, #4f46e5, #06b6d4);
-    color: #ffffff;
-    margin-right: 6px;
-}
-
-.guard-role-badge {
-    display: inline-flex;
-    align-items: center;
-    vertical-align: -3px;
-    font-size: 11px;
-    font-weight: 700;
-    line-height: 1.2;
-    padding: 1px 5px;
-    border-radius: 4px;
-    margin-right: 6px;
-    border: 1px solid rgba(56, 189, 248, 0.45);
-    background: rgba(56, 189, 248, 0.22);
-    color: #7dd3fc;
-}
-
-.guard-role-badge.guard-level-2 {
-    border-color: rgba(192, 132, 252, 0.52);
-    background: rgba(168, 85, 247, 0.24);
-    color: #e9d5ff;
-}
-
-.guard-role-badge.guard-level-1 {
-    border-color: rgba(251, 191, 36, 0.6);
-    background: rgba(245, 158, 11, 0.26);
-    color: #fde68a;
-}
-
-.sender-name {
-    display: inline-block;
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    vertical-align: text-bottom;
-    line-height: 1.25;
-    margin-right: 6px;
-    color: #94a3b8;
-    font-weight: 500;
-}
-
-.user-identity.has-colon .sender-name {
-    margin-right: 0;
-}
-
-.name-colon {
-    display: inline;
-    color: #94a3b8;
-    font-weight: 500;
-    margin-right: 4px;
-}
-
-.danmaku-content {
-    display: inline;
-    color: #f8fafc;
-}
-
-.danmaku-emot {
-    height: 1.35em;
-    width: auto;
-    vertical-align: -0.28em;
-    margin: 0 2px;
-    display: inline-block;
-}
-
-.danmaku-sticker {
-    display: inline-block;
-    height: 36px;
-    width: auto;
-    max-width: 140px;
-    object-fit: contain;
-    border-radius: 6px;
-    vertical-align: -0.9em;
-    margin: 0 2px;
-}
-
-/* Shared badges & inline helpers */
-.event-icon {
-    display: inline-block;
-    vertical-align: -1px;
-    font-size: 13px;
-    line-height: 1;
-    margin-right: 6px;
-}
-
-.event-badge {
-    display: inline-flex;
-    align-items: center;
-    vertical-align: -2px;
-    gap: 3px;
-    font-size: 11px;
-    font-weight: 700;
-    line-height: 1.2;
-    padding: 1px 6px;
-    border-radius: 999px;
-    margin-right: 6px;
-}
-
-.event-action {
-    display: inline;
-    vertical-align: baseline;
-    color: rgba(226, 232, 240, 0.85);
-    font-size: 13px;
-    margin-right: 6px;
-}
-
-.event-highlight {
-    display: inline;
-    vertical-align: baseline;
-    color: #ffffff;
-    font-weight: 700;
-    margin-right: 6px;
-}
-
-.price-badge {
-    display: inline-flex;
-    align-items: center;
-    vertical-align: -3px;
-    font-size: 11px;
-    font-weight: 700;
-    line-height: 1.2;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.28);
-    color: #fde68a;
-    border: 1px solid rgba(253, 224, 71, 0.35);
-}
-
-/* Enter room notification pinned inside fixed .enter-dock */
 .item-enter {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    padding: 2px 0;
-    font-size: 12px;
-    height: 26px;
-    background: transparent;
-    border: none;
     gap: 6px;
+    width: 100%;
+    min-width: 0;
+    height: 26px;
+    font-size: 12px;
+    line-height: 18px;
     animation: enterIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     white-space: nowrap;
-}
-.item-enter::after {
-    display: none;
 }
 .item-enter.fade-out {
     opacity: 0;
     transition: opacity 0.28s ease;
     pointer-events: none;
 }
+.item-enter .user-identity {
+    flex: 0 1 auto;
+    min-width: 0;
+}
 .item-enter .avatar {
     width: 18px;
     height: 18px;
-    flex-shrink: 0;
-    margin-right: 0;
-}
-.item-enter .medal-badge,
-.item-enter .guard-role-badge,
-.item-enter .event-icon,
-.item-enter .event-action,
-.sc-header .avatar,
-.sc-header .medal-badge,
-.sc-header .guard-role-badge,
-.sc-header .sender-name,
-.sc-pin-header .avatar,
-.sc-pin-header .medal-badge,
-.sc-pin-header .guard-role-badge,
-.sc-pin-header .sender-name {
-    margin-right: 0;
-    flex-shrink: 0;
-}
-.item-enter .sender-name,
-.sc-header .sender-name,
-.sc-pin-header .sender-name {
-    line-height: 1.35;
 }
 .item-enter .sender-name {
     color: #cbd5e1;
     font-weight: 600;
-    margin-right: 0;
+    line-height: 18px;
 }
 .item-enter .event-action {
+    flex-shrink: 0;
     font-size: 12px;
+    line-height: 18px;
     color: rgba(148, 163, 184, 0.9);
 }
 
@@ -426,8 +404,8 @@ html, body {
 .item-sc {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
+    align-items: stretch;
+    gap: 5px;
     padding: 9px 12px;
     border-left: 3px solid rgba(248, 113, 113, 0.92);
     background: linear-gradient(
@@ -440,15 +418,12 @@ html, body {
 .sc-header {
     display: flex;
     align-items: center;
-    gap: 7px;
-    width: 100%;
-    flex-wrap: wrap;
-}
-.sc-header .user-identity,
-.sc-pin-header .user-identity {
-    display: inline-flex;
-    align-items: center;
     gap: 6px;
+    width: 100%;
+    min-width: 0;
+}
+.sc-header .user-identity {
+    flex: 1 1 auto;
     min-width: 0;
 }
 .item-superchat .sender-name,
@@ -467,9 +442,20 @@ html, body {
     color: #ffffff;
     font-size: 14px;
     font-weight: 500;
-    line-height: 1.5;
+    line-height: 20px;
     word-break: break-word;
     overflow-wrap: anywhere;
+}
+
+/* Flex row alignment for gift, guard, interaction, and system notices */
+.item-gift,
+.item-guard,
+.item-interaction,
+.item-system {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 6px;
 }
 
 /* Guard / Captain buy message (left accent stripe + soft violet ambient glow) */
@@ -511,7 +497,7 @@ html, body {
 .badge-gift {
     background: rgba(255, 255, 255, 0.14);
     color: #fef3c7;
-    padding: 1px 5px;
+    padding: 0 5px;
 }
 .item-gift .sender-name {
     color: #fef3c7;
@@ -523,13 +509,12 @@ html, body {
 .gift-combo-count {
     display: inline-flex;
     align-items: center;
-    vertical-align: baseline;
+    height: 18px;
     font-size: 12px;
     font-weight: 800;
-    line-height: 1.25;
-    padding: 1px 6px;
+    line-height: 1;
+    padding: 0 6px;
     border-radius: 999px;
-    margin-right: 6px;
     background: rgba(251, 191, 36, 0.2);
     border: 1px solid rgba(251, 191, 36, 0.45);
     color: #fde68a;
@@ -624,4 +609,5 @@ html, body {
 .system-text {
     color: #f1f5f9;
     font-weight: 500;
+    line-height: 20px;
 }

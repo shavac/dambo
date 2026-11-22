@@ -70,7 +70,14 @@
 
         const body = document.createElement('div');
         body.className = 'card-body';
-        body.innerText = isGuard ? guardInfo.summaryText : (item.content || '');
+        if (isGuard && !item.emoticon) {
+            body.innerText = guardInfo.summaryText;
+        } else {
+            Dambo.utils.renderContent(body, item, {
+                stickerClass: 'card-sticker',
+                emotClass: 'card-emot',
+            });
+        }
         card.appendChild(body);
 
         const track = document.createElement('div');

@@ -300,6 +300,8 @@ impl StateHub {
                     num: event.num,
                     guard_level: event.guard_level,
                     ids: event.ids.clone(),
+                    batch_combo_id: event.batch_combo_id.clone(),
+                    combo_stay_time: event.combo_stay_time,
                     timestamp: event.timestamp,
                 };
 
@@ -320,7 +322,9 @@ impl StateHub {
         }
 
         if let Some(ref item) = item_opt {
-            let _ = self.ws_tx.send(ChannelAMessage::Event(item.clone()));
+            let _ = self
+                .ws_tx
+                .send(ChannelAMessage::Event(Box::new(item.clone())));
         }
 
         item_opt
@@ -384,7 +388,11 @@ mod tests {
             msg_type: Some(5),
             ..mk_raw(5, "mutual_follow", "互粉了直播间")
         });
-        hub.push_event(&mk_raw(6, "gift", "牛哇 x1"));
+        hub.push_event(&RawBiliEvent {
+            batch_combo_id: Some("combo:gift:1".to_string()),
+            combo_stay_time: 5,
+            ..mk_raw(6, "gift", "牛哇 x1")
+        });
         hub.push_event(&mk_raw(7, "superchat", "加油"));
 
         // Verify all 7 events were pushed live over /ws
@@ -397,10 +405,14 @@ mod tests {
             "gift",
             "superchat",
         ] {
-            assert!(matches!(
-                ws_rx.try_recv(),
-                Ok(ChannelAMessage::Event(item)) if item.kind == expected_kind
-            ));
+            let msg = ws_rx.try_recv().unwrap();
+            assert!(matches!(&msg, ChannelAMessage::Event(item) if item.kind == expected_kind));
+            if let ChannelAMessage::Event(item) = msg
+                && item.kind == "gift"
+            {
+                assert_eq!(item.batch_combo_id.as_deref(), Some("combo:gift:1"));
+                assert_eq!(item.combo_stay_time, 5);
+            }
         }
 
         // Snapshot ring buffer (cap 2) holds only the latest 2 core visual events (`gift`, `superchat`)

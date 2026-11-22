@@ -1,4 +1,4 @@
-(function() {
+(function () {
     const scPinBar = document.getElementById('sc-pin-bar');
     const container = document.getElementById('danmaku-container');
     const enterDock = document.getElementById('enter-dock');
@@ -11,7 +11,25 @@
     const RECENT_GIFT_TAIL_LIMIT = 8;
     const SCROLL_BOTTOM_THRESHOLD_PX = 24;
     const FADE_MS = 280;
-    const DEFAULT_AVATAR_SVG = Dambo.utils.DEFAULT_AVATAR_SVG;
+
+    const INTERACT_ICONS = {
+        guard_enter: '⚓',
+        follow: '❤️',
+        special_follow: '⭐',
+        mutual_follow: '🤝',
+        share: '🔗',
+        like: '👍',
+    };
+
+    const SYSTEM_EVENT_SPECS = {
+        live: { icon: '🟢', fallback: '直播开始', alert: false },
+        preparing: { icon: '🌙', fallback: '主播下播', alert: false },
+        room_change: { icon: '📢', prefix: '房间变更：', fallback: '房间信息变更', alert: false },
+        room_silent: { icon: '🔇', fallback: '房间禁言状态变更', alert: false },
+        room_block: { icon: '🚫', includeUname: true, fallback: '被禁言', alert: true },
+        warning: { icon: '⚠️', fallback: '系统警告', alert: true },
+        cut_off: { icon: '⚠️', fallback: '直播已切断', alert: true },
+    };
 
     const timerBag = Dambo.utils.createTimerBag();
     const autoScroll = Dambo.utils.createAutoScroll(container, {
@@ -19,18 +37,11 @@
     });
     const comboEntriesByEl = new WeakMap();
     const seenPinKeys = new Set();
-    let enterDismissTimer = null;
-    let enterRemoveTimer = null;
+    let enterTimers = [];
 
     function clearEnterTimers() {
-        if (enterDismissTimer !== null) {
-            clearTimeout(enterDismissTimer);
-            enterDismissTimer = null;
-        }
-        if (enterRemoveTimer !== null) {
-            clearTimeout(enterRemoveTimer);
-            enterRemoveTimer = null;
-        }
+        enterTimers.forEach((id) => clearTimeout(id));
+        enterTimers = [];
     }
 
     function clearAllState() {
@@ -49,61 +60,77 @@
         }
     }
 
-    function appendAvatar(parentEl, faceUrl) {
-        parentEl.appendChild(Dambo.utils.createAvatar(faceUrl, 'avatar'));
-    }
-
-    function appendMedal(parentEl, item) {
-        if (!item.medal_name) return;
-        const medal = document.createElement('span');
-        medal.className = 'medal-badge';
-        medal.innerText = `${item.medal_name} ${item.medal_level || ''}`.trim();
-        parentEl.appendChild(medal);
-    }
-
-    function appendGuardBadge(parentEl, item) {
-        const guardName = Dambo.utils.guardLevelName(item?.guard_level);
-        if (!guardName) return false;
-        const badge = document.createElement('span');
-        badge.className = `guard-role-badge guard-level-${Number(item.guard_level)}`;
-        badge.innerText = `⚓ ${guardName}`;
-        parentEl.appendChild(badge);
-        return true;
-    }
-
-    function appendUserIdentity(parentEl, item, options = {}) {
-        const showAvatar = options !== false && options?.showAvatar !== false;
-        const showGuard = options?.showGuard !== false;
-        const showColon = Boolean(options?.showColon);
-
-        const identity = document.createElement('span');
-        identity.className = showColon ? 'user-identity has-colon' : 'user-identity';
-        if (showAvatar) {
-            appendAvatar(identity, item.face);
-        }
-        appendMedal(identity, item);
-        if (showGuard) {
-            appendGuardBadge(identity, item);
-        }
-        const name = document.createElement('span');
-        name.className = 'sender-name';
-        name.innerText = item.uname || 'Viewer';
-        identity.appendChild(name);
-        if (showColon) {
-            appendSpan(identity, 'name-colon', '：');
-        }
-        parentEl.appendChild(identity);
-    }
-
-    function appendSpan(parentEl, className, text) {
+    function createSpan(className, text) {
         const span = document.createElement('span');
         span.className = className;
         span.innerText = text;
+        return span;
+    }
+
+    function appendSpan(parentEl, className, text) {
+        const span = createSpan(className, text);
         parentEl.appendChild(span);
         return span;
     }
 
-    function appendContentWithEmotes(parentEl, item) {
+    function replayClassAnimation(el, className) {
+        if (!el) return;
+        el.classList.remove(className);
+        // Force synchronous reflow so consecutive updates restart CSS animation
+        void el.offsetWidth;
+        el.classList.add(className);
+    }
+
+    function buildUserIdentity(item, options = {}) {
+        const showAvatar = options.showAvatar !== false;
+        const showMedal = options.showMedal !== false;
+        const showGuard = options.showGuard !== false;
+        const showColon = Boolean(options.showColon);
+
+        const identity = document.createElement('span');
+        identity.className = showColon ? 'user-identity has-colon' : 'user-identity';
+
+        if (showAvatar) {
+            if (options.avatarFallbackIcon && !item.face) {
+                appendSpan(identity, 'event-icon', options.avatarFallbackIcon);
+            } else {
+                const avatar = Dambo.utils.createAvatar(item, 'avatar');
+                if (options.avatarFallbackIcon) {
+                    avatar.onerror = () => {
+                        avatar.replaceWith(createSpan('event-icon', options.avatarFallbackIcon));
+                    };
+                }
+                identity.appendChild(avatar);
+            }
+        }
+
+        if (showMedal && item.medal_name) {
+            appendSpan(
+                identity,
+                'medal-badge',
+                `${item.medal_name} ${item.medal_level || ''}`.trim()
+            );
+        }
+
+        if (showGuard) {
+            const guardName = Dambo.utils.guardLevelName(item?.guard_level);
+            if (guardName) {
+                appendSpan(
+                    identity,
+                    `guard-role-badge guard-level-${Number(item.guard_level)}`,
+                    `⚓ ${guardName}`
+                );
+            }
+        }
+
+        appendSpan(identity, 'sender-name', item.uname || item.username || 'Viewer');
+        if (showColon) {
+            appendSpan(identity, 'name-colon', '：');
+        }
+        return identity;
+    }
+
+    function renderTextOrEmotes(parentEl, item) {
         Dambo.utils.renderContent(parentEl, item, {
             stickerClass: 'danmaku-sticker',
             emotClass: 'danmaku-emot',
@@ -116,47 +143,33 @@
         const delayMs = Dambo.utils.remainingDurationMs(item, ENTER_TTL_MS, {
             isSnapshot: Boolean(options?.isSnapshot),
         });
-        if (delayMs <= 0) {
-            return;
-        }
+        if (delayMs <= 0) return;
 
         clearEnterTimers();
         enterDock.innerHTML = '';
 
-        const div = document.createElement('div');
-        div.className = 'danmaku-item item-enter';
+        const row = document.createElement('div');
+        row.className = 'item-enter';
+        row.appendChild(
+            buildUserIdentity(item, {
+                showAvatar: true,
+                avatarFallbackIcon: '👋',
+            })
+        );
+        appendSpan(row, 'event-action', Dambo.utils.formatInteract(item).summaryText);
+        enterDock.appendChild(row);
 
-        if (item.face) {
-            const avatar = Dambo.utils.createAvatar(item.face, 'avatar');
-            avatar.onerror = () => {
-                const icon = document.createElement('span');
-                icon.className = 'event-icon';
-                icon.innerText = '👋';
-                avatar.replaceWith(icon);
-            };
-            div.appendChild(avatar);
-        } else {
-            appendSpan(div, 'event-icon', '👋');
-        }
-
-        appendMedal(div, item);
-        appendGuardBadge(div, item);
-        appendSpan(div, 'sender-name', item.uname || 'Viewer');
-        appendSpan(div, 'event-action', item.content || '进入直播间');
-
-        enterDock.appendChild(div);
-
-        enterDismissTimer = setTimeout(() => {
-            enterDismissTimer = null;
-            if (!div.isConnected) return;
-            div.classList.add('fade-out');
-            enterRemoveTimer = setTimeout(() => {
-                enterRemoveTimer = null;
-                if (div.parentElement === enterDock) {
-                    div.remove();
+        const dismissId = setTimeout(() => {
+            if (!row.isConnected) return;
+            row.classList.add('fade-out');
+            const removeId = setTimeout(() => {
+                if (row.parentElement === enterDock) {
+                    row.remove();
                 }
             }, FADE_MS);
+            enterTimers.push(removeId);
         }, delayMs);
+        enterTimers.push(dismissId);
     }
 
     function pinnedHighlightKey(item) {
@@ -186,7 +199,7 @@
 
         const header = document.createElement('div');
         header.className = 'sc-pin-header';
-        appendUserIdentity(header, item, { showAvatar: true, showGuard: !isGuard });
+        header.appendChild(buildUserIdentity(item, { showAvatar: true, showGuard: !isGuard }));
         const cnyText = Dambo.utils.formatPrice(item.price);
         const badgeText = isGuard
             ? (cnyText ? `⚓ ${guardInfo.badgeLabel} ${cnyText}` : `⚓ ${guardInfo.badgeLabel}`)
@@ -201,7 +214,7 @@
             if (isGuard && !item.emoticon) {
                 body.innerText = bodyText;
             } else {
-                appendContentWithEmotes(body, item);
+                renderTextOrEmotes(body, item);
             }
             card.appendChild(body);
         }
@@ -244,42 +257,18 @@
         return `× ${Math.max(1, Math.floor(totalCount))}`;
     }
 
-    function triggerGiftComboPulse(el) {
-        if (!el) return;
-        el.classList.remove('is-pulsing');
-        // Force synchronous reflow so consecutive combos replay the pulse animation
-        void el.offsetWidth;
-        el.classList.add('is-pulsing');
-    }
-
-    function triggerGiftRelocateHighlight(el) {
-        if (!el) return;
-        el.classList.remove('is-relocated');
-        void el.offsetWidth;
-        el.classList.add('is-relocated');
-    }
-
-    function countItemsAfter(el) {
-        let count = 0;
-        let cur = el.nextElementSibling;
-        while (cur) {
-            count++;
-            cur = cur.nextElementSibling;
-        }
-        return count;
-    }
-
     function shouldRelocateGiftToBottom(el) {
-        if (!el || !container || el.parentElement !== container) return false;
-        if (!el.nextElementSibling) return false;
-        if (countItemsAfter(el) >= RECENT_GIFT_TAIL_LIMIT) return true;
-
+        if (!el || !container || el.parentElement !== container || !el.nextElementSibling) {
+            return false;
+        }
+        let afterCount = 0;
+        for (let cur = el.nextElementSibling; cur; cur = cur.nextElementSibling) {
+            afterCount++;
+            if (afterCount >= RECENT_GIFT_TAIL_LIMIT) return true;
+        }
         const cRect = container.getBoundingClientRect();
         const eRect = el.getBoundingClientRect();
-        if (cRect.height > 0 && eRect.height > 0 && eRect.top < cRect.top - 2) {
-            return true;
-        }
-        return false;
+        return cRect.height > 0 && eRect.height > 0 && eRect.top < cRect.top - 2;
     }
 
     function pruneOverflowItems() {
@@ -299,11 +288,8 @@
         const div = document.createElement('div');
         div.className = 'danmaku-item item-gift';
 
-        appendAvatar(div, item.face);
-        appendMedal(div, item);
-        appendGuardBadge(div, item);
         appendSpan(div, 'event-badge badge-gift', '🎁');
-        appendSpan(div, 'sender-name', item.uname || item.username || 'Viewer');
+        div.appendChild(buildUserIdentity(item));
         appendSpan(div, 'event-action', '送出了');
         appendSpan(div, 'event-highlight', giftName);
         const countEl = appendSpan(div, 'gift-combo-count', formatGiftComboCount(initialCount));
@@ -313,25 +299,23 @@
         if (cny) {
             priceEl = appendSpan(div, 'price-badge', cny);
         }
-
         return { el: div, countEl, priceEl };
     }
 
     function updateGiftPriceBadge(entry) {
-        if (entry.coinType !== 'gold') return;
-        const ui = entry.data;
-        if (!ui) return;
+        if (entry.coinType !== 'gold' || !entry.data) return;
         const cny = Dambo.utils.formatPrice(entry.totalPriceSeeds);
         if (!cny) return;
-        if (!ui.priceEl) {
-            ui.priceEl = appendSpan(ui.el, 'price-badge', cny);
+        if (!entry.data.priceEl) {
+            entry.data.priceEl = appendSpan(entry.data.el, 'price-badge', cny);
         } else {
-            ui.priceEl.innerText = cny;
+            entry.data.priceEl.innerText = cny;
         }
     }
 
     const giftCombos = Dambo.utils.createGiftComboTracker({
         windowMs: GIFT_COMBO_WINDOW_MS,
+        useServerComboStayTime: true,
         canMerge: (entry) => Boolean(entry.data && entry.data.el && entry.data.el.isConnected),
         onCreate: (entry, item, opts) => {
             const isSnapshot = Boolean(opts?.isSnapshot);
@@ -350,7 +334,7 @@
             pruneOverflowItems();
 
             if (ui.el.isConnected && !isSnapshot) {
-                triggerGiftComboPulse(ui.countEl);
+                replayClassAnimation(ui.countEl, 'is-pulsing');
             }
             autoScroll.schedule();
         },
@@ -362,7 +346,7 @@
             if (shouldRelocateGiftToBottom(ui.el)) {
                 container.appendChild(ui.el);
                 if (!isSnapshot) {
-                    triggerGiftRelocateHighlight(ui.el);
+                    replayClassAnimation(ui.el, 'is-relocated');
                 }
             }
 
@@ -370,7 +354,7 @@
             updateGiftPriceBadge(entry);
 
             if (!isSnapshot) {
-                triggerGiftComboPulse(ui.countEl);
+                replayClassAnimation(ui.countEl, 'is-pulsing');
             }
             autoScroll.schedule();
         },
@@ -382,31 +366,17 @@
         },
     });
 
-    function upsertGiftItem(item, options = {}) {
-        giftCombos.push(item, options);
-    }
-
-    function buildHighlightedEvent(item, spec) {
+    function buildGuardItem(item) {
+        const guardInfo = Dambo.utils.formatGuard(item);
         const div = document.createElement('div');
-        div.className = `danmaku-item item-${spec.kind}`;
+        div.className = 'danmaku-item item-guard';
 
-        appendAvatar(div, item.face);
-        appendMedal(div, item);
-        if (spec.kind !== 'guard') {
-            appendGuardBadge(div, item);
+        appendSpan(div, 'event-badge badge-guard', `⚓ ${guardInfo.badgeLabel}`);
+        div.appendChild(buildUserIdentity(item, { showGuard: false }));
+        if (guardInfo.actionText) {
+            appendSpan(div, 'event-action', guardInfo.actionText);
         }
-        appendSpan(div, `event-badge ${spec.badgeClass}`, spec.badgeText);
-        appendSpan(div, 'sender-name', item.uname || 'Viewer');
-        if (spec.actionText) {
-            appendSpan(div, 'event-action', spec.actionText);
-        }
-        appendSpan(
-            div,
-            'event-highlight',
-            spec.highlightText !== undefined
-                ? spec.highlightText
-                : (item.content || spec.fallbackContent)
-        );
+        appendSpan(div, 'event-highlight', guardInfo.highlightText || '大航海');
 
         const cny = Dambo.utils.formatPrice(item.price);
         if (cny) {
@@ -421,7 +391,7 @@
 
         const header = document.createElement('div');
         header.className = 'sc-header';
-        appendUserIdentity(header, item, { showAvatar: true });
+        header.appendChild(buildUserIdentity(item));
         const priceText = Dambo.utils.formatPrice(item.price) || '¥0';
         appendSpan(header, 'price-badge price-sc', `SC ${priceText}`);
         div.appendChild(header);
@@ -429,56 +399,45 @@
         if (item.content || item.emoticon) {
             const body = document.createElement('div');
             body.className = 'sc-body';
-            appendContentWithEmotes(body, item);
+            renderTextOrEmotes(body, item);
             div.appendChild(body);
         }
         return div;
     }
 
-    function buildInteractionItem(kind, item, icon, fallbackAction) {
+    function buildInteractionItem(kind, item) {
         const div = document.createElement('div');
         div.className = `danmaku-item item-interaction item-${kind}`;
 
-        appendAvatar(div, item.face);
-        appendMedal(div, item);
-        const hasGuard = appendGuardBadge(div, item);
-        if (!(kind === 'guard_enter' && hasGuard)) {
+        const icon = INTERACT_ICONS[kind] || '👋';
+        if (!(kind === 'guard_enter' && Dambo.utils.guardLevelName(item?.guard_level))) {
             appendSpan(div, 'event-icon', icon);
         }
-        appendSpan(div, 'sender-name', item.uname || 'Viewer');
-        appendSpan(div, 'event-action', item.content || fallbackAction);
+        div.appendChild(buildUserIdentity(item));
+        const actionText =
+            kind === 'like'
+                ? item.content || '为主播点赞了'
+                : Dambo.utils.formatInteract(item).summaryText;
+        appendSpan(div, 'event-action', actionText);
         return div;
     }
 
     function buildSystemItem(kind, item) {
-        const isAlert = kind === 'warning' || kind === 'cut_off' || kind === 'room_block';
+        const spec = SYSTEM_EVENT_SPECS[kind] || { icon: '📢', fallback: '', alert: false };
         const div = document.createElement('div');
-        div.className = `danmaku-item item-system${isAlert ? ' item-alert' : ''}`;
+        div.className = `danmaku-item item-system${spec.alert ? ' item-alert' : ''}`;
 
-        let icon = '📢';
         let text = item.content || '';
-        if (kind === 'live') {
-            icon = '🟢';
-            text = text || '直播开始';
-        } else if (kind === 'preparing') {
-            icon = '🌙';
-            text = text || '主播下播';
-        } else if (kind === 'room_change') {
-            icon = '📢';
-            text = text ? `房间变更：${text}` : '房间信息变更';
-        } else if (kind === 'room_block') {
-            icon = '🚫';
+        if (spec.prefix) {
+            text = text ? `${spec.prefix}${text}` : spec.fallback;
+        } else if (spec.includeUname) {
             const uname = item.uname ? `${item.uname} ` : '';
-            text = `${uname}${text || '被禁言'}`;
-        } else if (kind === 'room_silent') {
-            icon = '🔇';
-            text = text || '房间禁言状态变更';
-        } else if (kind === 'warning' || kind === 'cut_off') {
-            icon = '⚠️';
-            text = text || (kind === 'cut_off' ? '直播已切断' : '系统警告');
+            text = `${uname}${text || spec.fallback}`;
+        } else {
+            text = text || spec.fallback;
         }
 
-        appendSpan(div, 'event-icon', icon);
+        appendSpan(div, 'event-icon', spec.icon);
         appendSpan(div, 'system-text', text);
         return div;
     }
@@ -487,11 +446,10 @@
         const div = document.createElement('div');
         div.className = 'danmaku-item item-chat';
 
-        appendUserIdentity(div, item, { showAvatar: true, showColon: true });
-
+        div.appendChild(buildUserIdentity(item, { showColon: true }));
         const content = document.createElement('span');
         content.className = 'danmaku-content';
-        appendContentWithEmotes(content, item);
+        renderTextOrEmotes(content, item);
         div.appendChild(content);
         return div;
     }
@@ -521,64 +479,25 @@
         }
 
         if (kind === 'gift') {
-            upsertGiftItem(item, options);
+            giftCombos.push(item, options);
             return;
         }
 
         let div = null;
-        switch (kind) {
-            case 'guard': {
-                const guardInfo = Dambo.utils.formatGuard(item);
-                div = buildHighlightedEvent(item, {
-                    kind: 'guard',
-                    badgeClass: 'badge-guard',
-                    badgeText: `⚓ ${guardInfo.badgeLabel}`,
-                    actionText: guardInfo.actionText,
-                    highlightText: guardInfo.highlightText,
-                    fallbackContent: '大航海',
-                });
-                break;
-            }
-            case 'superchat':
-            case 'super_chat':
-                div = buildSuperChatItem(item);
-                break;
-            case 'guard_enter':
-                div = buildInteractionItem(kind, item, '⚓', '进入直播间');
-                break;
-            case 'follow':
-                div = buildInteractionItem(kind, item, '❤️', '关注了直播间');
-                break;
-            case 'special_follow':
-                div = buildInteractionItem(kind, item, '⭐', '特别关注了直播间');
-                break;
-            case 'mutual_follow':
-                div = buildInteractionItem(kind, item, '🤝', '互粉了直播间');
-                break;
-            case 'share':
-                div = buildInteractionItem(kind, item, '🔗', '分享了直播间');
-                break;
-            case 'like':
-                div = buildInteractionItem(kind, item, '👍', '为主播点赞了');
-                break;
-            case 'live':
-            case 'preparing':
-            case 'room_change':
-            case 'room_silent':
-            case 'room_block':
-            case 'warning':
-            case 'cut_off':
-                div = buildSystemItem(kind, item);
-                break;
-            default:
-                div = buildChatItem(item);
-                break;
+        if (kind === 'guard') {
+            div = buildGuardItem(item);
+        } else if (Dambo.utils.isSuperChat(kind)) {
+            div = buildSuperChatItem(item);
+        } else if (kind in INTERACT_ICONS) {
+            div = buildInteractionItem(kind, item);
+        } else if (kind in SYSTEM_EVENT_SPECS) {
+            div = buildSystemItem(kind, item);
+        } else {
+            div = buildChatItem(item);
         }
 
         if (!div) return;
         container.appendChild(div);
-
-        // Prune older messages
         pruneOverflowItems();
         autoScroll.schedule();
     }
@@ -595,10 +514,10 @@
         if (!Array.isArray(items)) return;
 
         const now = Date.now();
-        const streamItems = items
+        items
             .filter((it) => it && it.kind !== 'enter')
-            .slice(-MAX_ITEMS);
-        streamItems.forEach((it) => renderItem(it, { isSnapshot: true }));
+            .slice(-MAX_ITEMS)
+            .forEach((it) => renderItem(it, { isSnapshot: true }));
 
         giftCombos.pruneExpiredSnapshots();
 

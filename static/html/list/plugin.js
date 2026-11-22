@@ -79,8 +79,16 @@
         if (item.medal_name) {
             const medal = document.createElement('span');
             medal.className = 'feed-medal';
-            medal.innerText = `${item.medal_name} ${item.medal_level || ''}`;
+            medal.innerText = `${item.medal_name} ${item.medal_level || ''}`.trim();
             meta.appendChild(medal);
+        }
+
+        const guardName = Dambo.utils.guardLevelName(item.guard_level);
+        if (guardName) {
+            const guardBadge = document.createElement('span');
+            guardBadge.className = 'feed-guard';
+            guardBadge.innerText = `⚓ ${guardName}`;
+            meta.appendChild(guardBadge);
         }
 
         const name = document.createElement('span');
@@ -94,12 +102,26 @@
         text.className = 'feed-text';
         if (Dambo.utils.isSuperChat(item.kind)) {
             const priceText = Dambo.utils.formatPrice(item.price) || '¥0';
-            text.innerText = `[SC ${priceText}] ${item.content}`;
+            const scPrefix = document.createElement('span');
+            scPrefix.innerText = `[SC ${priceText}] `;
+            text.appendChild(scPrefix);
+            appendChatWithEmotes(text, item);
         } else if (item.kind === 'gift') {
             text.innerText = formatGiftRowText(item);
         } else if (item.kind === 'guard') {
             const guardInfo = Dambo.utils.formatGuard(item);
             text.innerText = `[Guard] ${guardInfo.summaryText}`;
+        } else if (
+            item.kind === 'enter' ||
+            item.kind === 'follow' ||
+            item.kind === 'share' ||
+            item.kind === 'special_follow' ||
+            item.kind === 'mutual_follow' ||
+            item.kind === 'guard_enter'
+        ) {
+            text.innerText = Dambo.utils.formatInteract(item).summaryText;
+        } else if (item.kind === 'like') {
+            text.innerText = item.content || '为主播点赞了';
         } else {
             appendChatWithEmotes(text, item);
         }
@@ -109,19 +131,33 @@
         return row;
     }
 
-    function addStickySC(item) {
+    function addStickySC(item, isSnapshot) {
+        const totalMs = Dambo.utils.superChatDurationMs(item);
+        const remainingMs = Dambo.utils.remainingDurationMs(item, totalMs, {
+            isSnapshot: Boolean(isSnapshot),
+            minMs: 3000,
+        });
+        if (remainingMs <= 0) return;
+
         stickyHeader.classList.remove('hidden');
         const card = document.createElement('div');
         card.className = 'sc-card';
 
+        const isGuard = item.kind === 'guard';
+        const priceText = Dambo.utils.formatPrice(item.price);
+        const guardInfo = isGuard ? Dambo.utils.formatGuard(item) : null;
+        const headerBadge = isGuard
+            ? (priceText ? `${guardInfo.badgeLabel} ${priceText}` : guardInfo.badgeLabel)
+            : (priceText || '¥0');
+
         const uname = document.createElement('div');
         uname.className = 'uname';
-        uname.innerText = `${item.uname} (￥${(item.price || 0) / 1000})`;
+        uname.innerText = `${item.uname || 'Viewer'} (${headerBadge})`;
         card.appendChild(uname);
 
         const content = document.createElement('div');
         content.className = 'content';
-        content.innerText = item.content;
+        content.innerText = isGuard ? guardInfo.summaryText : (item.content || '');
         card.appendChild(content);
 
         const prog = document.createElement('div');
@@ -130,7 +166,6 @@
 
         stickyCards.appendChild(card);
 
-        // Auto remove after 60s
         timerBag.set(() => {
             if (card.isConnected) {
                 card.remove();
@@ -138,7 +173,7 @@
             if (stickyCards.children.length === 0) {
                 stickyHeader.classList.add('hidden');
             }
-        }, 60000);
+        }, remainingMs);
     }
 
     function pushItemToHistory(rec) {
@@ -158,6 +193,7 @@
 
     const giftCombos = Dambo.utils.createGiftComboTracker({
         windowMs: 4000,
+        useServerComboStayTime: true,
         onCreate: (entry, item, opts) => {
             const rec = {
                 ...item,
@@ -206,8 +242,8 @@
 
         const isSnapshot = Boolean(options?.isSnapshot);
 
-        if (!isSnapshot && (Dambo.utils.isSuperChat(item.kind) || item.kind === 'guard')) {
-            addStickySC(item);
+        if (Dambo.utils.isSuperChat(item.kind) || item.kind === 'guard') {
+            addStickySC(item, isSnapshot);
         }
 
         if (item.kind === 'gift') {

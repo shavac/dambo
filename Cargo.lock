@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "dambo-cli"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "dambo-core"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "dambo-ui"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",

@@ -48,6 +48,8 @@
      * @property {number=} num 礼物数量或大航海开通月数
      * @property {number=} guard_level 大航海等级（`1`=总督, `2`=提督, `3`=舰长）
      * @property {number[]=} ids 被撤回的 SuperChat ID 列表（仅 `kind === "superchat_delete"` 时出现）
+     * @property {string=} batch_combo_id 原生礼物连击批次 ID（非连击时省略）
+     * @property {number=} combo_stay_time 礼物连击停留秒数（`0` 或省略表示非连击）
      * @property {number} timestamp 13 位 Unix 毫秒时间戳
      */
 
@@ -197,7 +199,19 @@
      * @property {number} comboTotalCoin 原生连击累计金瓜子数（未提供时为 `0`）
      * @property {number} unitPrice 礼物单价（未提供时为 `0`）
      * @property {number} priceSeeds 事件金额字段 `price`（金瓜子，`0` 表示免费）
+     * @property {number} comboStayTimeMs 服务端连击停留窗口（毫秒，`0` 表示未提供）
      * @property {string} mergeKey 推荐礼物连击归并主键（优先 `batch:<batchComboId>`，否则 `combo:<user>|<gift>|<coinType>`）
+     */
+
+    /**
+     * `Dambo.utils.formatInteract` 返回的标准化互动/进房语义结构。
+     * @typedef {Object} InteractFormattedInfo
+     * @property {string} kind 标准化事件类型（`enter` | `follow` | `share` | `special_follow` | `mutual_follow` | `guard_enter`）
+     * @property {number} msgType 原始 `msg_type`（`1`~`5`，未知时为 `0`）
+     * @property {number} guardLevel 大航海等级（`1`=总督, `2`=提督, `3`=舰长, `0`=非大航海）
+     * @property {string} guardName 大航海等级名称（`'总督'` | `'提督'` | `'舰长'` | `''`）
+     * @property {string} actionText 标准化中文动作短语（如 `'进入了直播间'` | `'关注了直播间'` | `'分享了直播间'`）
+     * @property {string} summaryText 清洗后的完整展示文案（优先 `item.content`，否则回退到 `actionText`）
      */
 
     /**
@@ -219,6 +233,7 @@
      * `Dambo.utils.createGiftComboTracker(options)` 配置项。
      * @typedef {Object} GiftComboTrackerOptions
      * @property {number=} windowMs 滑动连击合并窗口（毫秒），默认 `4000`
+     * @property {boolean=} useServerComboStayTime 为 `true` 且事件包含 `combo_stay_time > 0` 时采用服务端连击停留窗口，默认 `false`
      * @property {((entry: GiftComboEntry, item: Object, opts: Object) => boolean)=} canMerge 自定义判断是否允许合并到当前条目
      * @property {((entry: GiftComboEntry, item: Object, opts: Object) => void)=} onCreate 新建连击条目回调
      * @property {((entry: GiftComboEntry, delta: {deltaCount: number, deltaPriceSeeds: number, meta: GiftFormattedInfo}, item: Object, opts: Object) => void)=} onUpdate 连击归并刷新回调
@@ -264,10 +279,7 @@
         if (trimmed.startsWith('//')) {
             return 'https:' + trimmed;
         }
-        return trimmed.replace(
-            /^http:\/\/((?:i\d|s\d)\.hdslb\.com|archive\.biliimg\.com)\//i,
-            'https://$1/'
-        );
+        return /^http:\/\//i.test(trimmed) ? 'https://' + trimmed.slice(7) : trimmed;
     }
 
     /**
@@ -362,6 +374,82 @@
             default:
                 return '';
         }
+    }
+
+    /**
+     * 标准化解析进房/关注/分享/特关/互粉/舰长进场等互动事件，统一提取 `msg_type`、`guard_level` 与兜底动作文案。
+     * @param {SnapshotItem | EventItem | null | undefined} item
+     * @returns {InteractFormattedInfo}
+     */
+    function formatInteract(item) {
+        const obj = item && typeof item === 'object' ? item : {};
+        const rawMsgType = Number(obj.msg_type || 0);
+        const msgType = Number.isFinite(rawMsgType) && rawMsgType > 0 ? Math.floor(rawMsgType) : 0;
+        let kind = typeof obj.kind === 'string' && obj.kind.trim() ? obj.kind.trim() : '';
+
+        if (!kind) {
+            switch (msgType) {
+                case 1:
+                    kind = 'enter';
+                    break;
+                case 2:
+                    kind = 'follow';
+                    break;
+                case 3:
+                    kind = 'share';
+                    break;
+                case 4:
+                    kind = 'special_follow';
+                    break;
+                case 5:
+                    kind = 'mutual_follow';
+                    break;
+                default:
+                    kind = 'enter';
+                    break;
+            }
+        }
+
+        const rawGuard = Number(obj.guard_level || 0);
+        const guardName = guardLevelName(rawGuard);
+        const guardLevel = guardName ? Math.floor(rawGuard) : 0;
+
+        let actionText;
+        switch (kind) {
+            case 'follow':
+                actionText = '关注了直播间';
+                break;
+            case 'share':
+                actionText = '分享了直播间';
+                break;
+            case 'special_follow':
+                actionText = '特别关注了直播间';
+                break;
+            case 'mutual_follow':
+                actionText = '互粉了直播间';
+                break;
+            case 'guard_enter':
+                actionText = guardName ? '欢迎' + guardName + '进入直播间' : '进入了直播间';
+                break;
+            case 'enter':
+            default:
+                actionText = '进入了直播间';
+                break;
+        }
+
+        const rawContent =
+            typeof obj.content === 'string'
+                ? obj.content.replace(/<%/g, '').replace(/%>/g, '').trim()
+                : '';
+
+        return {
+            kind: kind,
+            msgType: msgType,
+            guardLevel: guardLevel,
+            guardName: guardName,
+            actionText: actionText,
+            summaryText: rawContent || actionText,
+        };
     }
 
     /**
@@ -489,6 +577,9 @@
             Number.isFinite(comboTotalCoinRaw) && comboTotalCoinRaw > 0 ? comboTotalCoinRaw : 0;
         var unitPrice = Number.isFinite(unitPriceRaw) && unitPriceRaw > 0 ? unitPriceRaw : 0;
         var priceSeeds = Number.isFinite(priceRaw) && priceRaw > 0 ? priceRaw : 0;
+        var rawStaySec = Number(obj.combo_stay_time);
+        var comboStayTimeMs =
+            Number.isFinite(rawStaySec) && rawStaySec > 0 ? Math.round(rawStaySec * 1000) : 0;
 
         var coinType;
         if (rawCoin === 'silver' || rawCoin === 'free') {
@@ -518,6 +609,7 @@
             comboTotalCoin: comboTotalCoin,
             unitPrice: unitPrice,
             priceSeeds: priceSeeds,
+            comboStayTimeMs: comboStayTimeMs,
             mergeKey: mergeKey,
         };
     }
@@ -530,6 +622,7 @@
         var opts = options || {};
         var rawWin = opts.windowMs === undefined ? 4000 : Number(opts.windowMs);
         var windowMs = Number.isFinite(rawWin) && rawWin > 0 ? rawWin : 4000;
+        var useServerComboStayTime = Boolean(opts.useServerComboStayTime);
         var canMerge = typeof opts.canMerge === 'function' ? opts.canMerge : null;
         var onCreate = typeof opts.onCreate === 'function' ? opts.onCreate : null;
         var onUpdate = typeof opts.onUpdate === 'function' ? opts.onUpdate : null;
@@ -537,6 +630,13 @@
 
         /** @type {Map<string, any>} */
         var active = new Map();
+
+        function resolveEntryWindowMs(meta) {
+            if (useServerComboStayTime && meta && meta.comboStayTimeMs > 0) {
+                return meta.comboStayTimeMs;
+            }
+            return windowMs;
+        }
 
         function computeDelta(entry, meta) {
             var deltaCount;
@@ -601,9 +701,10 @@
                 clearTimeout(entry._timerId);
                 entry._timerId = null;
             }
-            var delayMs = windowMs;
+            var entryWindowMs = entry._windowMs > 0 ? entry._windowMs : windowMs;
+            var delayMs = entryWindowMs;
             if (isSnapshot) {
-                delayMs = windowMs - (Date.now() - eventTimeMs);
+                delayMs = Math.min(entryWindowMs, entryWindowMs - (Date.now() - eventTimeMs));
                 if (!Number.isFinite(delayMs) || delayMs <= 0) {
                     return;
                 }
@@ -620,12 +721,14 @@
                 var callOpts = pushOptions || {};
                 var isSnapshot = Boolean(callOpts.isSnapshot);
                 var meta = formatGift(item);
+                var entryWindowMs = resolveEntryWindowMs(meta);
                 var rawTs = Number(item.timestamp);
                 var eventTimeMs = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : Date.now();
 
                 var existing = active.get(meta.mergeKey);
                 if (existing) {
-                    var staleSnapshot = isSnapshot && eventTimeMs - existing.lastEventTimeMs > windowMs;
+                    var activeWindowMs = existing._windowMs > 0 ? existing._windowMs : entryWindowMs;
+                    var staleSnapshot = isSnapshot && eventTimeMs - existing.lastEventTimeMs > activeWindowMs;
                     var blockedByCaller = canMerge ? !canMerge(existing, item, callOpts) : false;
                     if (staleSnapshot || blockedByCaller) {
                         expireEntry(existing, true);
@@ -648,6 +751,7 @@
                     existing.totalCount += delta.deltaCount;
                     existing.totalPriceSeeds += delta.deltaPriceSeeds;
                     existing.lastEventTimeMs = eventTimeMs;
+                    existing._windowMs = entryWindowMs;
                     if (meta.comboNum > 0) {
                         existing.lastComboNum = meta.comboNum;
                     }
@@ -682,6 +786,7 @@
                     lastEventTimeMs: eventTimeMs,
                     data: null,
                     _seenIds: seenIds,
+                    _windowMs: entryWindowMs,
                     _timerId: null,
                 };
 
@@ -1000,6 +1105,28 @@
         return roomState.is_live ? label : label + ' · Offline';
     }
 
+    /** @type {Map<string, string>} */
+    const EMOTS_SOURCE_CACHE = new Map();
+
+    function getEmotsRegex(keys) {
+        const sorted = keys.slice().sort(function (a, b) {
+            return b.length - a.length;
+        });
+        const cacheKey = sorted.join('\u0000');
+        let source = EMOTS_SOURCE_CACHE.get(cacheKey);
+        if (!source) {
+            source = sorted.map(escapeRegExp).join('|');
+            if (EMOTS_SOURCE_CACHE.size >= 64) {
+                const oldestKey = EMOTS_SOURCE_CACHE.keys().next().value;
+                if (oldestKey !== undefined) {
+                    EMOTS_SOURCE_CACHE.delete(oldestKey);
+                }
+            }
+            EMOTS_SOURCE_CACHE.set(cacheKey, source);
+        }
+        return new RegExp(source, 'g');
+    }
+
     /**
      * 安全地将消息正文、大表情贴图（`emoticon`）与行内文字表情（`emots`）渲染到容器 DOM 中（全程零 `innerHTML`）。
      * @param {HTMLElement} parentEl 目标容器节点
@@ -1040,10 +1167,7 @@
             return;
         }
 
-        keys.sort(function (a, b) {
-            return b.length - a.length;
-        });
-        const pattern = new RegExp(keys.map(escapeRegExp).join('|'), 'g');
+        const pattern = getEmotsRegex(keys);
         const frag = document.createDocumentFragment();
         let lastIdx = 0;
         let match;
@@ -1145,12 +1269,17 @@
                 this.on('reset', opts.onReset);
             }
 
+            this._hooksBound = false;
             this._bindLifecycleHooks();
         }
 
         /** @private */
         _bindLifecycleHooks() {
-            if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+            if (
+                this._hooksBound ||
+                typeof window === 'undefined' ||
+                typeof window.addEventListener !== 'function'
+            ) {
                 return;
             }
             const self = this;
@@ -1172,6 +1301,25 @@
             };
             window.addEventListener('online', this._onWindowOnline);
             window.addEventListener('pagehide', this._onWindowPageHide);
+            this._hooksBound = true;
+        }
+
+        /** @private */
+        _unbindLifecycleHooks() {
+            if (
+                !this._hooksBound ||
+                typeof window === 'undefined' ||
+                typeof window.removeEventListener !== 'function'
+            ) {
+                return;
+            }
+            if (this._onWindowOnline) {
+                window.removeEventListener('online', this._onWindowOnline);
+            }
+            if (this._onWindowPageHide) {
+                window.removeEventListener('pagehide', this._onWindowPageHide);
+            }
+            this._hooksBound = false;
         }
 
         /**
@@ -1247,6 +1395,7 @@
             this._manualClosed = true;
             this._clearReconnectTimer();
             this._clearConnectTimer();
+            this._unbindLifecycleHooks();
             const socket = this._ws;
             this._ws = null;
             this._setState('closed');
@@ -1273,6 +1422,7 @@
          */
         reconnect() {
             this._manualClosed = false;
+            this._bindLifecycleHooks();
             this._clearReconnectTimer();
             this._clearConnectTimer();
             this._reconnectAttempt = 0;
@@ -1555,6 +1705,7 @@
             formatGift: formatGift,
             guardLevelName: guardLevelName,
             formatGuard: formatGuard,
+            formatInteract: formatInteract,
             superChatDurationMs: superChatDurationMs,
             remainingDurationMs: remainingDurationMs,
             createAvatar: createAvatar,

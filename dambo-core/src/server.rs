@@ -536,6 +536,7 @@ mod tests {
         assert!(DAMBO_SDK_JS.contains("class DamboClient"));
         assert!(DAMBO_SDK_JS.contains("function connect(options)"));
         assert!(DAMBO_SDK_JS.contains("formatGuard: formatGuard"));
+        assert!(DAMBO_SDK_JS.contains("formatInteract: formatInteract"));
         assert!(DAMBO_SDK_JS.contains("formatGift: formatGift"));
         assert!(DAMBO_SDK_JS.contains("remainingDurationMs: remainingDurationMs"));
         assert!(DAMBO_SDK_JS.contains("createAvatar: createAvatar"));

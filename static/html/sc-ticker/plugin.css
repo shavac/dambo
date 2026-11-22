@@ -118,6 +118,24 @@ html, body {
     word-break: break-word;
 }
 
+.card-emot {
+    height: 1.35em;
+    width: auto;
+    vertical-align: -0.25em;
+    margin: 0 2px;
+    display: inline-block;
+}
+
+.card-sticker {
+    display: block;
+    height: 44px;
+    width: auto;
+    max-width: 140px;
+    object-fit: contain;
+    border-radius: 6px;
+    margin-top: 2px;
+}
+
 .card-progress-track {
     width: 100%;
     height: 3px;
