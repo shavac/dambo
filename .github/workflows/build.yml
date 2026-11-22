@@ -25,6 +25,13 @@ jobs:
             artifact_name: dambo-windows-x64
 
     steps:
+      - name: Exclude workspace from Windows Defender
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -37,13 +44,9 @@ jobs:
           cache-on-failure: "true"
           cache-all-crates: "true"
 
-
-      - name: Install NASM on Windows (for aws-lc-sys)
+      - name: Setup NASM on Windows
         if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          choco install nasm --no-progress -y
-          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        uses: ilammy/setup-nasm@v1
 
       - name: Ensure CMake on macOS
         if: matrix.os == 'macos-latest'
@@ -52,6 +55,8 @@ jobs:
           command -v cmake >/dev/null 2>&1 || brew install cmake
 
       - name: Run workspace tests
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo test --workspace
 
       - name: Build release binaries
