@@ -189,11 +189,7 @@ fn connect_host(host: &str) -> &str {
 fn plugin_url(runtime: &DamboRuntime, name: &str) -> String {
     let host = connect_host(&runtime.config.server.host);
     let port = runtime.config.server.port;
-    if name == "default" {
-        format!("http://{}:{}/default", host, port)
-    } else {
-        format!("http://{}:{}/{}", host, port, name)
-    }
+    format!("http://{}:{}/{}/", host, port, name)
 }
 
 fn build_plugin_dtos(

@@ -16,6 +16,10 @@ rec
 # --- 环境变量与敏感密钥 ---
 .env
 .env.local
+etc/config.toml
+etc/*.local.toml
+*.local.toml
+*.local.json
 *.pem
 *.key
 

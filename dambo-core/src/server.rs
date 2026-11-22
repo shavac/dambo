@@ -25,6 +25,7 @@ pub struct AppState {
     pub hub: Arc<StateHub>,
     pub event_tx: broadcast::Sender<ChannelBMessage>,
     pub html_dir: PathBuf,
+    pub cancel: CancellationToken,
 }
 
 /// Embedded official pure-Web Plugin SDK served at `GET /sdk/dambo.js`.
@@ -195,6 +196,10 @@ async fn handle_ws_a(mut socket: WebSocket, state: Arc<AppState>) {
 
     loop {
         tokio::select! {
+            _ = state.cancel.cancelled() => {
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            }
             recv = rx.recv() => {
                 match recv {
                     Ok(msg) => {
@@ -247,6 +252,10 @@ async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
 
     loop {
         tokio::select! {
+            _ = state.cancel.cancelled() => {
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            }
             recv = rx.recv() => {
                 match recv {
                     Ok(msg) => {
@@ -377,17 +386,18 @@ mod tests {
         );
         let (event_tx, _) = broadcast::channel(64);
 
+        let cancel = CancellationToken::new();
         let state = Arc::new(AppState {
             config: Arc::new(cfg),
             plugins,
             hub: hub.clone(),
             event_tx: event_tx.clone(),
             html_dir: temp_dir.clone(),
+            cancel: cancel.clone(),
         });
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let cancel = CancellationToken::new();
         let cancel_srv = cancel.clone();
         let router = build_router(state);
         let srv_handle = tokio::spawn(async move {
@@ -521,14 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sdk_reference_copy_matches_embedded_asset() {
-        let ref_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/sdk/dambo.js");
-        assert!(
-            ref_path.is_file(),
-            "Missing IDE reference SDK at {:?}",
-            ref_path
-        );
-        let ref_content = fs::read_to_string(&ref_path).unwrap();
-        assert_eq!(ref_content, DAMBO_SDK_JS);
+    fn test_embedded_sdk_exports_core_api_and_utils() {
+        assert!(!DAMBO_SDK_JS.is_empty());
+        assert!(DAMBO_SDK_JS.contains("class DamboClient"));
+        assert!(DAMBO_SDK_JS.contains("function connect(options)"));
+        assert!(DAMBO_SDK_JS.contains("formatGuard: formatGuard"));
+        assert!(DAMBO_SDK_JS.contains("remainingDurationMs: remainingDurationMs"));
+        assert!(DAMBO_SDK_JS.contains("createAvatar: createAvatar"));
+        assert!(DAMBO_SDK_JS.contains("normalizeUrl: normalizeUrl"));
     }
 }

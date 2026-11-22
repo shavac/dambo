@@ -4,9 +4,10 @@ use dambo_core::DamboRuntime;
 use dambo_core::auth::QrPollStatus;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 
 #[derive(Parser, Debug)]
-#[command(name = "dambo")]
+#[command(name = "dambo-cli")]
 #[command(
     author = "kshava",
     version,
@@ -30,7 +31,7 @@ struct Args {
     record_raw: bool,
 }
 
-async fn wait_for_shutdown_signal() -> Result<()> {
+async fn next_os_shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -47,8 +48,39 @@ async fn wait_for_shutdown_signal() -> Result<()> {
     Ok(())
 }
 
-async fn run_cli_qr_login(runtime: &DamboRuntime) -> bool {
-    let mut qr = match runtime.auth.generate_qr().await {
+fn spawn_shutdown_watcher(shutdown_tx: watch::Sender<bool>) {
+    tokio::spawn(async move {
+        if let Err(e) = next_os_shutdown_signal().await {
+            log::warn!("Failed to listen for shutdown signal: {}", e);
+            return;
+        }
+        let _ = shutdown_tx.send(true);
+
+        // Second Ctrl+C / SIGTERM force-exits if an external blocking call stalls.
+        if next_os_shutdown_signal().await.is_ok() {
+            log::warn!("⚠️ 收到第二次中断信号，强制退出 dambo-cli");
+            std::process::exit(130);
+        }
+    });
+}
+
+async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    while rx.changed().await.is_ok() {
+        if *rx.borrow() {
+            return;
+        }
+    }
+}
+
+async fn run_cli_qr_login(runtime: &DamboRuntime, shutdown_rx: &mut watch::Receiver<bool>) -> bool {
+    let qr_res = tokio::select! {
+        _ = wait_for_shutdown(shutdown_rx) => return false,
+        res = runtime.auth.generate_qr() => res,
+    };
+    let mut qr = match qr_res {
         Ok(q) => q,
         Err(e) => {
             log::warn!("⚠️ 获取 B 站登录二维码失败 ({}), 将以游客模式继续启动", e);
@@ -62,13 +94,17 @@ async fn run_cli_qr_login(runtime: &DamboRuntime) -> bool {
     let mut notified_scan = false;
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = wait_for_shutdown(shutdown_rx) => {
                 return false;
             }
             _ = tokio::time::sleep(Duration::from_secs(2)) => {}
         }
 
-        match runtime.auth.poll_qr(&qr.qrcode_key).await {
+        let poll_res = tokio::select! {
+            _ = wait_for_shutdown(shutdown_rx) => return false,
+            res = runtime.auth.poll_qr(&qr.qrcode_key) => res,
+        };
+        match poll_res {
             Ok(QrPollStatus::Waiting) => {}
             Ok(QrPollStatus::Scanned) => {
                 if !notified_scan {
@@ -78,7 +114,11 @@ async fn run_cli_qr_login(runtime: &DamboRuntime) -> bool {
             }
             Ok(QrPollStatus::Expired) => {
                 println!("⏳ 二维码已过期，正在自动刷新...");
-                match runtime.auth.generate_qr().await {
+                let fresh_res = tokio::select! {
+                    _ = wait_for_shutdown(shutdown_rx) => return false,
+                    res = runtime.auth.generate_qr() => res,
+                };
+                match fresh_res {
                     Ok(fresh) => {
                         qr = fresh;
                         notified_scan = false;
@@ -110,15 +150,12 @@ async fn run_cli_qr_login(runtime: &DamboRuntime) -> bool {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
-
+async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
     let runtime = Arc::new(DamboRuntime::from_config_path(&args.config)?);
     let log_level = runtime.config_snapshot().log.level_filter();
     let dep_level = log_level.min(log::LevelFilter::Warn);
     let default_filter = format!(
-        "{},dambo_core={},dambo={}",
+        "{},dambo_core={},dambo_cli={}",
         dep_level.as_str().to_ascii_lowercase(),
         log_level.as_str().to_ascii_lowercase(),
         log_level.as_str().to_ascii_lowercase()
@@ -128,7 +165,14 @@ async fn main() -> Result<()> {
 
     if !args.no_login {
         let should_prompt_qr = if runtime.auth.current_session().is_some() {
-            match runtime.auth.validate_session().await {
+            let val_res = tokio::select! {
+                _ = wait_for_shutdown(&mut shutdown_rx) => {
+                    log::info!("🛑 已取消登录，退出 dambo-cli");
+                    return Ok(());
+                }
+                res = runtime.auth.validate_session() => res,
+            };
+            match val_res {
                 Ok(state) if state.is_login => {
                     log::info!("✅ 已登录 B 站账号: @{} (UID: {})", state.uname, state.mid);
                     false
@@ -146,8 +190,8 @@ async fn main() -> Result<()> {
             true
         };
 
-        if should_prompt_qr && !run_cli_qr_login(&runtime).await {
-            log::info!("🛑 已取消登录，退出 dambo");
+        if should_prompt_qr && !run_cli_qr_login(&runtime, &mut shutdown_rx).await {
+            log::info!("🛑 已取消登录，退出 dambo-cli");
             return Ok(());
         }
     }
@@ -156,22 +200,70 @@ async fn main() -> Result<()> {
         runtime.set_record_raw_override(true);
     }
 
-    runtime
-        .start_with_room_override(args.room.as_deref())
-        .await?;
+    let start_res = tokio::select! {
+        _ = wait_for_shutdown(&mut shutdown_rx) => {
+            log::info!("🛑 Shutting down dambo-cli...");
+            runtime.shutdown();
+            return Ok(());
+        }
+        res = runtime.start_with_room_override(args.room.as_deref()) => res,
+    };
+    start_res?;
 
     let cfg = runtime.config_snapshot();
     let base_http = format!("http://{}:{}", cfg.server.host, cfg.server.port);
     let base_ws = format!("ws://{}:{}", cfg.server.host, cfg.server.port);
 
-    log::info!("🚀 dambo headless node started:");
+    log::info!("🚀 dambo-cli headless node started:");
     log::info!("   • OBS Overlay     : {}/", base_http);
     log::info!("   • Danmaku Monitor : {}/list", base_http);
     log::info!("   • Channel A       : {}/ws", base_ws);
     log::info!("   • Channel B       : {}/ws/event", base_ws);
 
-    wait_for_shutdown_signal().await?;
-    log::info!("🛑 Shutting down dambo...");
+    wait_for_shutdown(&mut shutdown_rx).await;
+    log::info!("🛑 Shutting down dambo-cli...");
     runtime.shutdown();
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let res = tokio_rt.block_on(async move {
+        spawn_shutdown_watcher(shutdown_tx);
+        async_main(args, shutdown_rx).await
+    });
+
+    // Bound runtime teardown so external blocking syscalls (e.g. blivedm DNS/TCP)
+    // cannot hang Ctrl-C exit after DamboRuntime::shutdown() has flushed sessions.
+    tokio_rt.shutdown_timeout(Duration::from_secs(1));
+    res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_binary_name_and_shutdown_watch() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = watch::channel(false);
+            let waiter = tokio::spawn(async move {
+                wait_for_shutdown(&mut rx).await;
+            });
+            let _ = tx.send(true);
+            tokio::time::timeout(Duration::from_millis(200), waiter)
+                .await
+                .unwrap()
+                .unwrap();
+        });
+    }
 }

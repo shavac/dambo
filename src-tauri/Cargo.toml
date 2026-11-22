@@ -1,6 +1,8 @@
 [package]
 name = "dambo-ui"
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "dambo ui"
 authors = ["kshava"]
 edition = "2024"

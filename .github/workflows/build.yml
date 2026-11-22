@@ -94,14 +94,12 @@ jobs:
           mkdir -p "$STAGE_DIR"
 
           ditto Dambo.app "$STAGE_DIR/Dambo.app"
-          cp target/release/dambo "$STAGE_DIR/dambo"
-          chmod +x "$STAGE_DIR/dambo"
-          mkdir -p "$STAGE_DIR/etc" "$STAGE_DIR/docs/sdk"
-          cp etc/config.toml "$STAGE_DIR/etc/config.toml"
-          cp README.md README.md.zh "$STAGE_DIR/"
+          cp target/release/dambo-cli "$STAGE_DIR/dambo-cli"
+          chmod +x "$STAGE_DIR/dambo-cli"
+          mkdir -p "$STAGE_DIR/etc"
+          cp etc/config.sample.toml "$STAGE_DIR/etc/config.toml"
+          cp README.md README.zh.md PLUGIN_GUIDE.md PLUGIN_GUIDE.zh.md "$STAGE_DIR/"
           cp -R static "$STAGE_DIR/static"
-          cp docs/PLUGIN_SDK.md "$STAGE_DIR/docs/PLUGIN_SDK.md"
-          cp docs/sdk/dambo.js "$STAGE_DIR/docs/sdk/dambo.js"
 
       - name: Stage Windows release directory
         if: matrix.os == 'windows-latest' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
@@ -112,14 +110,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
           Copy-Item "target\release\dambo-ui.exe" -Destination "$StageDir\dambo-ui.exe"
-          Copy-Item "target\release\dambo.exe" -Destination "$StageDir\dambo.exe"
-          New-Item -ItemType Directory -Force -Path "$StageDir\etc", "$StageDir\docs\sdk" | Out-Null
-          Copy-Item "etc\config.toml" -Destination "$StageDir\etc\config.toml"
+          Copy-Item "target\release\dambo-cli.exe" -Destination "$StageDir\dambo-cli.exe"
+          New-Item -ItemType Directory -Force -Path "$StageDir\etc" | Out-Null
+          Copy-Item "etc\config.sample.toml" -Destination "$StageDir\etc\config.toml"
           Copy-Item "static" -Destination "$StageDir\static" -Recurse
           Copy-Item "README.md" -Destination "$StageDir\README.md"
-          Copy-Item "README.md.zh" -Destination "$StageDir\README.md.zh"
-          Copy-Item "docs\PLUGIN_SDK.md" -Destination "$StageDir\docs\PLUGIN_SDK.md"
-          Copy-Item "docs\sdk\dambo.js" -Destination "$StageDir\docs\sdk\dambo.js"
+          Copy-Item "README.zh.md" -Destination "$StageDir\README.zh.md"
+          Copy-Item "PLUGIN_GUIDE.md" -Destination "$StageDir\PLUGIN_GUIDE.md"
+          Copy-Item "PLUGIN_GUIDE.zh.md" -Destination "$StageDir\PLUGIN_GUIDE.zh.md"
 
       - name: Upload staged release directory
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -147,7 +145,7 @@ jobs:
           mkdir -p release-assets
           cd release-staging
 
-          chmod +x dambo-macos-arm64/dambo dambo-macos-arm64/Dambo.app/Contents/MacOS/*
+          chmod +x dambo-macos-arm64/dambo-cli dambo-macos-arm64/Dambo.app/Contents/MacOS/*
 
           for dir in dambo-*; do
             [ -d "$dir" ] || continue

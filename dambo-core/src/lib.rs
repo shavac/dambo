@@ -115,8 +115,9 @@ impl DamboRuntime {
         let effective_record_raw = state_store.record_raw().unwrap_or(cfg.record.record_raw);
         let plugins = Arc::new(PluginRegistry::new(html_dir.clone()));
 
+        let cancel = CancellationToken::new();
         let auth = Arc::new(AuthManager::new(session_path));
-        let collector = Arc::new(CollectorManager::new());
+        let collector = Arc::new(CollectorManager::with_cancel(cancel.child_token()));
         let recorder = Arc::new(Mutex::new(Recorder::new(
             cfg.record.enabled,
             effective_record_raw,
@@ -141,7 +142,7 @@ impl DamboRuntime {
             hub,
             event_engine,
             startup_auto_connect,
-            cancel: CancellationToken::new(),
+            cancel,
         }
     }
 
@@ -272,6 +273,7 @@ impl DamboRuntime {
             hub: self.hub.clone(),
             event_tx: self.event_engine.sender(),
             html_dir: self.html_dir.clone(),
+            cancel: self.cancel.child_token(),
         });
         let srv_cancel = self.cancel.child_token();
         tokio::spawn(async move {
@@ -417,6 +419,7 @@ impl DamboRuntime {
 
     pub fn shutdown(&self) {
         self.cancel.cancel();
+        self.collector.shutdown();
         if let Ok(mut rec) = self.recorder.lock() {
             let _ = rec.finish_session();
         }
@@ -744,6 +747,30 @@ mod tests {
         assert!(rt_static.initial_ui_state().connecting);
         rt_static.disconnect_room().await.unwrap();
         assert!(!rt_static.initial_ui_state().connecting);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_shutdown_cancels_collector() {
+        let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_dir =
+            std::env::temp_dir().join(format!("dambo_rt_shutdown_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("etc")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/default")).unwrap();
+
+        let cfg_path = temp_dir.join("etc/config.toml");
+        fs::write(&cfg_path, "[bilibili]\nroom_id = 0\n").unwrap();
+
+        let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        assert!(!rt.cancel.is_cancelled());
+        rt.shutdown();
+        assert!(rt.cancel.is_cancelled());
+
+        // Calling switch_room after shutdown must not spawn a new active collector loop.
+        rt.switch_room("21452505").await.unwrap();
+        assert_eq!(rt.collector.active_room_id().await, 0);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

@@ -44,16 +44,7 @@
     }
 
     function appendAvatar(parentEl, faceUrl) {
-        const avatar = document.createElement('img');
-        avatar.className = 'avatar';
-        avatar.src = faceUrl || DEFAULT_AVATAR_SVG;
-        avatar.loading = 'lazy';
-        avatar.onerror = () => {
-            if (avatar.src !== DEFAULT_AVATAR_SVG) {
-                avatar.src = DEFAULT_AVATAR_SVG;
-            }
-        };
-        parentEl.appendChild(avatar);
+        parentEl.appendChild(Dambo.utils.createAvatar(faceUrl, 'avatar'));
     }
 
     function appendMedal(parentEl, item) {
@@ -116,10 +107,10 @@
     function showEnterInDock(item, options) {
         if (!enterDock || !item) return;
 
-        const delayMs = options?.isSnapshot
-            ? ENTER_TTL_MS - (Date.now() - (item.timestamp || 0))
-            : ENTER_TTL_MS;
-        if (!Number.isFinite(delayMs) || delayMs <= 0) {
+        const delayMs = Dambo.utils.remainingDurationMs(item, ENTER_TTL_MS, {
+            isSnapshot: Boolean(options?.isSnapshot),
+        });
+        if (delayMs <= 0) {
             return;
         }
 
@@ -130,10 +121,7 @@
         div.className = 'danmaku-item item-enter';
 
         if (item.face) {
-            const avatar = document.createElement('img');
-            avatar.className = 'avatar';
-            avatar.src = item.face;
-            avatar.loading = 'lazy';
+            const avatar = Dambo.utils.createAvatar(item.face, 'avatar');
             avatar.onerror = () => {
                 const icon = document.createElement('span');
                 icon.className = 'event-icon';
@@ -178,16 +166,15 @@
         if (seenPinKeys.has(key)) return;
 
         const totalMs = Dambo.utils.superChatDurationMs(item);
-        let remainingMs = totalMs;
-        if (options?.isSnapshot) {
-            if (!item.timestamp) return;
-            remainingMs = totalMs - (Date.now() - item.timestamp);
-            if (remainingMs <= 0) return;
-            remainingMs = Math.max(3000, Math.min(totalMs, remainingMs));
-        }
+        const remainingMs = Dambo.utils.remainingDurationMs(item, totalMs, {
+            isSnapshot: Boolean(options?.isSnapshot),
+            minMs: 3000,
+        });
+        if (remainingMs <= 0) return;
         seenPinKeys.add(key);
 
         const isGuard = item.kind === 'guard';
+        const guardInfo = isGuard ? Dambo.utils.formatGuard(item) : null;
         const card = document.createElement('div');
         card.className = `sc-pin-card ${isGuard ? 'kind-guard' : 'kind-sc'}`;
 
@@ -196,12 +183,12 @@
         appendUserIdentity(header, item, { showAvatar: true, showGuard: !isGuard });
         const cnyText = Dambo.utils.formatPrice(item.price);
         const badgeText = isGuard
-            ? (cnyText ? `⚓ 舰队 ${cnyText}` : '⚓ 舰队')
+            ? (cnyText ? `⚓ ${guardInfo.badgeLabel} ${cnyText}` : `⚓ ${guardInfo.badgeLabel}`)
             : `SC ${cnyText || '¥0'}`;
         appendSpan(header, 'price-badge price-sc', badgeText);
         card.appendChild(header);
 
-        const bodyText = item.content || (isGuard ? '开通了大航海守护' : '');
+        const bodyText = isGuard ? guardInfo.summaryText : (item.content || '');
         if (bodyText || item.emoticon) {
             const body = document.createElement('div');
             body.className = 'sc-pin-body';
@@ -262,8 +249,16 @@
         }
         appendSpan(div, `event-badge ${spec.badgeClass}`, spec.badgeText);
         appendSpan(div, 'sender-name', item.uname || 'Viewer');
-        appendSpan(div, 'event-action', spec.actionText);
-        appendSpan(div, 'event-highlight', item.content || spec.fallbackContent);
+        if (spec.actionText) {
+            appendSpan(div, 'event-action', spec.actionText);
+        }
+        appendSpan(
+            div,
+            'event-highlight',
+            spec.highlightText !== undefined
+                ? spec.highlightText
+                : (item.content || spec.fallbackContent)
+        );
 
         const cny = Dambo.utils.formatPrice(item.price);
         if (cny) {
@@ -388,15 +383,18 @@
                     fallbackContent: '礼物',
                 });
                 break;
-            case 'guard':
+            case 'guard': {
+                const guardInfo = Dambo.utils.formatGuard(item);
                 div = buildHighlightedEvent(item, {
                     kind: 'guard',
                     badgeClass: 'badge-guard',
-                    badgeText: '⚓ 上舰',
-                    actionText: '开通了',
+                    badgeText: `⚓ ${guardInfo.badgeLabel}`,
+                    actionText: guardInfo.actionText,
+                    highlightText: guardInfo.highlightText,
                     fallbackContent: '大航海',
                 });
                 break;
+            }
             case 'superchat':
             case 'super_chat':
                 div = buildSuperChatItem(item);

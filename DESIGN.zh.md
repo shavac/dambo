@@ -34,7 +34,7 @@ dambo/
 │       ├── hub.rs              # Channel A: Real-time state hub & ring buffer (for /ws)
 │       ├── dam_engine.rs       # Channel B: Dam batch aggregation & spillway engine (for /ws/dam)
 │       └── server.rs           # Axum HTTP static serving (/, /list) & dual WS endpoints (/ws, /ws/dam)
-├── cli/                        # Headless CLI entrypoint ([[bin]] name = "dambo")
+├── cli/                        # Headless CLI entrypoint ([[bin]] name = "dambo-cli")
 │   ├── Cargo.toml
 │   └── src/main.rs
 ├── ui/                         # Tauri desktop frontend assets (control capsule & QR login window)
@@ -68,7 +68,7 @@ dambo/
 
 ⚬ 启动无感验活：启动时读取 dambo_session.json，携带 Cookie 请求 https://api.bilibili.com/x/web-interface/nav 校验 data.isLogin；有效则直接进入工作态，零弹窗打扰。
 ⚬ 原生置顶扫码子窗口（dambo-ui）：凭证缺失或过期时，后端动态创建独立置顶子窗口 bili-qr-login（320×380，加载 ui/login.html），请求 passport.bilibili.com/x/passport-login/web/qrcode/generate 生成矢量 SVG 二维码推送至前端；每 2 秒轮询状态（二维码过期自动刷新），手机确认后保存 SESSDATA、bili_jct、DedeUserID 至本地并自动销毁扫码子窗口。
-⚬ CLI 兜底（dambo）：无桌面环境时直接在终端打印 Unicode 字符二维码完成登录。
+⚬ CLI 兜底（dambo-cli）：无桌面环境时直接在终端打印 Unicode 字符二维码完成登录。
 ⚬ 账号切换：支持在控制面板点击账号徽章或通过托盘菜单一键登出并重新触发扫码流程。
 
 3.2 单房间采集、开播检测与人性化选房交互（Collector）

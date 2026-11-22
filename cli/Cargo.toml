@@ -1,10 +1,12 @@
 [package]
 name = "dambo-cli"
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 edition = "2024"
 
 [[bin]]
-name = "dambo"
+name = "dambo-cli"
 path = "src/main.rs"
 
 [dependencies]

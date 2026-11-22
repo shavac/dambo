@@ -1894,6 +1894,7 @@ pub struct CollectorManager {
     raw_tx: broadcast::Sender<RawBiliEvent>,
     active: Mutex<Option<ActiveCollector>>,
     http: reqwest::Client,
+    root_cancel: CancellationToken,
 }
 
 impl Default for CollectorManager {
@@ -1904,6 +1905,10 @@ impl Default for CollectorManager {
 
 impl CollectorManager {
     pub fn new() -> Self {
+        Self::with_cancel(CancellationToken::new())
+    }
+
+    pub fn with_cancel(root_cancel: CancellationToken) -> Self {
         let (raw_tx, _) = broadcast::channel(1024);
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
@@ -1914,7 +1919,13 @@ impl CollectorManager {
             raw_tx,
             active: Mutex::new(None),
             http,
+            root_cancel,
         }
+    }
+
+    /// Synchronously signal all active and future collector loops to stop.
+    pub fn shutdown(&self) {
+        self.root_cancel.cancel();
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<RawBiliEvent> {
@@ -1952,7 +1963,11 @@ impl CollectorManager {
             return;
         }
 
-        let cancel = CancellationToken::new();
+        if self.root_cancel.is_cancelled() {
+            return;
+        }
+
+        let cancel = self.root_cancel.child_token();
         let task_cancel = cancel.clone();
         let http = self.http.clone();
         let raw_tx = self.raw_tx.clone();
@@ -2209,6 +2224,9 @@ fn run_blocking_blivedm_session(
         buvid3.trim().to_string()
     };
     let effective_cookie = append_cookie_kv(cookie_str, "buvid3", &resolved_buvid);
+    if cancel.is_cancelled() {
+        return (Ok(false), state);
+    }
 
     let (server_info, auth_msg) =
         match std::panic::catch_unwind(|| init_server(&effective_cookie, &room_id_str)) {
@@ -2224,15 +2242,24 @@ fn run_blocking_blivedm_session(
             }
         };
 
+    if cancel.is_cancelled() {
+        return (Ok(false), state);
+    }
+
     let (mut ws, _resp) = match connect_result(server_info["host_list"].clone()) {
         Ok(c) => c,
         Err(e) => return (Err((format!("WS connect failed: {}", e), false)), state),
     };
 
+    if cancel.is_cancelled() {
+        let _ = ws.close(None);
+        return (Ok(false), state);
+    }
+
     if let Err(e) = ws
         .get_ref()
         .get_ref()
-        .set_read_timeout(Some(Duration::from_millis(500)))
+        .set_read_timeout(Some(Duration::from_millis(250)))
     {
         log::warn!("Failed to set read timeout on Bilibili WS socket: {}", e);
     }

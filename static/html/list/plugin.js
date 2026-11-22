@@ -64,16 +64,7 @@
         row.dataset.kind = item.kind;
         row.dataset.hasMedal = item.medal_name ? 'true' : 'false';
 
-        const avatar = document.createElement('img');
-        avatar.className = 'feed-avatar';
-        avatar.src = item.face || Dambo.utils.DEFAULT_AVATAR_SVG;
-        avatar.loading = 'lazy';
-        avatar.onerror = () => {
-            if (avatar.src !== Dambo.utils.DEFAULT_AVATAR_SVG) {
-                avatar.src = Dambo.utils.DEFAULT_AVATAR_SVG;
-            }
-        };
-        row.appendChild(avatar);
+        row.appendChild(Dambo.utils.createAvatar(item, 'feed-avatar'));
 
         const body = document.createElement('div');
         body.className = 'feed-body';
@@ -103,7 +94,8 @@
         } else if (item.kind === 'gift') {
             text.innerText = `[Gift] ${item.content}`;
         } else if (item.kind === 'guard') {
-            text.innerText = `[Guard] ${item.content}`;
+            const guardInfo = Dambo.utils.formatGuard(item);
+            text.innerText = `[Guard] ${guardInfo.summaryText}`;
         } else {
             appendChatWithEmotes(text, item);
         }
