@@ -102,7 +102,7 @@ jobs:
           chmod +x "$STAGE_DIR/dambo-cli"
           mkdir -p "$STAGE_DIR/etc"
           cp etc/config.sample.toml "$STAGE_DIR/etc/config.toml"
-          cp README.md README.zh.md PLUGIN_GUIDE.md PLUGIN_GUIDE.zh.md "$STAGE_DIR/"
+          cp README.md README.en.md PLUGIN_GUIDE.md PLUGIN_GUIDE.zh.md "$STAGE_DIR/"
           cp -R static "$STAGE_DIR/static"
 
       - name: Stage Windows release directory
@@ -119,7 +119,7 @@ jobs:
           Copy-Item "etc\config.sample.toml" -Destination "$StageDir\etc\config.toml"
           Copy-Item "static" -Destination "$StageDir\static" -Recurse
           Copy-Item "README.md" -Destination "$StageDir\README.md"
-          Copy-Item "README.zh.md" -Destination "$StageDir\README.zh.md"
+          Copy-Item "README.en.md" -Destination "$StageDir\README.en.md"
           Copy-Item "PLUGIN_GUIDE.md" -Destination "$StageDir\PLUGIN_GUIDE.md"
           Copy-Item "PLUGIN_GUIDE.zh.md" -Destination "$StageDir\PLUGIN_GUIDE.zh.md"
 

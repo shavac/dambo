@@ -219,6 +219,52 @@ static/html/<plugin-id>/
  * @property {number=} minMs 默认 `0`
  * @property {number=} now 默认 `Date.now()`
  */
+
+/**
+ * @typedef {Object} GiftFormattedInfo
+ * @property {string} giftName 标准化礼物基础名称（自动剥离末尾 `xN` / `×N` 后缀，兜底 `'礼物'`）
+ * @property {string} giftId 礼物 ID 字符串（无有效 ID 时为 `''`）
+ * @property {string} batchComboId 原生连击批次 ID（无有效 ID 时为 `''`）
+ * @property {'gold' | 'silver'} coinType 币种分类（`'gold'`=付费金瓜子, `'silver'`=免费银瓜子）
+ * @property {boolean} isPaid 是否为付费礼物（`coinType === 'gold'`）
+ * @property {number} num 单次增量数量（缺省为 `0`）
+ * @property {number} comboNum 原生连击累计数量（缺省为 `0`）
+ * @property {number} totalCoin 单次总金瓜子数（缺省为 `0`）
+ * @property {number} comboTotalCoin 原生连击累计金瓜子数（缺省为 `0`）
+ * @property {number} unitPrice 礼物单价（缺省为 `0`）
+ * @property {number} priceSeeds 事件 `price` 字段（金瓜子，`0` 表示免费）
+ * @property {string} mergeKey 推荐归并主键（优先 `'batch:<id>'`，否则 `'combo:<user>|<gift>|<coinType>'`）
+ */
+
+/**
+ * @typedef {Object} GiftComboEntry
+ * @property {string} key 归并主键
+ * @property {string} giftName 礼物基础名称
+ * @property {string} giftId 礼物 ID
+ * @property {'gold' | 'silver'} coinType 币种分类
+ * @property {number} totalCount 累计送出总数量
+ * @property {number} totalPriceSeeds 累计价值（金瓜子，`'silver'` 恒为 `0`）
+ * @property {number} lastComboNum 最近一次观测到的 `combo_num`
+ * @property {number} lastComboTotalCoin 最近一次观测到的 `combo_total_coin`
+ * @property {number} lastEventTimeMs 最近一次命中事件时间戳（毫秒）
+ * @property {*} data 插件自定义的附属状态（如 DOM 引用等）
+ */
+
+/**
+ * @typedef {Object} GiftComboTrackerOptions
+ * @property {number=} windowMs 滑动合并时间窗口（毫秒），默认 `4000`
+ * @property {((entry: GiftComboEntry, item: Object, opts: Object) => boolean)=} canMerge 合并前自定义校验钩子
+ * @property {((entry: GiftComboEntry, item: Object, opts: Object) => void)=} onCreate 新建连击条目回调
+ * @property {((entry: GiftComboEntry, delta: {deltaCount: number, deltaPriceSeeds: number, meta: GiftFormattedInfo}, item: Object, opts: Object) => void)=} onUpdate 连击刷新增量回调
+ * @property {((entry: GiftComboEntry) => void)=} onExpire 超时或显式调用 `expire()` 清理时回调
+ */
+
+/**
+ * @typedef {Object} AutoScrollOptions
+ * @property {number=} thresholdPx 判定接近底部的像素阈值，默认 `24`
+ * @property {boolean=} bindWindowResize 是否在处于跟随状态时监听 `window.resize` 自动贴底，默认 `true`
+ * @property {((following: boolean) => void)=} onStateChange 自动跟随状态切换回调
+ */
 ```
 
 ### 3.3 全局导出对象与公开签名
@@ -271,6 +317,8 @@ static/html/<plugin-id>/
          * @returns {string}
          */
         formatPrice(priceSeeds, currencySymbol),
+        /** @param {SnapshotItem | EventItem | Object | null | undefined} item @returns {GiftFormattedInfo} */
+        formatGift(item),
         /** @param {number | null | undefined} level @returns {string} 1->'总督', 2->'提督', 3->'舰长', 其余 '' */
         guardLevelName(level),
         /** @param {SnapshotItem | EventItem | null | undefined} item @returns {GuardFormattedInfo} */
@@ -281,6 +329,12 @@ static/html/<plugin-id>/
         remainingDurationMs(item, totalMs, options),
         /** @param {string | SnapshotItem | EventItem | null | undefined} faceOrItem @param {string} [className='dambo-avatar'] @returns {HTMLImageElement} */
         createAvatar(faceOrItem, className),
+        /** @param {GiftComboTrackerOptions} [options] @returns {{push(item, opts?): GiftComboEntry|null, expire(key, expectedEntry?): boolean, pruneExpiredSnapshots(): void, clear(): void, size(): number}} */
+        createGiftComboTracker(options),
+        /** @param {HTMLElement | null | undefined} containerEl @param {AutoScrollOptions} [options] @returns {{schedule(forceOpts?): void, isFollowing(): boolean, isNearBottom(): boolean, reset(): void, destroy(): void}} */
+        createAutoScroll(containerEl, options),
+        /** @returns {{set(fn, delayMs): number|null, clear(id): void, clearAll(): void, size(): number}} */
+        createTimerBag(),
         /** @param {RoomStateSnapshot | SnapshotData | null | undefined} roomState @returns {string} */
         formatRoomBadge(roomState),
         /** @param {HTMLElement} parentEl @param {SnapshotItem | EventItem | {content?: string, emoticon?: string, emots?: Object.<string, string>}} item @param {RenderContentOptions} [options] @returns {void} */
@@ -494,18 +548,19 @@ static/html/<plugin-id>/
        margin-top: auto;
    }
    ```
-   每次 `container.appendChild(div)` 后，裁剪旧节点（`while (container.children.length > MAX_ITEMS) container.removeChild(container.firstChild);`）并同步 `container.scrollTop = container.scrollHeight`。
+   每次 `container.appendChild(div)` 或原地刷新礼物连击后，裁剪旧节点（`while (container.children.length > MAX_ITEMS) container.removeChild(container.firstChild);`），并交由 `const autoScroll = Dambo.utils.createAutoScroll(container, { thresholdPx: 24 });` 调用 `autoScroll.schedule()` 在 `requestAnimationFrame` 帧末同步置底，同时自动保留用户上滑阅读历史保护。
 
-2. **快照重置与置顶卡片去重**：
-   - 在 `'snapshot'`（或 `'reset'`）回调中清理所有活跃 `setTimeout` ID、重置去重集合，并通过 `el.textContent = ''` 清空容器。
+2. **快照重置、定时器回收池与置顶卡片去重**：
+   - 使用 `const timerBag = Dambo.utils.createTimerBag()` 统一管理淡出与 TTL 定时器；在 `'snapshot'`（或 `'reset'`）回调中调用 `timerBag.clearAll()`、`giftCombos.clear()`、`autoScroll.reset()`、重置去重集合并通过 `el.textContent = ''` 清空容器。
    - 使用 `item.id != null ? 'id:' + item.id : item.kind + ':' + (item.uid || 0) + ':' + (item.timestamp || 0) + ':' + (item.content || '')` 对置顶 SC/舰长卡片去重，避免重连快照重复插入。
 
 3. **快照回放剩余寿命（TTL）计算**：
    - **置顶 SC / 舰长**：计算 `totalMs = Dambo.utils.superChatDurationMs(item)` 与 `remainingMs = Dambo.utils.remainingDurationMs(item, totalMs, { isSnapshot: Boolean(meta?.isSnapshot), minMs: 3000 })`；若 `remainingMs <= 0` 则跳过。
    - **瞬态进房停靠（`ENTER_TTL_MS = 3000`）**：计算 `delayMs = Dambo.utils.remainingDurationMs(item, ENTER_TTL_MS, { isSnapshot: Boolean(meta?.isSnapshot) })`；若 `delayMs <= 0` 则跳过。
 
-4. **上舰事件文案标准化**：
-   - 对 `kind === 'guard'` 统一调用 `const g = Dambo.utils.formatGuard(item)`，自动剥离 `<%...%>` 标记、开头重复 `${item.uname}` 及 `在主播(的)房间/直播间` 前缀，返回 `{ guardName, badgeLabel, actionText, highlightText, summaryText }`。
+4. **上舰与礼物字段标准化 / 连击滑动归并**：
+   - **上舰（`kind === 'guard'`）**：统一调用 `const g = Dambo.utils.formatGuard(item)`，自动剥离 `<%...%>` 标记、开头重复 `${item.uname}` 及 `在主播(的)房间/直播间` 前缀，返回 `{ guardName, badgeLabel, actionText, highlightText, summaryText }`。
+   - **礼物（`kind === 'gift'`）**：使用 `Dambo.utils.formatGift(item)` 提取标准化字段，或使用 `const giftCombos = Dambo.utils.createGiftComboTracker({ windowMs: 4000, onCreate, onUpdate, onExpire })` 基于 `batch_combo_id` / `combo_id` 或 `uid/uname + gift_id/gift_name + coin_type` 在 4 秒滑动窗口内完成去重、免费/付费隔离与增量/累计双模式计数；快照回放结束后调用 `giftCombos.pruneExpiredSnapshots()` 清理历史过期记录。
 
 5. **Channel B（`/ws/event`）聚合事件消费模式**：
    适用于仪表盘、语音播报（TTS）、提醒或高并发弹幕摘要场景，直接消费蓄水池聚合计数（`ev.count`）与代表用户列表（`ev.sample_users`）：

@@ -184,6 +184,56 @@
      */
 
     /**
+     * `Dambo.utils.formatGift` 返回的标准化礼物信息结构。
+     * @typedef {Object} GiftFormattedInfo
+     * @property {string} giftName 标准化礼物基础名称（自动剥离末尾 `xN` / `×N` 数量后缀）
+     * @property {string} giftId 礼物 ID 字符串（无有效 ID 时为 `''`）
+     * @property {string} batchComboId 原生连击批次 ID（无有效 ID 时为 `''`）
+     * @property {'gold' | 'silver'} coinType 币种分类（`'gold'`=付费金瓜子, `'silver'`=免费银瓜子）
+     * @property {boolean} isPaid 是否为付费礼物
+     * @property {number} num 单次增量数量（未提供时为 `0`）
+     * @property {number} comboNum 原生连击累计数量（未提供时为 `0`）
+     * @property {number} totalCoin 单次总金瓜子数（未提供时为 `0`）
+     * @property {number} comboTotalCoin 原生连击累计金瓜子数（未提供时为 `0`）
+     * @property {number} unitPrice 礼物单价（未提供时为 `0`）
+     * @property {number} priceSeeds 事件金额字段 `price`（金瓜子，`0` 表示免费）
+     * @property {string} mergeKey 推荐礼物连击归并主键（优先 `batch:<batchComboId>`，否则 `combo:<user>|<gift>|<coinType>`）
+     */
+
+    /**
+     * 礼物连击追踪器中的单条活跃记录。
+     * @typedef {Object} GiftComboEntry
+     * @property {string} key 归并主键
+     * @property {string} giftName 礼物基础名称
+     * @property {string} giftId 礼物 ID
+     * @property {'gold' | 'silver'} coinType 币种分类
+     * @property {number} totalCount 累计送出总数量
+     * @property {number} totalPriceSeeds 累计价值（金瓜子，`silver` 恒为 `0`）
+     * @property {number} lastComboNum 最近一次观测到的 `combo_num`
+     * @property {number} lastComboTotalCoin 最近一次观测到的 `combo_total_coin`
+     * @property {number} lastEventTimeMs 最近一次命中事件时间戳（毫秒）
+     * @property {*} data 插件自定义的附属状态（如 DOM 引用等）
+     */
+
+    /**
+     * `Dambo.utils.createGiftComboTracker(options)` 配置项。
+     * @typedef {Object} GiftComboTrackerOptions
+     * @property {number=} windowMs 滑动连击合并窗口（毫秒），默认 `4000`
+     * @property {((entry: GiftComboEntry, item: Object, opts: Object) => boolean)=} canMerge 自定义判断是否允许合并到当前条目
+     * @property {((entry: GiftComboEntry, item: Object, opts: Object) => void)=} onCreate 新建连击条目回调
+     * @property {((entry: GiftComboEntry, delta: {deltaCount: number, deltaPriceSeeds: number, meta: GiftFormattedInfo}, item: Object, opts: Object) => void)=} onUpdate 连击归并刷新回调
+     * @property {((entry: GiftComboEntry) => void)=} onExpire 连击窗口过期或被显式清理时回调
+     */
+
+    /**
+     * `Dambo.utils.createAutoScroll(containerEl, options)` 配置项。
+     * @typedef {Object} AutoScrollOptions
+     * @property {number=} thresholdPx 判定接近底部的像素阈值，默认 `24`
+     * @property {boolean=} bindWindowResize 是否监听 `window.resize` 自动维持贴底，默认 `true`
+     * @property {((following: boolean) => void)=} onStateChange 自动跟随状态切换回调
+     */
+
+    /**
      * `Dambo.utils.remainingDurationMs` 可选配置。
      * @typedef {Object} RemainingDurationOptions
      * @property {boolean=} isSnapshot 是否为快照历史回放（为 `false` 时直接返回 `totalMs`），默认 `true`
@@ -374,6 +424,490 @@
             actionText: actionText,
             highlightText: highlightText,
             summaryText: actionText ? actionText + highlightText : highlightText,
+        };
+    }
+
+    /**
+     * 标准化解析礼物事件字段，统一提取礼物基础名称、币种（免费/付费）、数量与连击归并主键。
+     * @param {SnapshotItem | EventItem | Object | null | undefined} item
+     * @returns {GiftFormattedInfo}
+     */
+    function formatGift(item) {
+        var obj = item && typeof item === 'object' ? item : {};
+        var rawBatch =
+            typeof obj.batch_combo_id === 'string' && obj.batch_combo_id.trim()
+                ? obj.batch_combo_id.trim()
+                : typeof obj.combo_id === 'string' && obj.combo_id.trim()
+                  ? obj.combo_id.trim()
+                  : '';
+        var batchComboId = rawBatch && rawBatch !== '0' ? rawBatch : '';
+
+        var uidNum = Number(obj.uid || 0);
+        var rawUname = String(obj.uname || obj.username || '').trim();
+        var userKey =
+            Number.isFinite(uidNum) && uidNum > 0
+                ? 'uid:' + Math.floor(uidNum)
+                : 'uname:' + (rawUname || 'viewer');
+
+        var explicitName = obj.gift_name || obj.giftName;
+        var giftName;
+        if (typeof explicitName === 'string' && explicitName.trim()) {
+            giftName = explicitName.trim();
+        } else {
+            var rawContent = String(obj.content || '').trim();
+            if (!rawContent) {
+                giftName = '礼物';
+            } else {
+                var stripped = rawContent.replace(/\s*[x×]\s*\d+\s*$/i, '').trim();
+                giftName = stripped || rawContent;
+            }
+        }
+
+        var rawGiftId =
+            obj.gift_id !== undefined && obj.gift_id !== null
+                ? String(obj.gift_id).trim()
+                : obj.giftId !== undefined && obj.giftId !== null
+                  ? String(obj.giftId).trim()
+                  : '';
+        var giftId = rawGiftId && rawGiftId !== '0' ? rawGiftId : '';
+        var giftKey = giftId ? 'gid:' + giftId : 'gname:' + giftName;
+
+        var rawCoin = typeof obj.coin_type === 'string' ? obj.coin_type.trim().toLowerCase() : '';
+        var numRaw = Number(
+            obj.num !== undefined ? obj.num : obj.gift_num !== undefined ? obj.gift_num : obj.count
+        );
+        var comboNumRaw = Number(obj.combo_num);
+        var totalCoinRaw = Number(obj.total_coin);
+        var comboTotalCoinRaw = Number(obj.combo_total_coin);
+        var unitPriceRaw = Number(obj.unit_price);
+        var priceRaw = Number(obj.price);
+
+        var num = Number.isFinite(numRaw) && numRaw > 0 ? Math.floor(numRaw) : 0;
+        var comboNum = Number.isFinite(comboNumRaw) && comboNumRaw > 0 ? Math.floor(comboNumRaw) : 0;
+        var totalCoin = Number.isFinite(totalCoinRaw) && totalCoinRaw > 0 ? totalCoinRaw : 0;
+        var comboTotalCoin =
+            Number.isFinite(comboTotalCoinRaw) && comboTotalCoinRaw > 0 ? comboTotalCoinRaw : 0;
+        var unitPrice = Number.isFinite(unitPriceRaw) && unitPriceRaw > 0 ? unitPriceRaw : 0;
+        var priceSeeds = Number.isFinite(priceRaw) && priceRaw > 0 ? priceRaw : 0;
+
+        var coinType;
+        if (rawCoin === 'silver' || rawCoin === 'free') {
+            coinType = 'silver';
+        } else if (rawCoin === 'gold' || rawCoin === 'paid') {
+            coinType = 'gold';
+        } else {
+            coinType =
+                comboTotalCoin > 0 || totalCoin > 0 || priceSeeds > 0 || unitPrice > 0
+                    ? 'gold'
+                    : 'silver';
+        }
+
+        var mergeKey = batchComboId
+            ? 'batch:' + batchComboId
+            : 'combo:' + userKey + '|' + giftKey + '|' + coinType;
+
+        return {
+            giftName: giftName,
+            giftId: giftId,
+            batchComboId: batchComboId,
+            coinType: coinType,
+            isPaid: coinType === 'gold',
+            num: num,
+            comboNum: comboNum,
+            totalCoin: totalCoin,
+            comboTotalCoin: comboTotalCoin,
+            unitPrice: unitPrice,
+            priceSeeds: priceSeeds,
+            mergeKey: mergeKey,
+        };
+    }
+
+    /**
+     * 创建礼物连击滑动窗口追踪器，负责主键归并、增量/累计防重算与过期定时器清理。
+     * @param {GiftComboTrackerOptions} [options]
+     */
+    function createGiftComboTracker(options) {
+        var opts = options || {};
+        var rawWin = opts.windowMs === undefined ? 4000 : Number(opts.windowMs);
+        var windowMs = Number.isFinite(rawWin) && rawWin > 0 ? rawWin : 4000;
+        var canMerge = typeof opts.canMerge === 'function' ? opts.canMerge : null;
+        var onCreate = typeof opts.onCreate === 'function' ? opts.onCreate : null;
+        var onUpdate = typeof opts.onUpdate === 'function' ? opts.onUpdate : null;
+        var onExpire = typeof opts.onExpire === 'function' ? opts.onExpire : null;
+
+        /** @type {Map<string, any>} */
+        var active = new Map();
+
+        function computeDelta(entry, meta) {
+            var deltaCount;
+            if (meta.comboNum > 0) {
+                if (!entry) {
+                    deltaCount = Math.max(meta.comboNum, meta.num || 0);
+                } else if (meta.comboNum > entry.lastComboNum) {
+                    deltaCount = meta.comboNum - entry.lastComboNum;
+                } else {
+                    deltaCount = meta.num || meta.comboNum;
+                }
+            } else {
+                deltaCount = meta.num || 1;
+            }
+
+            var deltaPriceSeeds = 0;
+            if (meta.coinType === 'gold') {
+                if (meta.comboTotalCoin > 0) {
+                    if (!entry) {
+                        deltaPriceSeeds = meta.comboTotalCoin;
+                    } else if (meta.comboTotalCoin > entry.lastComboTotalCoin) {
+                        deltaPriceSeeds = meta.comboTotalCoin - entry.lastComboTotalCoin;
+                    } else if (meta.totalCoin > 0) {
+                        deltaPriceSeeds = meta.totalCoin;
+                    } else if (meta.unitPrice > 0) {
+                        deltaPriceSeeds = meta.unitPrice * deltaCount;
+                    } else {
+                        deltaPriceSeeds = meta.priceSeeds;
+                    }
+                } else if (meta.totalCoin > 0) {
+                    deltaPriceSeeds = meta.totalCoin;
+                } else if (meta.unitPrice > 0) {
+                    deltaPriceSeeds = meta.unitPrice * deltaCount;
+                } else {
+                    deltaPriceSeeds = meta.priceSeeds;
+                }
+            }
+
+            return {
+                deltaCount: deltaCount,
+                deltaPriceSeeds: deltaPriceSeeds,
+                meta: meta,
+            };
+        }
+
+        function expireEntry(entry, notify) {
+            if (!entry) return;
+            if (entry._timerId !== null) {
+                clearTimeout(entry._timerId);
+                entry._timerId = null;
+            }
+            if (active.get(entry.key) === entry) {
+                active.delete(entry.key);
+                if (notify !== false && onExpire) {
+                    onExpire(entry);
+                }
+            }
+        }
+
+        function scheduleExpiry(entry, eventTimeMs, isSnapshot) {
+            if (entry._timerId !== null) {
+                clearTimeout(entry._timerId);
+                entry._timerId = null;
+            }
+            var delayMs = windowMs;
+            if (isSnapshot) {
+                delayMs = windowMs - (Date.now() - eventTimeMs);
+                if (!Number.isFinite(delayMs) || delayMs <= 0) {
+                    return;
+                }
+            }
+            entry._timerId = setTimeout(function () {
+                entry._timerId = null;
+                expireEntry(entry, true);
+            }, delayMs);
+        }
+
+        return {
+            push: function (item, pushOptions) {
+                if (!item || typeof item !== 'object') return null;
+                var callOpts = pushOptions || {};
+                var isSnapshot = Boolean(callOpts.isSnapshot);
+                var meta = formatGift(item);
+                var rawTs = Number(item.timestamp);
+                var eventTimeMs = Number.isFinite(rawTs) && rawTs > 0 ? rawTs : Date.now();
+
+                var existing = active.get(meta.mergeKey);
+                if (existing) {
+                    var staleSnapshot = isSnapshot && eventTimeMs - existing.lastEventTimeMs > windowMs;
+                    var blockedByCaller = canMerge ? !canMerge(existing, item, callOpts) : false;
+                    if (staleSnapshot || blockedByCaller) {
+                        expireEntry(existing, true);
+                        existing = null;
+                    }
+                }
+
+                if (existing) {
+                    if (item.id !== undefined && item.id !== null) {
+                        if (existing._seenIds.has(item.id)) {
+                            return existing;
+                        }
+                        if (existing._seenIds.size > 2000) {
+                            existing._seenIds.clear();
+                        }
+                        existing._seenIds.add(item.id);
+                    }
+
+                    var delta = computeDelta(existing, meta);
+                    existing.totalCount += delta.deltaCount;
+                    existing.totalPriceSeeds += delta.deltaPriceSeeds;
+                    existing.lastEventTimeMs = eventTimeMs;
+                    if (meta.comboNum > 0) {
+                        existing.lastComboNum = meta.comboNum;
+                    }
+                    if (meta.comboTotalCoin > 0) {
+                        existing.lastComboTotalCoin = meta.comboTotalCoin;
+                    }
+
+                    if (onUpdate) {
+                        onUpdate(existing, delta, item, callOpts);
+                    }
+                    if (active.get(existing.key) === existing) {
+                        scheduleExpiry(existing, eventTimeMs, isSnapshot);
+                    }
+                    return existing;
+                }
+
+                var initial = computeDelta(null, meta);
+                var seenIds = new Set();
+                if (item.id !== undefined && item.id !== null) {
+                    seenIds.add(item.id);
+                }
+
+                var entry = {
+                    key: meta.mergeKey,
+                    giftName: meta.giftName,
+                    giftId: meta.giftId,
+                    coinType: meta.coinType,
+                    totalCount: initial.deltaCount,
+                    totalPriceSeeds: initial.deltaPriceSeeds,
+                    lastComboNum: meta.comboNum,
+                    lastComboTotalCoin: meta.comboTotalCoin,
+                    lastEventTimeMs: eventTimeMs,
+                    data: null,
+                    _seenIds: seenIds,
+                    _timerId: null,
+                };
+
+                active.set(meta.mergeKey, entry);
+                if (onCreate) {
+                    onCreate(entry, item, callOpts);
+                }
+                if (active.get(entry.key) === entry) {
+                    scheduleExpiry(entry, eventTimeMs, isSnapshot);
+                }
+                return entry;
+            },
+            expire: function (key, expectedEntry) {
+                var target = active.get(key);
+                if (!target) return false;
+                if (expectedEntry && target !== expectedEntry) return false;
+                expireEntry(target, true);
+                return true;
+            },
+            pruneExpiredSnapshots: function () {
+                Array.from(active.values()).forEach(function (entry) {
+                    if (entry._timerId === null) {
+                        expireEntry(entry, true);
+                    }
+                });
+            },
+            clear: function () {
+                Array.from(active.values()).forEach(function (entry) {
+                    if (entry._timerId !== null) {
+                        clearTimeout(entry._timerId);
+                        entry._timerId = null;
+                    }
+                });
+                active.clear();
+            },
+            size: function () {
+                return active.size;
+            },
+        };
+    }
+
+    /**
+     * 为列表容器创建自动跟随置底控制器，支持 `rAF` 帧末置底与手动上滑阅读历史保护。
+     * @param {HTMLElement | null | undefined} containerEl
+     * @param {AutoScrollOptions} [options]
+     */
+    function createAutoScroll(containerEl, options) {
+        var opts = options || {};
+        var rawThreshold = opts.thresholdPx === undefined ? 24 : Number(opts.thresholdPx);
+        var thresholdPx = Number.isFinite(rawThreshold) && rawThreshold >= 0 ? rawThreshold : 24;
+        var bindWindowResize = opts.bindWindowResize !== false;
+        var onStateChange = typeof opts.onStateChange === 'function' ? opts.onStateChange : null;
+
+        var following = true;
+        var pendingRaf = null;
+        var unlockRaf = null;
+        var programmaticLock = false;
+        var smoothScrolling = false;
+
+        function setFollowing(next) {
+            var normalized = Boolean(next);
+            if (following === normalized) return;
+            following = normalized;
+            if (onStateChange) {
+                onStateChange(following);
+            }
+        }
+
+        function isNearBottom() {
+            if (!containerEl) return true;
+            var maxScrollTop = containerEl.scrollHeight - containerEl.clientHeight;
+            if (maxScrollTop <= 0) return true;
+            return maxScrollTop - containerEl.scrollTop <= thresholdPx;
+        }
+
+        function cancelPending() {
+            if (pendingRaf !== null) {
+                cancelAnimationFrame(pendingRaf);
+                pendingRaf = null;
+            }
+            if (unlockRaf !== null) {
+                cancelAnimationFrame(unlockRaf);
+                unlockRaf = null;
+            }
+            programmaticLock = false;
+        }
+
+        function schedule(forceOptions) {
+            if (!containerEl) return;
+            var forceOpts =
+                typeof forceOptions === 'boolean'
+                    ? { force: forceOptions }
+                    : forceOptions || {};
+            if (forceOpts.force) {
+                setFollowing(true);
+            }
+            if (!following) return;
+
+            if (forceOpts.smooth && typeof containerEl.scrollTo === 'function') {
+                cancelPending();
+                smoothScrolling = true;
+                containerEl.scrollTo({ top: containerEl.scrollHeight, behavior: 'smooth' });
+                return;
+            }
+
+            if (pendingRaf !== null) return;
+            pendingRaf = requestAnimationFrame(function () {
+                pendingRaf = null;
+                if (!containerEl || !following) return;
+                smoothScrolling = false;
+                programmaticLock = true;
+                containerEl.scrollTop = containerEl.scrollHeight;
+                if (unlockRaf !== null) {
+                    cancelAnimationFrame(unlockRaf);
+                }
+                unlockRaf = requestAnimationFrame(function () {
+                    unlockRaf = null;
+                    programmaticLock = false;
+                });
+            });
+        }
+
+        function onWheel(e) {
+            if (e && e.deltaY < 0) {
+                smoothScrolling = false;
+                cancelPending();
+                setFollowing(false);
+            } else if (e && e.deltaY > 0 && isNearBottom()) {
+                smoothScrolling = false;
+                setFollowing(true);
+            }
+        }
+
+        function onTouchStart() {
+            smoothScrolling = false;
+            if (pendingRaf !== null) {
+                cancelPending();
+            }
+        }
+
+        function onScroll() {
+            if (programmaticLock || pendingRaf !== null) return;
+            if (smoothScrolling) {
+                if (isNearBottom()) {
+                    smoothScrolling = false;
+                    setFollowing(true);
+                }
+                return;
+            }
+            setFollowing(isNearBottom());
+        }
+
+        function onWindowResize() {
+            if (following) {
+                schedule();
+            }
+        }
+
+        if (containerEl && typeof containerEl.addEventListener === 'function') {
+            containerEl.addEventListener('wheel', onWheel, { passive: true });
+            containerEl.addEventListener('touchstart', onTouchStart, { passive: true });
+            containerEl.addEventListener('scroll', onScroll, { passive: true });
+        }
+        if (bindWindowResize && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        return {
+            schedule: schedule,
+            isFollowing: function () {
+                return following;
+            },
+            isNearBottom: isNearBottom,
+            reset: function () {
+                smoothScrolling = false;
+                cancelPending();
+                setFollowing(true);
+            },
+            destroy: function () {
+                smoothScrolling = false;
+                cancelPending();
+                if (containerEl && typeof containerEl.removeEventListener === 'function') {
+                    containerEl.removeEventListener('wheel', onWheel);
+                    containerEl.removeEventListener('touchstart', onTouchStart);
+                    containerEl.removeEventListener('scroll', onScroll);
+                }
+                if (
+                    bindWindowResize &&
+                    typeof window !== 'undefined' &&
+                    typeof window.removeEventListener === 'function'
+                ) {
+                    window.removeEventListener('resize', onWindowResize);
+                }
+            },
+        };
+    }
+
+    /**
+     * 创建受控定时器回收池，便于插件在重载/快照重置时一次性释放全部待执行定时器。
+     */
+    function createTimerBag() {
+        var ids = new Set();
+        return {
+            set: function (fn, delayMs) {
+                if (typeof fn !== 'function') return null;
+                var id = setTimeout(function () {
+                    ids.delete(id);
+                    fn();
+                }, delayMs);
+                ids.add(id);
+                return id;
+            },
+            clear: function (id) {
+                if (id === null || id === undefined) return;
+                clearTimeout(id);
+                ids.delete(id);
+            },
+            clearAll: function () {
+                ids.forEach(function (id) {
+                    clearTimeout(id);
+                });
+                ids.clear();
+            },
+            size: function () {
+                return ids.size;
+            },
         };
     }
 
@@ -1018,11 +1552,15 @@
             isSuperChat: isSuperChat,
             isPaidEvent: isPaidEvent,
             formatPrice: formatPrice,
+            formatGift: formatGift,
             guardLevelName: guardLevelName,
             formatGuard: formatGuard,
             superChatDurationMs: superChatDurationMs,
             remainingDurationMs: remainingDurationMs,
             createAvatar: createAvatar,
+            createGiftComboTracker: createGiftComboTracker,
+            createAutoScroll: createAutoScroll,
+            createTimerBag: createTimerBag,
             formatRoomBadge: formatRoomBadge,
             renderContent: renderContent,
             getQueryParam: getQueryParam,

@@ -1,135 +1,128 @@
 # dambo
 
-[English](README.md) | [简体中文](README.zh.md)
+[简体中文](README.md) | [English](README.en.md)
 
-A lightweight Bilibili live-room danmaku collector, OBS overlay plugin host, lossless event recorder, and AI-ready traffic-shaping edge node built with Rust and Tauri v2.
+**dambo** 是一款开箱即用的 B 站直播间弹幕采集、OBS 透明挂件、桌面悬浮窗与无损互动录制工具，同时提供面向 AI / 机器人的实时事件流接口。
 
-Use **dambo** standalone as a transparent OBS danmaku overlay and live-stream recorder, or consume its prioritized `/ws/event` WebSocket stream in downstream bots and AI pipelines.
+无论你是需要直接在屏幕上叠加透明弹幕、用聊天框快捷发弹幕互动、玩弹幕 24 点小游戏，还是希望把直播间聊天/礼物/SC 数据自动记录存档或接入下游机器人，**dambo** 都能直接满足需求。
 
-- **Architecture & PRD**: [DESIGN.md](DESIGN.md)
-- **Plugin Development Guide**: [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)
-
----
-
-## Features
-
-- **Desktop Control Capsule & System Tray (`dambo-ui`)**
-  - Compact floating toolbar with Bilibili QR sign-in, quick room switching (My Room, Following Live, Recent Rooms, or direct URL paste), system tray controls, and live **English / 日本語 / 简体中文** switching.
-- **Hot-Reloaded OBS & Desktop Overlays**
-  - Auto-discovers web plugins under `static/html/` with ~200ms hot reload. Open any plugin as a transparent OBS Browser Source or launch it directly as an always-on-top desktop overlay window.
-- **Lossless JSONL Recording**
-  - Records 100% of live-room activity (`chat`, `superchat`, `gift`, `guard`, interactions, and room status events) into session-continuous `.jsonl` files under `var/records/`, with optional sidecar raw packet capture (`--record-raw`).
-- **Dual WebSocket Streams**
-  - **`/ws` (Visual Feed)**: Low-latency stream with snapshot history (`Snapshot`, `Event`, `RoomState`) powering OBS and desktop overlays.
-  - **`/ws/event` (AI Shaped Stream)**: 3-lane event shaping that aggregates short-message spam and gift combos into prioritized batches while passing SuperChats, Guards, and status signals immediately.
-- **Headless CLI Mode (`dambo-cli`)**
-  - Run everything in terminal or server environments without desktop GUI overhead.
+- **AI 定制插件向导**：[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)（英文版：[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)）——无需手写代码，直接上传给 AI 即可帮你生成或修改专属插件。
 
 ---
 
-## Quick Start
+## 核心功能一览
 
-### 1. Prerequisites
+- **桌面控制舱 & 系统托盘（`dambo-ui`）**
+  - 紧凑无边框悬浮控制条，支持左侧拖动位置、右侧边缘拉伸宽度、**简体中文 / 日本語 / English** 实时切换与系统托盘快捷控制。
+  - 支持 B 站手机 App **扫码登录**，一键切换 **我的直播间 / 关注开播中 / 历史房间** 或直接粘贴直播间链接。
+- **控制舱弹幕聊天框**
+  - 登录 B 站并进入直播间后，点击控制舱上的**弹幕输入按钮**即可在下方展开与控制栏等宽的输入框，随时直接向当前直播间发送弹幕。
+- **OBS 透明挂件 & 桌面置顶悬浮窗**
+  - 一键复制地址添加到 OBS Studio「浏览器」源，或直接在桌面以无边框透明置顶浮窗打开，边打游戏边看弹幕或玩互动挂件；插件目录变更后自动热重载，无需重启。
+- **开箱即用内置插件**
+  - 自带透明弹幕流（带礼物 4 秒连击归并与置底跟随）、场控监看列表、SC/大航海倒计时卡片与 **扑克 24 点弹幕抢答游戏**。
+- **全量无损事件录制 & 实时数据流**
+  - 自动将每场直播的弹幕、礼物、醒目留言（SC）、大航海、进房/关注与上下播状态保存为 `.jsonl` 文件；支持无界面命令行模式（`dambo-cli`）与双 WebSocket 数据输出（`/ws`、`/ws/event`）。
 
-- **Rust**: `1.90+` (Cargo Edition 2024)
-- **macOS**: Xcode Command Line Tools + `cmake` (`brew install cmake`)
-- **Windows**: MSVC Build Tools, WebView2 (pre-installed on Windows 10/11), and `nasm`
-- **Linux**: Tauri v2 WebKit/GTK libraries (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`)
+---
 
-### 2. Run Dambo
+## 快速上手使用
 
-**Desktop App (`dambo-ui`)**:
+### 1. 启动 Dambo
+
+- **直接下载发行版（推荐普通用户）**：从 Releases 下载对应平台的压缩包解压后，直接双击运行 **`dambo-ui`**（或 macOS 下的 `Dambo.app`），发行包已自带默认配置文件 `etc/config.toml` 与全部内置插件。
+- **命令行 / 服务器无头运行**：在终端运行 **`dambo-cli`**，适合挂机录制或纯后端消费（支持 `-c` 指定配置、`-r` 指定房间号或链接、`--no-login` 跳过扫码、`--record-raw` 录制原始数据包）。
+
+<details>
+<summary>从源码运行与贡献说明（可选）</summary>
+
+若需自行从源码运行（需 Rust 1.90+ 及 Tauri 桌面依赖）：
+
 ```bash
+# 桌面控制舱
 cargo run -p dambo-ui --release -- --config etc/config.toml
-```
 
-**Headless CLI (`dambo-cli`)**:
-```bash
+# 无头命令行模式
 cargo run -p dambo-cli --release -- --config etc/config.toml
 ```
 
-<details>
-<summary>CLI Options (<code>dambo-cli</code>)</summary>
-
-| Flag | Default | Description |
-| --- | --- | --- |
-| `-c, --config <CONFIG>` | `etc/config.toml` | Path to the read-only TOML config file |
-| `-r, --room <ROOM>` | *(from state/config)* | Room ID, short ID, or `https://live.bilibili.com/...` URL |
-| `--no-login` | `false` | Skip interactive terminal QR login prompt |
-| `--record-raw` | `false` | Capture sidecar `*_raw.jsonl` raw packet files |
+更多测试与提交约定请参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 </details>
 
-### 3. Connect a Room & Add to OBS
+### 2. 登录账号与连接直播间
 
-1. Scan the QR code with the Bilibili app when prompted (your session is saved locally in `var/session.json`).
-2. Enter a room ID / live URL, or pick directly from **My Room**, **Following Live**, or **Recent Rooms**.
-3. Open **Plugins** in the desktop capsule or System Tray:
-   - Click **Copy OBS URL** and add it as a **Browser Source** in OBS Studio (`http://localhost:3838/default` or any plugin route).
-   - Or click **Open Desktop** to float the overlay directly on your screen.
-4. *(Optional)* To view `/list` from a tablet or phone on your LAN, set `host = "0.0.0.0"` under `[server]` in `etc/config.toml`.
+1. **扫码登录**：点击控制舱左侧的账号按钮（未登录时显示灰点与 **扫码登录**），使用哔哩哔哩手机 App 扫码确认即可完成登录（会话凭证本地保存在 `var/session.json`）。
+2. **连接直播间**：
+   - 在输入框直接填入**房间号**、**短号**或 `https://live.bilibili.com/...` 直播间链接后按回车或点击 **连接**；
+   - 或点击输入框右侧下拉箭头，直接从 **我的直播间**、**关注开播中**、**历史房间** 中一键选择。
 
----
+### 3. 使用聊天框发送弹幕
 
-## Built-in Plugins & Custom Overlays
+当控制舱同时满足 **已扫码登录 B 站** 且 **已连接进入直播间** 时，控制栏上的 **弹幕气泡按钮** 会自动启用：
 
-Dambo ships with three ready-to-use web plugins in `static/html/`, powered by the embedded pure-Web SDK (`/sdk/dambo.js`):
+1. 点击弹幕按钮，控制舱正下方会平滑展开等宽的弹幕输入框（输入上限 `40` 字）。
+2. 输入内容后按 **`Enter`** 或点击 **发送** 即可立即向当前直播间发出弹幕；发送后光标保留在输入框内，方便连续回复观众。
+3. 切换去操作 OBS、游戏或其他窗口时输入框会保持展开不丢失；需要收起时，再次点击弹幕按钮、按下 **`Esc`**，或点击控制栏上的其他功能按钮即可恢复单行悬浮条。
 
-| Plugin | Route | Best For |
-| --- | --- | --- |
-| **`default`** | `/` or `/default` | Transparent OBS danmaku overlay with pinned SuperChat/Guard bar and enter dock |
-| **`list`** | `/list` | Interactive monitor feed with search/filters, scroll lock, and sticky SC header |
-| **`sc-ticker`** | `/sc-ticker` | Minimal SuperChat & Guard countdown ticker cards |
+> 未登录或尚未连接直播间时，弹幕按钮会处于禁用状态，鼠标悬停可查看当前缺失条件提示。
 
-### Creating Your Own Plugin
+### 4. 在 OBS 或桌面中使用插件
 
-Drop a folder into `static/html/<your-plugin>/` following the standard layout (`index.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus optional `assets/` for images/fonts/audio)—it appears in the UI and tray automatically without restarting Dambo.
+在控制舱点击 **插件（...）**（或在系统托盘中展开 **插件** 菜单）：
 
-See [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) for the complete SDK reference, starter templates, and self-verification rules.
+- **接入 OBS Studio**：点击插件卡片上的 **复制 OBS URL**，在 OBS 来源中新建 **浏览器** 源，粘贴地址并按下方建议尺寸设置宽高即可实现透明叠加。
+- **桌面独立悬浮查看**：点击 **桌面打开**，插件会作为透明悬浮窗直接浮在屏幕上；将鼠标移到浮窗右上角可拖动位置、切换窗口置顶或关闭（也可用 `Esc` 关闭）。
+- **多端局域网查看**：若想用同一 Wi-Fi 下的手机/平板浏览器打开监看面板（如 `/list`），可在配置文件 `etc/config.toml` 的 `[server]` 下将 `host` 改为 `"0.0.0.0"`。
 
 ---
 
-## Configuration & Endpoints
+## 内置插件说明
 
-Dambo keeps static configuration and runtime files strictly separated:
-- **`etc/config.toml`** (read-only): Copy `etc/config.sample.toml` to `etc/config.toml` when running from source (release archives already include a default `etc/config.toml`). Sets `[server]` bind address/port (`localhost:3838`), `[feed]` snapshot size & display flags, `[event]` batching thresholds, and `[record]` naming patterns (`dambo_{room_name}_%Y%m%d_%H%M%S.jsonl`). If omitted, Dambo falls back to built-in defaults.
-- **`var/`** (runtime data, gitignored): Stores `state.json` (last room, locale, history), `session.json`, `logs/`, and `records/`.
+Dambo 默认自带 4 款即开即用的网页插件：
 
-| Endpoint | Purpose |
+| 插件 | 访问路径 | 建议 OBS 尺寸 | 适用场景与玩法 |
+| --- | --- | --- | --- |
+| **`default`** | `/` 或 `/default` | `420 × 720` | **主力透明弹幕挂件**：底部进房停靠栏、顶部 SC/大航海倒计时置顶条、礼物 4 秒滑动连击归并跳动与自动跟随置底 |
+| **`list`** | `/list` | `480 × 800` | **主播 / 场控监看列表**：支持按全部 / 弹幕 / 礼物与SC / 粉丝牌筛选，向上翻看历史时自动锁屏并统计未读数 |
+| **`sc-ticker`** | `/sc-ticker` | `420 × 320` | **SC 与大航海独立卡片**：仅聚焦展示醒目留言（SC）与上舰倒计时滚动条，适合单独摆放在画面角落 |
+| **`game24`** | `/game24` | `560 × 420` | **扑克 24 点弹幕抢答游戏**：每局随机发 4 张 A–K 扑克牌，观众在弹幕发算式（如 `(3+3)*(8-4)`）抢答计分并显示排行榜；默认单局 `300s`，支持 `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` 参数定制 |
+
+---
+
+## 让 AI 帮你定制专属插件（`PLUGIN_GUIDE` 用法）
+
+想改内置挂件的字体/配色/排版，或者让直播间多一个投票器、抽奖机、点歌台或专属桌面小组件？**不需要懂前端或写代码**：
+
+1. 把仓库中的 **[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)**（如果使用英文对话请上传 **[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)**）直接上传并发送给你常用的 AI 助手。
+2. 用大白话告诉 AI 你的想法（例如：*“参考我上传的 PLUGIN_GUIDE.zh.md，帮我做一个二次元风格的礼物感谢播报条插件”*，或*“按照这份向导，给直播间做一个关键词弹幕计数器”*），**让 AI 严格依据此向导实现你的需求**即可。
+3. 在控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`），在里面新建一个文件夹并放入 AI 给你的文件（标准结构为 `index.html`、`plugin.json`、`plugin.css`、`plugin.js`，图片/字体/音效等静态资源可放同级 `assets/` 目录）。
+4. 保存后约 200ms 内控制舱会自动识别上线，**无需重启 Dambo** 即可直接在桌面打开或复制到 OBS 使用。
+
+---
+
+## 录制、常用设置与实时接口
+
+### 常见操作入口
+
+在控制舱右侧点击 **`…`（更多操作）**（或右键系统托盘图标）：
+- **窗口置顶**：让控制舱本身始终保持在最上层。
+- **录制原始包（`*_raw.jsonl`）**：在默认无损事件记录之外额外保存原始下行数据包。
+- **打开配置文件 / 录制目录 / 日志目录**：一键打开对应文件或目录，无需手动翻找路径。
+
+### 配置与数据目录说明
+
+- **`etc/config.toml`**（只读配置，从源码运行若不存在可从 [etc/config.sample.toml](etc/config.sample.toml) 复制）：
+  - `[server]`：默认监听 `localhost:3838`（局域网共享可改 `host = "0.0.0.0"`）。
+  - `[feed]`：控制快照保留条数、是否展示进房提醒（`show_enter`）及粉丝牌（`show_medal`）。
+  - `[record]`：控制是否自动录制以及文件名模板（默认保存在 `var/records/dambo_{主播名}_YYYYMMDD_HHMMSS.jsonl`）。
+- **`var/`**（运行期自动生成）：集中存放登录态 `session.json`、最近房间与语言状态 `state.json`、运行日志 `logs/` 与直播录制 `records/`。
+
+### 实时数据与挂件访问地址
+
+| 地址 | 用途说明 |
 | --- | --- |
-| `GET /` | Default OBS overlay (`static/html/default/index.html`) |
-| `GET /{plugin}` | Auto-discovered plugin entry page |
-| `GET /sdk/dambo.js` | Official zero-dependency Pure-Web Plugin SDK |
-| `GET /ws` | Channel A WebSocket — real-time overlay feed (`Snapshot`, `Event`, `RoomState`) |
-| `GET /ws/event` | Channel B WebSocket — prioritized shaped event batches (`RoomInfo`, `EventBatch`) |
-
----
-
-## Development & Packaging
-
-```bash
-# Run workspace tests
-cargo test --workspace
-
-# Run Clippy checks
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Package macOS app bundle (./Dambo.app)
-chmod +x scripts/package_macos.sh
-./scripts/package_macos.sh
-```
-
-`scripts/package_macos.sh` supports `--debug`, `--offline`, and `--skip-build`. Multi-platform CI builds and release staging are defined in [.github/workflows/build.yml](.github/workflows/build.yml).
-
-## Workspace Layout
-
-```text
-dambo/
-├── dambo-core/   # Core library: collector, auth, recorder, event engine, plugin registry, HTTP/WS server & embedded SDK
-├── cli/          # Headless CLI binary (dambo-cli)
-├── src-tauri/    # Tauri v2 desktop host, tray menu & overlay window manager (dambo-ui)
-├── ui/           # Floating control capsule & QR login frontend
-├── static/html/  # Hot-reloaded OBS & web plugins (default, list, sc-ticker, custom)
-├── etc/          # Static read-only configuration template (config.toml)
-└── scripts/      # Packaging helpers
-```
+| `GET /` 或 `GET /{插件名}` | 直接在浏览器 / OBS 中打开对应挂件页面 |
+| `GET /sdk/dambo.js` | 内置零依赖纯 Web 插件 SDK |
+| `GET /ws` | 实时视觉流 WebSocket（`Snapshot`、`Event`、`RoomState`） |
+| `GET /ws/event` | 经流量整形、刷屏合并与礼物连击结算的批次流 WebSocket（适合接入机器人、TTS 与 AI 管线） |

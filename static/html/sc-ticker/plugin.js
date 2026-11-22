@@ -3,13 +3,10 @@
     const MAX_CARDS = 8;
     const seenIds = new Set();
 
-    const activeTimers = new Set();
+    const timerBag = Dambo.utils.createTimerBag();
 
     function clearTickerState() {
-        for (const id of activeTimers) {
-            clearTimeout(id);
-        }
-        activeTimers.clear();
+        timerBag.clearAll();
         seenIds.clear();
         stack.innerHTML = '';
     }
@@ -95,16 +92,12 @@
             });
         });
 
-        const t1 = setTimeout(() => {
-            activeTimers.delete(t1);
+        timerBag.set(() => {
             card.classList.add('exiting');
-            const t2 = setTimeout(() => {
-                activeTimers.delete(t2);
+            timerBag.set(() => {
                 card.remove();
             }, 360);
-            activeTimers.add(t2);
         }, remainingMs);
-        activeTimers.add(t1);
     }
 
     const client = Dambo.connect({

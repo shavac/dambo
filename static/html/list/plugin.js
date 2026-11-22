@@ -8,10 +8,19 @@
     const roomStatusBadge = document.getElementById('room-status-badge');
 
     let currentFilter = 'all';
-    let isUserScrolledUp = false;
     let unreadCount = 0;
     let allItems = [];
     const SHOW_LIKE = Dambo.utils.getQueryBool('show_like', false);
+    const timerBag = Dambo.utils.createTimerBag();
+    const autoScroll = Dambo.utils.createAutoScroll(feedContainer, {
+        thresholdPx: 60,
+        onStateChange: (following) => {
+            if (following) {
+                unreadCount = 0;
+                scrollBottomBtn.classList.add('hidden');
+            }
+        },
+    });
 
     // Filter switching
     document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -23,25 +32,11 @@
         });
     });
 
-    // Detect user scroll position
-    feedContainer.addEventListener('scroll', () => {
-        const threshold = 60;
-        const distFromBottom = feedContainer.scrollHeight - feedContainer.scrollTop - feedContainer.clientHeight;
-        if (distFromBottom > threshold) {
-            isUserScrolledUp = true;
-        } else {
-            isUserScrolledUp = false;
-            unreadCount = 0;
-            scrollBottomBtn.classList.add('hidden');
-        }
-    });
-
     // Scroll to bottom button
     scrollBottomBtn.addEventListener('click', () => {
-        feedContainer.scrollTo({ top: feedContainer.scrollHeight, behavior: 'smooth' });
-        isUserScrolledUp = false;
         unreadCount = 0;
         scrollBottomBtn.classList.add('hidden');
+        autoScroll.schedule({ force: true, smooth: true });
     });
 
     function matchFilter(item) {
@@ -56,6 +51,15 @@
             stickerClass: 'feed-sticker',
             emotClass: 'feed-emot',
         });
+    }
+
+    function formatGiftRowText(item) {
+        const meta = Dambo.utils.formatGift(item);
+        const count = item._comboCount || meta.comboNum || meta.num || 1;
+        const name = item._giftName || meta.giftName;
+        const priceSeeds = item._comboPrice !== undefined ? item._comboPrice : meta.priceSeeds;
+        const priceText = meta.coinType === 'gold' ? Dambo.utils.formatPrice(priceSeeds) : '';
+        return priceText ? `[Gift] ${name} × ${count} (${priceText})` : `[Gift] ${name} × ${count}`;
     }
 
     function createFeedRow(item) {
@@ -92,7 +96,7 @@
             const priceText = Dambo.utils.formatPrice(item.price) || '¥0';
             text.innerText = `[SC ${priceText}] ${item.content}`;
         } else if (item.kind === 'gift') {
-            text.innerText = `[Gift] ${item.content}`;
+            text.innerText = formatGiftRowText(item);
         } else if (item.kind === 'guard') {
             const guardInfo = Dambo.utils.formatGuard(item);
             text.innerText = `[Guard] ${guardInfo.summaryText}`;
@@ -127,47 +131,96 @@
         stickyCards.appendChild(card);
 
         // Auto remove after 60s
-        setTimeout(() => {
-            card.remove();
+        timerBag.set(() => {
+            if (card.isConnected) {
+                card.remove();
+            }
             if (stickyCards.children.length === 0) {
                 stickyHeader.classList.add('hidden');
             }
         }, 60000);
     }
 
+    function pushItemToHistory(rec) {
+        allItems.push(rec);
+        if (allItems.length > 500) allItems.shift();
+    }
+
+    function notifyNewFeedRow() {
+        if (!autoScroll.isFollowing()) {
+            unreadCount++;
+            newMsgCountEl.innerText = unreadCount;
+            scrollBottomBtn.classList.remove('hidden');
+        } else {
+            autoScroll.schedule();
+        }
+    }
+
+    const giftCombos = Dambo.utils.createGiftComboTracker({
+        windowMs: 4000,
+        onCreate: (entry, item, opts) => {
+            const rec = {
+                ...item,
+                _giftName: entry.giftName,
+                _comboCount: entry.totalCount,
+                _comboPrice: entry.totalPriceSeeds,
+            };
+            pushItemToHistory(rec);
+
+            let row = null;
+            let textEl = null;
+            if (!opts?.isSnapshot && matchFilter(rec)) {
+                row = createFeedRow(rec);
+                textEl = row.querySelector('.feed-text');
+                feedList.appendChild(row);
+                notifyNewFeedRow();
+            }
+            entry.data = { record: rec, row, textEl };
+        },
+        onUpdate: (entry, _delta, _item, opts) => {
+            if (!entry.data) return;
+            entry.data.record._comboCount = entry.totalCount;
+            entry.data.record._comboPrice = entry.totalPriceSeeds;
+
+            if (!opts?.isSnapshot && entry.data.textEl && entry.data.row?.isConnected) {
+                entry.data.textEl.innerText = formatGiftRowText(entry.data.record);
+                autoScroll.schedule();
+            }
+        },
+    });
+
     function reapplyFilter() {
         feedList.innerHTML = '';
         allItems.filter(matchFilter).forEach(item => {
             feedList.appendChild(createFeedRow(item));
         });
-        if (!isUserScrolledUp) {
-            feedContainer.scrollTop = feedContainer.scrollHeight;
+        if (autoScroll.isFollowing()) {
+            autoScroll.schedule();
         }
     }
 
-    function appendItem(item) {
+    function appendItem(item, options) {
         if (!item) return;
         if (item.kind === 'like' && !SHOW_LIKE) return;
         if (item.kind === 'room_info' || item.kind === 'session_end' || item.kind === 'combo_end') return;
 
-        allItems.push(item);
-        if (allItems.length > 500) allItems.shift();
+        const isSnapshot = Boolean(options?.isSnapshot);
 
-        if (Dambo.utils.isSuperChat(item.kind) || item.kind === 'guard') {
+        if (!isSnapshot && (Dambo.utils.isSuperChat(item.kind) || item.kind === 'guard')) {
             addStickySC(item);
         }
 
-        if (matchFilter(item)) {
+        if (item.kind === 'gift') {
+            giftCombos.push(item, { isSnapshot });
+            return;
+        }
+
+        pushItemToHistory(item);
+
+        if (!isSnapshot && matchFilter(item)) {
             const row = createFeedRow(item);
             feedList.appendChild(row);
-
-            if (isUserScrolledUp) {
-                unreadCount++;
-                newMsgCountEl.innerText = unreadCount;
-                scrollBottomBtn.classList.remove('hidden');
-            } else {
-                feedContainer.scrollTop = feedContainer.scrollHeight;
-            }
+            notifyNewFeedRow();
         }
     }
 
@@ -179,9 +232,17 @@
 
     client.on('snapshot', (snapshotData) => {
         roomStatusBadge.innerText = Dambo.utils.formatRoomBadge(snapshotData);
-        allItems = (snapshotData.items || []).filter(
-            (it) => it && (it.kind !== 'like' || SHOW_LIKE)
-        );
+        timerBag.clearAll();
+        giftCombos.clear();
+        stickyCards.innerHTML = '';
+        stickyHeader.classList.add('hidden');
+        allItems = [];
+        unreadCount = 0;
+        scrollBottomBtn.classList.add('hidden');
+        autoScroll.reset();
+
+        (snapshotData.items || []).forEach((it) => appendItem(it, { isSnapshot: true }));
+        giftCombos.pruneExpiredSnapshots();
         reapplyFilter();
     });
 

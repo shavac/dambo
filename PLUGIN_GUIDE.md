@@ -222,6 +222,52 @@ static/html/<plugin-id>/
  * @property {number=} minMs default `0`
  * @property {number=} now default `Date.now()`
  */
+
+/**
+ * @typedef {Object} GiftFormattedInfo
+ * @property {string} giftName Base gift name (trailing `xN` / `×N` stripped; fallback `'礼物'`)
+ * @property {string} giftId Gift ID string (`''` when absent)
+ * @property {string} batchComboId Native combo batch ID (`''` when absent)
+ * @property {'gold' | 'silver'} coinType `'gold'` (paid) or `'silver'` (free)
+ * @property {boolean} isPaid `coinType === 'gold'`
+ * @property {number} num Incremental send quantity (`0` if omitted)
+ * @property {number} comboNum Cumulative native combo count (`0` if omitted)
+ * @property {number} totalCoin Per-event total gold seeds (`0` if omitted)
+ * @property {number} comboTotalCoin Cumulative native combo gold seeds (`0` if omitted)
+ * @property {number} unitPrice Unit price in seeds (`0` if omitted)
+ * @property {number} priceSeeds Event `price` field in gold seeds (`0` for free)
+ * @property {string} mergeKey `'batch:<id>'` or `'combo:<user>|<gift>|<coinType>'`
+ */
+
+/**
+ * @typedef {Object} GiftComboEntry
+ * @property {string} key Merge key
+ * @property {string} giftName Base gift name
+ * @property {string} giftId Gift ID
+ * @property {'gold' | 'silver'} coinType Currency classification
+ * @property {number} totalCount Accumulated gift count
+ * @property {number} totalPriceSeeds Accumulated value in gold seeds (`0` for `'silver'`)
+ * @property {number} lastComboNum Latest observed `combo_num`
+ * @property {number} lastComboTotalCoin Latest observed `combo_total_coin`
+ * @property {number} lastEventTimeMs Latest matched event timestamp (ms)
+ * @property {*} data Caller-attached state (e.g. DOM element references)
+ */
+
+/**
+ * @typedef {Object} GiftComboTrackerOptions
+ * @property {number=} windowMs Sliding merge window in ms (default `4000`)
+ * @property {((entry: GiftComboEntry, item: Object, opts: Object) => boolean)=} canMerge Guard hook before merging into an active entry
+ * @property {((entry: GiftComboEntry, item: Object, opts: Object) => void)=} onCreate Invoked when a new combo entry starts
+ * @property {((entry: GiftComboEntry, delta: {deltaCount: number, deltaPriceSeeds: number, meta: GiftFormattedInfo}, item: Object, opts: Object) => void)=} onUpdate Invoked when an existing combo entry increments
+ * @property {((entry: GiftComboEntry) => void)=} onExpire Invoked on timeout or manual `expire()`
+ */
+
+/**
+ * @typedef {Object} AutoScrollOptions
+ * @property {number=} thresholdPx Distance from bottom to stay pinned (default `24`)
+ * @property {boolean=} bindWindowResize Re-pin on `window.resize` when following (default `true`)
+ * @property {((following: boolean) => void)=} onStateChange Invoked when follow state toggles
+ */
 ```
 
 ### 3.3 Exported Global Object & Public Signatures
@@ -274,6 +320,8 @@ static/html/<plugin-id>/
          * @returns {string}
          */
         formatPrice(priceSeeds, currencySymbol),
+        /** @param {SnapshotItem | EventItem | Object | null | undefined} item @returns {GiftFormattedInfo} */
+        formatGift(item),
         /** @param {number | null | undefined} level @returns {string} 1->'总督', 2->'提督', 3->'舰长', else '' */
         guardLevelName(level),
         /** @param {SnapshotItem | EventItem | null | undefined} item @returns {GuardFormattedInfo} */
@@ -284,6 +332,12 @@ static/html/<plugin-id>/
         remainingDurationMs(item, totalMs, options),
         /** @param {string | SnapshotItem | EventItem | null | undefined} faceOrItem @param {string} [className='dambo-avatar'] @returns {HTMLImageElement} */
         createAvatar(faceOrItem, className),
+        /** @param {GiftComboTrackerOptions} [options] @returns {{push(item, opts?): GiftComboEntry|null, expire(key, expectedEntry?): boolean, pruneExpiredSnapshots(): void, clear(): void, size(): number}} */
+        createGiftComboTracker(options),
+        /** @param {HTMLElement | null | undefined} containerEl @param {AutoScrollOptions} [options] @returns {{schedule(forceOpts?): void, isFollowing(): boolean, isNearBottom(): boolean, reset(): void, destroy(): void}} */
+        createAutoScroll(containerEl, options),
+        /** @returns {{set(fn, delayMs): number|null, clear(id): void, clearAll(): void, size(): number}} */
+        createTimerBag(),
         /** @param {RoomStateSnapshot | SnapshotData | null | undefined} roomState @returns {string} */
         formatRoomBadge(roomState),
         /** @param {HTMLElement} parentEl @param {SnapshotItem | EventItem | {content?: string, emoticon?: string, emots?: Object.<string, string>}} item @param {RenderContentOptions} [options] @returns {void} */
@@ -498,18 +552,19 @@ When building feature-rich overlays (pinned SuperChat/Guard bars, enter docks, s
        margin-top: auto;
    }
    ```
-   After `container.appendChild(div)`, prune old nodes (`while (container.children.length > MAX_ITEMS) container.removeChild(container.firstChild);`) and set `container.scrollTop = container.scrollHeight`.
+   After `container.appendChild(div)` or an in-place gift combo update, prune old nodes (`while (container.children.length > MAX_ITEMS) container.removeChild(container.firstChild);`) and use `const autoScroll = Dambo.utils.createAutoScroll(container, { thresholdPx: 24 });` -> `autoScroll.schedule()` to scroll at `requestAnimationFrame` end without overriding manual scroll-up browsing.
 
-2. **Snapshot Reset & Pinned Card Deduplication**:
-   - On `'snapshot'` (or `'reset'`), clear all active `setTimeout` IDs, reset deduplication sets, and clear containers via `el.textContent = ''`.
+2. **Snapshot Reset, Timer Bag & Pinned Card Deduplication**:
+   - Use `const timerBag = Dambo.utils.createTimerBag()` for fade-out/TTL timers so `'snapshot'` (or `'reset'`) resets simply call `timerBag.clearAll()`, `giftCombos.clear()`, `autoScroll.reset()`, reset deduplication sets, and clear containers via `el.textContent = ''`.
    - Deduplicate pinned SC/Guard cards using `item.id != null ? 'id:' + item.id : item.kind + ':' + (item.uid || 0) + ':' + (item.timestamp || 0) + ':' + (item.content || '')` so reconnect snapshots do not duplicate active pins.
 
 3. **Remaining TTL Calculation on Snapshot Replay**:
    - **Pinned SC / Guard**: Compute `totalMs = Dambo.utils.superChatDurationMs(item)` and `remainingMs = Dambo.utils.remainingDurationMs(item, totalMs, { isSnapshot: Boolean(meta?.isSnapshot), minMs: 3000 })`; skip if `remainingMs <= 0`.
    - **Ephemeral Enter Dock (`ENTER_TTL_MS = 3000`)**: Compute `delayMs = Dambo.utils.remainingDurationMs(item, ENTER_TTL_MS, { isSnapshot: Boolean(meta?.isSnapshot) })`; skip if `delayMs <= 0`.
 
-4. **Guard Event Text Normalization**:
-   - Always call `const g = Dambo.utils.formatGuard(item)` for `kind === 'guard'` to strip `<%...%>` wrappers, leading `${item.uname}`, and `在主播(的)房间/直播间` prefixes, returning `{ guardName, badgeLabel, actionText, highlightText, summaryText }`.
+4. **Guard & Gift Normalization / Combo Merging**:
+   - **Guard (`kind === 'guard'`)**: Call `const g = Dambo.utils.formatGuard(item)` to strip `<%...%>` wrappers, leading `${item.uname}`, and `在主播(的)房间/直播间` prefixes, returning `{ guardName, badgeLabel, actionText, highlightText, summaryText }`.
+   - **Gift (`kind === 'gift'`)**: Use `Dambo.utils.formatGift(item)` or `const giftCombos = Dambo.utils.createGiftComboTracker({ windowMs: 4000, onCreate, onUpdate, onExpire })` to merge active gift combos by `batch_combo_id` / `combo_id` or `uid/uname + gift_id/gift_name + coin_type` (keeping `'gold'` and `'silver'` separate, handling both incremental `num` and cumulative `combo_num`/`combo_total_coin`), and call `giftCombos.pruneExpiredSnapshots()` after replaying snapshot history.
 
 5. **Channel B (`/ws/event`) Aggregated Event Consumption Pattern**:
    Use `channel: 'event'` for dashboards, alerts, TTS, or high-density stream summarization where reservoir-aggregated counts (`ev.count`) and representative users (`ev.sample_users`) are needed:
