@@ -57,7 +57,7 @@ mod tests {
         let temp = std::env::temp_dir();
         std::env::set_current_dir(&temp).unwrap();
 
-        let resolved = resolve_config_path("etc/config.toml");
+        let resolved = resolve_config_path("etc/config.sample.toml");
         let resolved_path = Path::new(&resolved);
         let exists = resolved_path.exists();
 
