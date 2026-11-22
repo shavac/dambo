@@ -5,7 +5,7 @@ use crate::model::{RawBiliEvent, RoomInfoSnapshot, now_unix_ms};
 use crate::recorder::Recorder;
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use blivedm::websocket::{
+use blive_proto::websocket::{
     Operation, connect_result, decompress as brotli_decompress, get_msg_header, init_server,
     make_packet,
 };
@@ -1403,7 +1403,7 @@ pub struct FrameDecodeResult {
 }
 
 /// Panic-free Bilibili binary WebSocket packet decoder supporting plain JSON (`ver == 0`),
-/// Zlib (`ver == 2`), and Brotli (`ver == 3` via `blivedm::websocket::decompress`).
+/// Zlib (`ver == 2`), and Brotli (`ver == 3` via `blive_proto::websocket::decompress`).
 pub fn decode_bili_frames(buf: &[u8], out_jsons: &mut Vec<Value>) -> FrameDecodeResult {
     let mut result = FrameDecodeResult::default();
     let mut offset = 0usize;
@@ -2216,7 +2216,7 @@ fn run_blocking_blivedm_session(
 ) {
     let room_id_str = state.meta.room_id.to_string();
     let resolved_buvid = if buvid3.trim().is_empty() {
-        std::panic::catch_unwind(|| blivedm::auth::init_buvid(Default::default()))
+        std::panic::catch_unwind(|| blive_proto::auth::init_buvid(Default::default()))
             .ok()
             .map(|(_, b)| b.trim().to_string())
             .unwrap_or_default()
