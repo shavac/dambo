@@ -1,0 +1,29 @@
+name: Feature or Plugin Request
+description: Suggest a new feature, SDK improvement, or built-in plugin
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Core / Collector / EventEngine
+        - Desktop UI / Tray (dambo-ui)
+        - Pure-Web SDK (/sdk/dambo.js)
+        - New Built-in Plugin (static/html/)
+        - CLI (dambo-cli) / Config
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Feature Description
+      description: Describe the problem you want to solve or the plugin behavior you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Proposed Design / Additional Context
+      description: Optional mockups, config options, or OBS/stream use cases.

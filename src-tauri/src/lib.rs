@@ -1,7 +1,7 @@
 mod i18n;
 
 use dambo_core::DamboRuntime;
-use dambo_core::auth::QrPollStatus;
+use dambo_core::auth::{QrPollStatus, SendDanmakuError};
 use dambo_core::config::parse_log_level;
 use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
 use dambo_core::plugin::PluginInfo;
@@ -31,7 +31,8 @@ struct AppContext {
     runtime: Arc<DamboRuntime>,
     qr_poll_cancel: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
     panel_min_width: Arc<std::sync::Mutex<f64>>,
-    panel_expanded: Arc<std::sync::atomic::AtomicBool>,
+    panel_base_height: Arc<std::sync::Mutex<f64>>,
+    panel_target_height: Arc<std::sync::Mutex<f64>>,
     panel_drag_origin: Arc<std::sync::Mutex<Option<tauri::PhysicalPosition<i32>>>>,
 }
 
@@ -62,23 +63,35 @@ fn current_logical_width(window: &tauri::WebviewWindow) -> f64 {
     }
 }
 
-fn compute_panel_height_bounds() -> (f64, f64) {
-    (PANEL_COLLAPSED_HEIGHT, PANEL_EXPANDED_HEIGHT)
+fn compute_panel_height_bounds_for_base(base_height: f64) -> (f64, f64) {
+    let min_h = if base_height.is_finite() {
+        base_height.max(PANEL_COLLAPSED_HEIGHT).ceil()
+    } else {
+        PANEL_COLLAPSED_HEIGHT
+    };
+    let max_h = PANEL_EXPANDED_HEIGHT.max(min_h);
+    (min_h, max_h)
+}
+
+fn clamp_panel_height(requested_height: f64, base_height: f64) -> f64 {
+    let (min_h, max_h) = compute_panel_height_bounds_for_base(base_height);
+    if requested_height.is_finite() {
+        requested_height.ceil().clamp(min_h, max_h)
+    } else {
+        min_h
+    }
 }
 
 fn apply_panel_window_bounds_sync(
     window: &tauri::WebviewWindow,
     requested_min_width: f64,
-    expanded: bool,
+    requested_base_height: f64,
+    requested_height: f64,
     explicit_width: Option<f64>,
 ) -> Result<(), String> {
     let (min_w, max_w) = compute_panel_width_bounds(requested_min_width);
-    let (min_h, max_h) = compute_panel_height_bounds();
-    let target_h = if expanded {
-        PANEL_EXPANDED_HEIGHT
-    } else {
-        PANEL_COLLAPSED_HEIGHT
-    };
+    let (min_h, max_h) = compute_panel_height_bounds_for_base(requested_base_height);
+    let target_h = clamp_panel_height(requested_height, requested_base_height);
     let top_left = window.outer_position().ok();
     let target_w = match explicit_width {
         Some(width) => clamp_panel_width(width, requested_min_width),
@@ -110,7 +123,8 @@ async fn apply_panel_window_bounds_on_main(
 ) -> Result<(), String> {
     let win = window.clone();
     let panel_min_width = ctx.panel_min_width.clone();
-    let panel_expanded = ctx.panel_expanded.clone();
+    let panel_base_height = ctx.panel_base_height.clone();
+    let panel_target_height = ctx.panel_target_height.clone();
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
     window
@@ -119,8 +133,12 @@ async fn apply_panel_window_bounds_on_main(
                 .lock()
                 .map(|g| *g)
                 .unwrap_or(PANEL_BASE_MIN_WIDTH);
-            let expanded = panel_expanded.load(std::sync::atomic::Ordering::Acquire);
-            let res = apply_panel_window_bounds_sync(&win, min_w, expanded, explicit_width);
+            let base_h = panel_base_height
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(PANEL_COLLAPSED_HEIGHT);
+            let target_h = panel_target_height.lock().map(|g| *g).unwrap_or(base_h);
+            let res = apply_panel_window_bounds_sync(&win, min_w, base_h, target_h, explicit_width);
             let _ = tx.send(res);
         })
         .map_err(|e| e.to_string())?;
@@ -1245,9 +1263,73 @@ async fn set_dropdown_expanded(
     expanded: bool,
     ctx: State<'_, AppContext>,
 ) -> Result<(), String> {
-    ctx.panel_expanded
-        .store(expanded, std::sync::atomic::Ordering::Release);
+    let base_h = ctx
+        .panel_base_height
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(PANEL_COLLAPSED_HEIGHT);
+    let target_h = if expanded {
+        PANEL_EXPANDED_HEIGHT.max(base_h)
+    } else {
+        base_h
+    };
+    if let Ok(mut guard) = ctx.panel_target_height.lock() {
+        *guard = target_h;
+    }
     apply_panel_window_bounds_on_main(window, &ctx, None).await
+}
+
+#[tauri::command]
+async fn set_panel_height(
+    window: tauri::WebviewWindow,
+    height: f64,
+    width: Option<f64>,
+    base_height: Option<f64>,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    if let Some(bh) = base_height.filter(|v| v.is_finite()) {
+        let clamped_base = bh.max(PANEL_COLLAPSED_HEIGHT).ceil();
+        if let Ok(mut guard) = ctx.panel_base_height.lock() {
+            *guard = (*guard).max(clamped_base);
+        }
+    }
+    let resolved_base = ctx
+        .panel_base_height
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(PANEL_COLLAPSED_HEIGHT);
+    let clamped = clamp_panel_height(height, resolved_base);
+    if let Ok(mut guard) = ctx.panel_target_height.lock() {
+        *guard = clamped;
+    }
+    let explicit_width = width.filter(|w| w.is_finite());
+    apply_panel_window_bounds_on_main(window, &ctx, explicit_width).await
+}
+
+fn format_send_danmaku_error(locale: &str, err: SendDanmakuError) -> String {
+    match err {
+        SendDanmakuError::NotLoggedIn => i18n::t(locale, "danmaku.err_not_logged_in").to_string(),
+        SendDanmakuError::NotConnected => i18n::t(locale, "danmaku.err_not_connected").to_string(),
+        SendDanmakuError::EmptyMessage => i18n::t(locale, "danmaku.err_empty").to_string(),
+        SendDanmakuError::MessageTooLong { max } => {
+            let max_str = max.to_string();
+            i18n::t_fmt(locale, "danmaku.err_too_long", &[("max", &max_str)])
+        }
+        SendDanmakuError::RateLimited(_) => i18n::t(locale, "danmaku.err_rate_limited").to_string(),
+        SendDanmakuError::AuthExpired(_) => i18n::t(locale, "danmaku.err_auth_expired").to_string(),
+        SendDanmakuError::Rejected(reason) | SendDanmakuError::Network(reason) => {
+            i18n::t_fmt(locale, "danmaku.err_rejected", &[("reason", &reason)])
+        }
+    }
+}
+
+#[tauri::command]
+async fn send_danmaku(msg: String, ctx: State<'_, AppContext>) -> Result<(), String> {
+    let locale = active_locale(&ctx.runtime);
+    ctx.runtime
+        .send_danmaku(&msg)
+        .await
+        .map_err(|e| format_send_danmaku_error(locale, e))
 }
 
 #[tauri::command]
@@ -1607,7 +1689,8 @@ pub fn run(config_path: &str) {
             runtime: runtime.clone(),
             qr_poll_cancel: qr_poll_cancel.clone(),
             panel_min_width: Arc::new(std::sync::Mutex::new(PANEL_BASE_MIN_WIDTH)),
-            panel_expanded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            panel_base_height: Arc::new(std::sync::Mutex::new(PANEL_COLLAPSED_HEIGHT)),
+            panel_target_height: Arc::new(std::sync::Mutex::new(PANEL_COLLAPSED_HEIGHT)),
             panel_drag_origin: Arc::new(std::sync::Mutex::new(None)),
         })
         .on_window_event(move |window, event| {
@@ -1635,7 +1718,9 @@ pub fn run(config_path: &str) {
             fetch_room_options,
             remove_history_room,
             set_record_raw,
+            send_danmaku,
             set_dropdown_expanded,
+            set_panel_height,
             sync_panel_min_width,
             set_panel_width,
             begin_panel_move,
@@ -1905,7 +1990,7 @@ mod tests {
         assert_eq!(compute_panel_width_bounds(600.2), (601.0, 860.0));
         assert_eq!(compute_panel_width_bounds(920.0), (920.0, 920.0));
         assert_eq!(compute_panel_width_bounds(f64::NAN), (520.0, 860.0));
-        let (min_h, max_h) = compute_panel_height_bounds();
+        let (min_h, max_h) = compute_panel_height_bounds_for_base(PANEL_COLLAPSED_HEIGHT);
         assert_eq!((min_h, max_h), (56.0, 420.0));
         assert!(min_h < max_h);
     }
@@ -1918,6 +2003,17 @@ mod tests {
         assert_eq!(clamp_panel_width(999.0, 520.0), 860.0);
         assert_eq!(clamp_panel_width(600.0, 620.0), 620.0);
         assert_eq!(clamp_panel_width(f64::NAN, 540.0), 540.0);
+    }
+
+    #[test]
+    fn test_clamp_panel_height() {
+        assert_eq!(clamp_panel_height(32.0, 56.0), 56.0);
+        assert_eq!(clamp_panel_height(108.2, 56.0), 109.0);
+        assert_eq!(clamp_panel_height(500.0, 56.0), 420.0);
+        assert_eq!(clamp_panel_height(f64::NAN, 56.0), 56.0);
+        assert_eq!(clamp_panel_height(32.0, 62.0), 62.0);
+        assert_eq!(compute_panel_height_bounds_for_base(40.0), (56.0, 420.0));
+        assert_eq!(compute_panel_height_bounds_for_base(61.2), (62.0, 420.0));
     }
 
     #[test]

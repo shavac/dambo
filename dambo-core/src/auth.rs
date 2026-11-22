@@ -2,13 +2,14 @@ use crate::model::{AuthState, RoomQuickItem};
 use anyhow::{Context, Result, anyhow};
 use qrcode::QrCode;
 use qrcode::render::{svg, unicode};
-use reqwest::header::{COOKIE, REFERER, SET_COOKIE};
+use reqwest::header::{CONTENT_TYPE, COOKIE, ORIGIN, REFERER, SET_COOKIE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -282,6 +283,129 @@ pub fn parse_live_user_info_response(resp: &Value, fallback_mid: u64) -> Option<
     None
 }
 
+/// Maximum character count allowed per sent Bilibili live danmaku message.
+pub const DANMAKU_MAX_CHARS: usize = 40;
+
+/// Structured errors returned when sending a Bilibili live danmaku message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SendDanmakuError {
+    NotLoggedIn,
+    NotConnected,
+    EmptyMessage,
+    MessageTooLong { max: usize },
+    RateLimited(String),
+    AuthExpired(String),
+    Rejected(String),
+    Network(String),
+}
+
+impl fmt::Display for SendDanmakuError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotLoggedIn => write!(f, "Not logged in"),
+            Self::NotConnected => write!(f, "Not connected to a live room"),
+            Self::EmptyMessage => write!(f, "Danmaku message is empty"),
+            Self::MessageTooLong { max } => {
+                write!(f, "Danmaku message exceeds {} characters", max)
+            }
+            Self::RateLimited(msg) => {
+                if msg.is_empty() {
+                    write!(f, "Sending too fast")
+                } else {
+                    write!(f, "Rate limited: {}", msg)
+                }
+            }
+            Self::AuthExpired(msg) => {
+                if msg.is_empty() {
+                    write!(f, "Login session expired")
+                } else {
+                    write!(f, "Login session expired: {}", msg)
+                }
+            }
+            Self::Rejected(msg) => write!(f, "{}", msg),
+            Self::Network(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for SendDanmakuError {}
+
+fn form_urlencode(pairs: &[(&str, &str)]) -> String {
+    fn push_encoded(out: &mut String, raw: &str) {
+        for &b in raw.as_bytes() {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                out.push(b as char);
+            } else if b == b' ' {
+                out.push('+');
+            } else {
+                out.push('%');
+                out.push(
+                    char::from_digit(u32::from(b >> 4), 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit(u32::from(b & 0x0F), 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+            }
+        }
+    }
+
+    let mut encoded = String::new();
+    for (idx, (k, v)) in pairs.iter().enumerate() {
+        if idx > 0 {
+            encoded.push('&');
+        }
+        push_encoded(&mut encoded, k);
+        encoded.push('=');
+        push_encoded(&mut encoded, v);
+    }
+    encoded
+}
+
+/// Parses `https://api.live.bilibili.com/msg/send` JSON into `Ok(())` or a typed `SendDanmakuError`.
+pub fn parse_send_danmaku_response(resp: &Value) -> std::result::Result<(), SendDanmakuError> {
+    let code = resp["code"].as_i64().unwrap_or(-1);
+    let msg_field = resp["msg"].as_str().unwrap_or("").trim();
+    let message_field = resp["message"].as_str().unwrap_or("").trim();
+    let detail = if !message_field.is_empty() {
+        message_field
+    } else {
+        msg_field
+    };
+
+    match code {
+        0 => {
+            if msg_field.is_empty() {
+                return Ok(());
+            }
+            match msg_field {
+                "f" | "k" | "fire" => Err(SendDanmakuError::Rejected(format!(
+                    "filtered ({})",
+                    msg_field
+                ))),
+                "msg in 1s" | "max limit exceeded" => {
+                    Err(SendDanmakuError::RateLimited(msg_field.to_string()))
+                }
+                other => Err(SendDanmakuError::Rejected(other.to_string())),
+            }
+        }
+        -101 | -111 => Err(SendDanmakuError::AuthExpired(if detail.is_empty() {
+            format!("code {}", code)
+        } else {
+            detail.to_string()
+        })),
+        10030 | 10031 => Err(SendDanmakuError::RateLimited(detail.to_string())),
+        other => Err(SendDanmakuError::Rejected(if detail.is_empty() {
+            format!("code {}", other)
+        } else {
+            detail.to_string()
+        })),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QrGenerateResult {
     pub url: String,
@@ -437,6 +561,89 @@ impl AuthManager {
         self.state_tx.send_replace(AuthState::default());
         log::info!("🔓 Bilibili session cleared");
         Ok(())
+    }
+
+    /// Clear in-memory and on-disk session credentials when an authenticated API reports expiry.
+    pub fn invalidate_session(&self) {
+        if let Err(e) = SessionData::remove(&self.session_path) {
+            log::warn!(
+                "Failed to remove expired session file {:?}: {}",
+                self.session_path,
+                e
+            );
+        }
+        *self.session.write().expect("AuthManager RwLock poisoned") = None;
+        self.state_tx.send_replace(AuthState::default());
+        log::warn!("⚠️ Cleared expired Bilibili session");
+    }
+
+    /// Send a live danmaku text message to `room_id` via `https://api.live.bilibili.com/msg/send`.
+    pub async fn send_danmaku(
+        &self,
+        room_id: u64,
+        msg: &str,
+    ) -> std::result::Result<(), SendDanmakuError> {
+        if room_id == 0 {
+            return Err(SendDanmakuError::NotConnected);
+        }
+        let Some(session) = self.current_session() else {
+            return Err(SendDanmakuError::NotLoggedIn);
+        };
+        if !session.is_valid_format() || !self.current_state().is_login {
+            return Err(SendDanmakuError::NotLoggedIn);
+        }
+
+        let trimmed = msg.trim();
+        if trimmed.is_empty() {
+            return Err(SendDanmakuError::EmptyMessage);
+        }
+        if trimmed.chars().count() > DANMAKU_MAX_CHARS {
+            return Err(SendDanmakuError::MessageTooLong {
+                max: DANMAKU_MAX_CHARS,
+            });
+        }
+
+        let rnd = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .to_string();
+        let room_str = room_id.to_string();
+        let csrf = session.bili_jct.trim();
+        let body = form_urlencode(&[
+            ("bubble", "0"),
+            ("msg", trimmed),
+            ("color", "16777215"),
+            ("mode", "1"),
+            ("fontsize", "25"),
+            ("rnd", &rnd),
+            ("roomid", &room_str),
+            ("csrf", csrf),
+            ("csrf_token", csrf),
+        ]);
+
+        let resp = self
+            .http
+            .post("https://api.live.bilibili.com/msg/send")
+            .header(COOKIE, session.to_cookie_header())
+            .header(REFERER, format!("https://live.bilibili.com/{}", room_id))
+            .header(ORIGIN, "https://live.bilibili.com")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| SendDanmakuError::Network(e.to_string()))?;
+
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| SendDanmakuError::Network(e.to_string()))?;
+
+        let parsed = parse_send_danmaku_response(&json);
+        if matches!(parsed, Err(SendDanmakuError::AuthExpired(_))) {
+            self.invalidate_session();
+        }
+        parsed
     }
 
     /// Validate stored cookies against `https://api.bilibili.com/x/web-interface/nav`,
@@ -886,5 +1093,50 @@ mod tests {
             QrPollStatus::Success(s) => assert_eq!(s.dede_user_id, "123456"),
             other => panic!("Expected fallback login URL success, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_form_urlencode_utf8_and_special_chars() {
+        let encoded = form_urlencode(&[("msg", "hello 弹幕+100%&!"), ("csrf", "abc_123-XYZ.~")]);
+        assert_eq!(
+            encoded,
+            "msg=hello+%E5%BC%B9%E5%B9%95%2B100%25%26%21&csrf=abc_123-XYZ.~"
+        );
+    }
+
+    #[test]
+    fn test_parse_send_danmaku_response_variants() {
+        assert_eq!(
+            parse_send_danmaku_response(&serde_json::json!({"code": 0, "msg": "", "message": ""})),
+            Ok(())
+        );
+        assert_eq!(
+            parse_send_danmaku_response(&serde_json::json!({"code": 0, "msg": "f"})),
+            Err(SendDanmakuError::Rejected("filtered (f)".to_string()))
+        );
+        assert_eq!(
+            parse_send_danmaku_response(
+                &serde_json::json!({"code": -101, "message": "账号未登录"})
+            ),
+            Err(SendDanmakuError::AuthExpired("账号未登录".to_string()))
+        );
+        assert_eq!(
+            parse_send_danmaku_response(
+                &serde_json::json!({"code": -111, "message": "csrf 校验失败"})
+            ),
+            Err(SendDanmakuError::AuthExpired("csrf 校验失败".to_string()))
+        );
+        assert_eq!(
+            parse_send_danmaku_response(
+                &serde_json::json!({"code": 10030, "message": "发送过于频繁"})
+            ),
+            Err(SendDanmakuError::RateLimited("发送过于频繁".to_string()))
+        );
+        assert_eq!(
+            parse_send_danmaku_response(
+                &serde_json::json!({"code": 1003212, "message": "超出限制"})
+            ),
+            Err(SendDanmakuError::Rejected("超出限制".to_string()))
+        );
     }
 }

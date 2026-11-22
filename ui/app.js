@@ -54,10 +54,22 @@ function showToast(text) {
 
 const PANEL_BASE_MIN_WIDTH = 520;
 const PANEL_MAX_WIDTH = 860;
+const PANEL_COLLAPSED_HEIGHT = 56;
+const INPUT_BAR_LOGICAL_HEIGHT = 52;
+const PANEL_EXPANDED_HEIGHT = 420;
+const DANMAKU_COOLDOWN_MS = 1200;
 const MIN_ROOM_PICKER_WIDTH = 136;
 const IS_MACOS = /mac/i.test(navigator.platform || navigator.userAgent || '');
 let lastSyncedPanelMinWidth = PANEL_BASE_MIN_WIDTH;
 let minWidthSyncRaf = null;
+let baseLogicalHeight = null;
+let baseLogicalHeightPromise = null;
+let heightSyncSeq = 0;
+let danmakuBarOpSeq = 0;
+let isDanmakuBarOpen = false;
+let isSendingDanmaku = false;
+let danmakuCooldownUntil = 0;
+let danmakuCooldownTimer = null;
 
 function sumOuterWidths(elements) {
     return elements.reduce((sum, el) => {
@@ -82,6 +94,7 @@ function computeRequiredMinPanelWidth() {
     const dragHandle = document.getElementById('drag-handle');
     const accountBadge = document.getElementById('account-badge');
     const roomSwitchBtn = document.getElementById('room-switch-btn');
+    const danmakuToggleBtn = document.getElementById('danmaku-toggle-btn');
     const pluginGroup = document.querySelector('.plugin-menu-group');
     const moreGroup = document.querySelector('.more-menu-group');
     const winControls = document.querySelector('.win-controls');
@@ -95,6 +108,7 @@ function computeRequiredMinPanelWidth() {
         accountBadge,
         ...dividers,
         roomSwitchBtn,
+        danmakuToggleBtn,
         pluginGroup,
         moreGroup,
         winControls,
@@ -255,6 +269,7 @@ function updateRoomDisplay(state, { fromBackendEvent = true } = {}) {
         roomInput.value = activeRoomLabel;
     }
     syncRoomActionButton();
+    syncDanmakuUiState();
 }
 
 function updateAccountDisplay(auth) {
@@ -277,6 +292,7 @@ function updateAccountDisplay(auth) {
     if (logoutBtn) {
         logoutBtn.disabled = !currentAuthState.is_login;
     }
+    syncDanmakuUiState();
     scheduleSyncPanelMinWidth();
 }
 
@@ -403,24 +419,257 @@ function renderPlugins(plugins) {
     scheduleSyncPanelMinWidth();
 }
 
-let lastSyncedExpanded = null;
+let lastSyncedPanelHeight = null;
 
-function syncWindowExpanded() {
+function canSendDanmaku() {
+    return Boolean(
+        currentAuthState.is_login &&
+        currentRoomState.connected &&
+        currentRoomState.room_id > 0
+    );
+}
+
+function isAnyMenuOpen() {
     const roomMenu = document.getElementById('room-dropdown-menu');
     const pluginMenu = document.getElementById('plugin-dropdown-menu');
     const moreMenu = document.getElementById('more-dropdown-menu');
-    const expanded = Boolean(
+    return Boolean(
         (roomMenu && !roomMenu.classList.contains('hidden')) ||
         (pluginMenu && !pluginMenu.classList.contains('hidden')) ||
         (moreMenu && !moreMenu.classList.contains('hidden'))
     );
-    if (expanded === lastSyncedExpanded) return;
-    lastSyncedExpanded = expanded;
+}
+
+function computePodMinLogicalHeight() {
+    const pod = document.querySelector('.pod-container');
+    const podHeight = pod ? Math.ceil(pod.getBoundingClientRect().height) : 48;
+    const bodyStyle = document.body ? window.getComputedStyle(document.body) : null;
+    const padTop = bodyStyle ? parseFloat(bodyStyle.paddingTop) || 0 : 4;
+    const padBottom = bodyStyle ? parseFloat(bodyStyle.paddingBottom) || 0 : 4;
+    return Math.max(PANEL_COLLAPSED_HEIGHT, Math.ceil(podHeight + padTop + padBottom));
+}
+
+function nextAnimationFrame() {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+async function waitForViewportHeightAtLeast(minLogicalHeight, maxFrames = 6) {
+    for (let i = 0; i < maxFrames; i++) {
+        await nextAnimationFrame();
+        if (window.innerHeight >= minLogicalHeight - 2) {
+            return;
+        }
+    }
+}
+
+async function ensureBaseLogicalHeight() {
+    if (baseLogicalHeight !== null) return baseLogicalHeight;
+    if (baseLogicalHeightPromise) return baseLogicalHeightPromise;
+
+    baseLogicalHeightPromise = (async () => {
+        const cssFloor = computePodMinLogicalHeight();
+        let measured = PANEL_COLLAPSED_HEIGHT;
+        const canMeasureCollapsed = !isAnyMenuOpen() && !isDanmakuBarOpen;
+        const cur = window.__TAURI__?.window?.getCurrentWindow?.();
+        if (
+            canMeasureCollapsed &&
+            cur &&
+            typeof cur.scaleFactor === 'function' &&
+            typeof cur.innerSize === 'function'
+        ) {
+            try {
+                const [factor, inner] = await Promise.all([cur.scaleFactor(), cur.innerSize()]);
+                if (
+                    canMeasureCollapsed &&
+                    !isAnyMenuOpen() &&
+                    !isDanmakuBarOpen &&
+                    typeof factor === 'number' &&
+                    factor > 0 &&
+                    inner &&
+                    typeof inner.height === 'number' &&
+                    Number.isFinite(inner.height) &&
+                    inner.height > 0
+                ) {
+                    const logicalH = Math.round(inner.height / factor);
+                    if (logicalH < PANEL_COLLAPSED_HEIGHT + INPUT_BAR_LOGICAL_HEIGHT) {
+                        measured = logicalH;
+                    }
+                }
+            } catch (err) {
+                console.warn('Failed to measure initial panel base height:', err);
+            }
+        }
+        baseLogicalHeight = Math.max(PANEL_COLLAPSED_HEIGHT, cssFloor, measured);
+        return baseLogicalHeight;
+    })();
+
+    try {
+        return await baseLogicalHeightPromise;
+    } finally {
+        baseLogicalHeightPromise = null;
+    }
+}
+
+async function readCurrentLogicalWidth() {
+    const cur = window.__TAURI__?.window?.getCurrentWindow?.();
+    if (cur && typeof cur.scaleFactor === 'function' && typeof cur.innerSize === 'function') {
+        try {
+            const [factor, inner] = await Promise.all([cur.scaleFactor(), cur.innerSize()]);
+            if (
+                typeof factor === 'number' &&
+                factor > 0 &&
+                inner &&
+                typeof inner.width === 'number' &&
+                Number.isFinite(inner.width) &&
+                inner.width > 0
+            ) {
+                return Math.round(inner.width / factor);
+            }
+        } catch (err) {
+            console.warn('Failed to read current logical width:', err);
+        }
+    }
+    return Number.isFinite(window.innerWidth) && window.innerWidth > 0
+        ? Math.round(window.innerWidth)
+        : null;
+}
+
+function computeTargetPanelHeight() {
+    const baseH = baseLogicalHeight ?? computePodMinLogicalHeight();
+    if (isAnyMenuOpen()) {
+        return Math.max(PANEL_EXPANDED_HEIGHT, baseH);
+    }
+    if (isDanmakuBarOpen) {
+        return baseH + INPUT_BAR_LOGICAL_HEIGHT;
+    }
+    return baseH;
+}
+
+async function syncWindowHeight() {
+    const opId = ++heightSyncSeq;
+    const baseH = await ensureBaseLogicalHeight();
+    const currentLogicalWidth = await readCurrentLogicalWidth();
+    if (opId !== heightSyncSeq) return;
+
+    const targetHeight = computeTargetPanelHeight();
+    if (targetHeight === lastSyncedPanelHeight) return;
+    lastSyncedPanelHeight = targetHeight;
     if (invoke) {
-        invoke('set_dropdown_expanded', { expanded }).catch((err) => {
-            lastSyncedExpanded = null;
+        try {
+            const args = {
+                height: targetHeight,
+                baseHeight: baseH,
+            };
+            if (currentLogicalWidth !== null) {
+                args.width = currentLogicalWidth;
+            }
+            await invoke('set_panel_height', args);
+        } catch (err) {
+            if (opId === heightSyncSeq) {
+                lastSyncedPanelHeight = null;
+            }
             console.error(err);
-        });
+        }
+    }
+}
+
+function syncDanmakuSendButton() {
+    const input = document.getElementById('danmaku-input');
+    const sendBtn = document.getElementById('danmaku-send-btn');
+    if (!sendBtn) return;
+
+    const inCooldown = Date.now() < danmakuCooldownUntil;
+    const hasText = Boolean((input?.value || '').trim());
+    sendBtn.innerText = isSendingDanmaku ? t('danmaku.sending') : t('danmaku.send');
+    sendBtn.disabled = isSendingDanmaku || !canSendDanmaku() || !hasText || inCooldown;
+}
+
+function syncDanmakuUiState() {
+    const toggleBtn = document.getElementById('danmaku-toggle-btn');
+    const eligible = canSendDanmaku();
+
+    if (toggleBtn) {
+        toggleBtn.disabled = !eligible;
+        toggleBtn.classList.toggle('active', eligible && isDanmakuBarOpen);
+        toggleBtn.setAttribute('aria-expanded', String(eligible && isDanmakuBarOpen));
+
+        if (eligible) {
+            toggleBtn.title = t('danmaku.toggle_title');
+        } else if (!currentAuthState.is_login && (!currentRoomState.connected || currentRoomState.room_id <= 0)) {
+            toggleBtn.title = t('danmaku.disabled_both');
+        } else if (!currentAuthState.is_login) {
+            toggleBtn.title = t('danmaku.disabled_not_logged_in');
+        } else {
+            toggleBtn.title = t('danmaku.disabled_not_connected');
+        }
+    }
+
+    if (!eligible && isDanmakuBarOpen) {
+        setDanmakuBarOpen(false);
+        return;
+    }
+
+    syncDanmakuSendButton();
+}
+
+function hideAllDropdownMenusOnly() {
+    document.getElementById('room-dropdown-menu')?.classList.add('hidden');
+    document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
+    document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
+    document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
+    const moreMenu = document.getElementById('more-dropdown-menu');
+    const moreBtn = document.getElementById('more-btn');
+    moreMenu?.classList.add('hidden');
+    moreBtn?.classList.remove('active');
+    moreBtn?.setAttribute('aria-expanded', 'false');
+}
+
+async function setDanmakuBarOpen(open) {
+    const bar = document.getElementById('danmaku-bar');
+    const input = document.getElementById('danmaku-input');
+    if (!bar) return;
+
+    const opSeq = ++danmakuBarOpSeq;
+
+    if (open) {
+        if (!canSendDanmaku()) return;
+        hideAllDropdownMenusOnly();
+        isDanmakuBarOpen = true;
+        syncDanmakuUiState();
+
+        const baseH = await ensureBaseLogicalHeight();
+        if (opSeq !== danmakuBarOpSeq || !isDanmakuBarOpen || !canSendDanmaku()) return;
+
+        await syncWindowHeight();
+        if (opSeq !== danmakuBarOpSeq || !isDanmakuBarOpen || !canSendDanmaku()) return;
+
+        await waitForViewportHeightAtLeast(baseH + INPUT_BAR_LOGICAL_HEIGHT);
+        if (opSeq !== danmakuBarOpSeq || !isDanmakuBarOpen || !canSendDanmaku()) return;
+
+        bar.classList.remove('hidden');
+        await nextAnimationFrame();
+        if (opSeq !== danmakuBarOpSeq || !isDanmakuBarOpen || !canSendDanmaku()) {
+            bar.classList.add('hidden');
+            return;
+        }
+
+        document.documentElement.scrollTop = 0;
+        if (document.body) document.body.scrollTop = 0;
+        input?.focus({ preventScroll: true });
+        document.documentElement.scrollTop = 0;
+        if (document.body) document.body.scrollTop = 0;
+    } else {
+        bar.classList.add('hidden');
+        input?.blur();
+        isDanmakuBarOpen = false;
+        document.documentElement.scrollTop = 0;
+        if (document.body) document.body.scrollTop = 0;
+        syncDanmakuUiState();
+
+        await nextAnimationFrame();
+        if (opSeq !== danmakuBarOpSeq) return;
+
+        await syncWindowHeight();
     }
 }
 
@@ -428,6 +677,12 @@ function setDropdownOpen(open) {
     const menu = document.getElementById('room-dropdown-menu');
     if (!menu) return;
     if (open) {
+        danmakuBarOpSeq++;
+        if (isDanmakuBarOpen) {
+            document.getElementById('danmaku-bar')?.classList.add('hidden');
+            isDanmakuBarOpen = false;
+            syncDanmakuUiState();
+        }
         document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
         document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
         document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
@@ -438,7 +693,7 @@ function setDropdownOpen(open) {
     } else {
         menu.classList.add('hidden');
     }
-    syncWindowExpanded();
+    syncWindowHeight();
 }
 
 function setPluginMenuOpen(open) {
@@ -446,6 +701,12 @@ function setPluginMenuOpen(open) {
     const pluginBtn = document.getElementById('plugin-dropdown-btn');
     if (!pluginMenu) return;
     if (open) {
+        danmakuBarOpSeq++;
+        if (isDanmakuBarOpen) {
+            document.getElementById('danmaku-bar')?.classList.add('hidden');
+            isDanmakuBarOpen = false;
+            syncDanmakuUiState();
+        }
         document.getElementById('room-dropdown-menu')?.classList.add('hidden');
         document.getElementById('more-dropdown-menu')?.classList.add('hidden');
         document.getElementById('more-btn')?.classList.remove('active');
@@ -458,7 +719,7 @@ function setPluginMenuOpen(open) {
         pluginBtn?.classList.remove('active');
         pluginBtn?.setAttribute('aria-expanded', 'false');
     }
-    syncWindowExpanded();
+    syncWindowHeight();
 }
 
 function setMoreMenuOpen(open) {
@@ -466,6 +727,12 @@ function setMoreMenuOpen(open) {
     const moreBtn = document.getElementById('more-btn');
     if (!moreMenu) return;
     if (open) {
+        danmakuBarOpSeq++;
+        if (isDanmakuBarOpen) {
+            document.getElementById('danmaku-bar')?.classList.add('hidden');
+            isDanmakuBarOpen = false;
+            syncDanmakuUiState();
+        }
         document.getElementById('room-dropdown-menu')?.classList.add('hidden');
         document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
         document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
@@ -478,20 +745,12 @@ function setMoreMenuOpen(open) {
         moreBtn?.classList.remove('active');
         moreBtn?.setAttribute('aria-expanded', 'false');
     }
-    syncWindowExpanded();
+    syncWindowHeight();
 }
 
 function closeAllMenus() {
-    document.getElementById('room-dropdown-menu')?.classList.add('hidden');
-    document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
-    document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
-    document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
-    const moreMenu = document.getElementById('more-dropdown-menu');
-    const moreBtn = document.getElementById('more-btn');
-    moreMenu?.classList.add('hidden');
-    moreBtn?.classList.remove('active');
-    moreBtn?.setAttribute('aria-expanded', 'false');
-    syncWindowExpanded();
+    hideAllDropdownMenusOnly();
+    syncWindowHeight();
 }
 
 async function connectTarget(target) {
@@ -640,6 +899,7 @@ function renderHistoryList(historyRooms) {
 async function hydrateInitialState() {
     if (!invoke) return;
     try {
+        await ensureBaseLogicalHeight();
         const [i18nPayload, init, plugins] = await Promise.all([
             invoke('get_i18n'),
             invoke('get_initial_state'),
@@ -1202,9 +1462,86 @@ document.addEventListener('click', (e) => {
     }
 });
 
+document.addEventListener('pointerdown', (e) => {
+    if (!isDanmakuBarOpen) return;
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target) return;
+    if (target.closest('#danmaku-bar')) return;
+    if (target.closest('#danmaku-toggle-btn')) return;
+    if (target.closest('#drag-handle, #resize-handle-right')) return;
+    if (target.closest('button, input, textarea, select, a, .room-pill, .menu-item, .plugin-card')) {
+        setDanmakuBarOpen(false);
+    }
+}, true);
+
+async function submitDanmaku() {
+    const input = document.getElementById('danmaku-input');
+    if (!invoke || !input || isSendingDanmaku) return;
+    if (!canSendDanmaku()) {
+        syncDanmakuUiState();
+        return;
+    }
+    if (Date.now() < danmakuCooldownUntil) return;
+
+    const msg = input.value.trim();
+    if (!msg) return;
+
+    isSendingDanmaku = true;
+    syncDanmakuSendButton();
+    try {
+        await invoke('send_danmaku', { msg });
+        input.value = '';
+        danmakuCooldownUntil = Date.now() + DANMAKU_COOLDOWN_MS;
+        if (danmakuCooldownTimer !== null) {
+            clearTimeout(danmakuCooldownTimer);
+        }
+        danmakuCooldownTimer = setTimeout(() => {
+            danmakuCooldownTimer = null;
+            syncDanmakuSendButton();
+        }, DANMAKU_COOLDOWN_MS);
+    } catch (err) {
+        console.error('Failed to send danmaku:', err);
+        showToast(String(err));
+    } finally {
+        isSendingDanmaku = false;
+        syncDanmakuSendButton();
+        if (isDanmakuBarOpen) {
+            input.focus({ preventScroll: true });
+        }
+    }
+}
+
+document.getElementById('danmaku-toggle-btn')?.addEventListener('click', () => {
+    if (!canSendDanmaku()) {
+        syncDanmakuUiState();
+        return;
+    }
+    setDanmakuBarOpen(!isDanmakuBarOpen);
+});
+
+const danmakuInputEl = document.getElementById('danmaku-input');
+danmakuInputEl?.addEventListener('input', syncDanmakuSendButton);
+danmakuInputEl?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+        e.preventDefault();
+        submitDanmaku();
+    }
+});
+
+const danmakuSendBtnEl = document.getElementById('danmaku-send-btn');
+danmakuSendBtnEl?.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+});
+danmakuSendBtnEl?.addEventListener('click', () => {
+    submitDanmaku();
+});
+
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         closeAllMenus();
+        if (isDanmakuBarOpen) {
+            setDanmakuBarOpen(false);
+        }
     }
 });
 

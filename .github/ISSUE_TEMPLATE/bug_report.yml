@@ -1,0 +1,62 @@
+name: Bug Report
+description: Report a bug in dambo-ui, dambo-cli, or a built-in plugin
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please **never** paste `var/session.json`, `SESSDATA`, or `bili_jct` cookies in public issues.
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS (Apple Silicon / arm64)
+        - macOS (Intel / x64)
+        - Windows 11 / 10 (x64)
+        - Windows (Touchscreen / WinPad)
+        - Linux
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Runtime Mode
+      options:
+        - Desktop Control Capsule (dambo-ui)
+        - Desktop Plugin Overlay Window (plugin-overlay-*)
+        - OBS Studio Browser Source
+        - Headless CLI (dambo-cli)
+        - Browser (Chrome / Edge / Safari)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Dambo Version / Commit
+      placeholder: e.g. v0.1.0 or commit hash
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Launch dambo-ui
+        2. Connect to room ...
+        3. Open plugin ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs (sanitized)
+      description: Paste relevant console or `var/logs/` output after removing any sensitive tokens.

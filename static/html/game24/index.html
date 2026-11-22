@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <base href="/game24/">
+    <title>扑克24点弹幕互动</title>
+    <link rel="stylesheet" href="./plugin.css">
+</head>
+<body>
+    <main class="app-shell">
+        <section class="board" aria-label="24点游戏主面板">
+            <!-- 顶部状态与局数栏（避开右上角 100x44px 悬浮条安全区） -->
+            <header class="topbar">
+                <div class="title-group">
+                    <span class="game-badge">24点</span>
+                    <span id="round-label" class="round-label">第 1 局</span>
+                    <span id="conn-badge" class="conn-badge connecting">连接中</span>
+                </div>
+                <div class="rule-hint">弹幕发算式抢答 · 仅限 + - × ÷ ( ) · A=1 J=11 Q=12 K=13</div>
+            </header>
+
+            <!-- 倒计时进度条 -->
+            <div class="timer-track" aria-hidden="true">
+                <div id="timer-fill" class="timer-fill"></div>
+            </div>
+
+            <!-- 状态横幅（答题提示 / 无解提示 / 胜出播报 / 超时答案） -->
+            <div id="banner" class="banner state-playing" role="status" aria-live="polite">
+                <img id="banner-avatar" class="banner-avatar hidden" alt="">
+                <div class="banner-text-wrap">
+                    <div id="banner-title" class="banner-title">发送弹幕算式抢答（如：(3+3)×(8-4)）</div>
+                    <div id="banner-sub" class="banner-sub">限时 300s · 首位解出自动切题</div>
+                </div>
+            </div>
+
+            <!-- 四张扑克牌展示区 -->
+            <div id="cards-stage" class="cards-stage" aria-label="当前四张扑克牌"></div>
+
+            <!-- 弹幕实时反馈气泡 -->
+            <div id="toast-bar" class="toast-bar">等待弹幕出招…</div>
+
+            <!-- 底部信息栏：排行榜 + 本场统计（纯展示，无点击/无表单，完全符合OBS无交互规范） -->
+            <footer class="footer-bar">
+                <div class="leaderboard">
+                    <span class="lb-label">本场榜：</span>
+                    <div id="lb-list" class="lb-list">
+                        <span class="lb-empty">暂无得分</span>
+                    </div>
+                </div>
+                <div id="stats-badge" class="stats-badge">已开 1 局 · 答对 0 局</div>
+            </footer>
+        </section>
+    </main>
+
+    <!-- 严格按规范同步加载 Dambo SDK，置于插件脚本之前 -->
+    <script src="/sdk/dambo.js"></script>
+    <script src="./plugin.js"></script>
+</body>
+</html>

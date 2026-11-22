@@ -30,19 +30,25 @@ html, body {
     width: 100%;
     height: 100%;
     background: transparent !important;
-    overflow: hidden;
+    overflow: clip;
     overscroll-behavior: none;
     touch-action: none;
     cursor: default;
 }
 
 body {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
     padding: 4px;
 }
 
 .pod-container {
     width: 100%;
     height: 48px;
+    flex: 0 0 48px;
+    flex-shrink: 0;
     background: var(--bg-glass-sheen), var(--bg-glass);
     backdrop-filter: blur(28px) saturate(165%);
     -webkit-backdrop-filter: blur(28px) saturate(165%);
@@ -511,7 +517,7 @@ body {
 .toast-banner {
     position: fixed;
     left: 50%;
-    bottom: 10px;
+    top: 12px;
     transform: translateX(-50%);
     padding: 5px 12px;
     background: rgba(15, 23, 42, 0.94);
@@ -743,4 +749,99 @@ body {
 .history-remove-btn:hover {
     background: rgba(239, 68, 68, 0.2);
     color: var(--accent-red);
+}
+
+/* Danmaku toggle button & full-width bottom input bar */
+.danmaku-toggle-btn {
+    touch-action: manipulation;
+}
+.danmaku-toggle-btn svg {
+    pointer-events: none;
+}
+.danmaku-toggle-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+.danmaku-toggle-btn:disabled:hover {
+    background: var(--bg-card);
+    border-color: var(--border-color);
+    color: var(--text-sub);
+}
+.danmaku-toggle-btn.active {
+    background: rgba(56, 189, 248, 0.22);
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+}
+
+.danmaku-bar {
+    position: relative;
+    z-index: 5;
+    width: 100%;
+    height: 42px;
+    flex: 0 0 42px;
+    flex-shrink: 0;
+    margin-top: 6px;
+    padding: 6px 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-glass-sheen), var(--bg-glass);
+    backdrop-filter: blur(28px) saturate(165%);
+    -webkit-backdrop-filter: blur(28px) saturate(165%);
+    border: 1px solid var(--border-color);
+    border-radius: 11px;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.14),
+        0 4px 14px rgba(0, 0, 0, 0.38);
+    touch-action: manipulation;
+}
+.danmaku-bar.hidden {
+    display: none;
+}
+
+.danmaku-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 28px;
+    padding: 0 9px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-main);
+    font-size: 12px;
+    outline: none;
+    user-select: text;
+    -webkit-user-select: text;
+}
+.danmaku-input::placeholder {
+    color: var(--text-sub);
+}
+.danmaku-input:focus {
+    border-color: var(--accent-blue);
+}
+
+.danmaku-send-btn {
+    flex: 0 0 auto;
+    min-width: 58px;
+    height: 28px;
+    padding: 0 12px;
+    background: rgba(56, 189, 248, 0.2);
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    border-radius: var(--radius-sm);
+    color: #e0f2fe;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    touch-action: manipulation;
+    transition: all 0.15s ease;
+}
+.danmaku-send-btn:hover:not(:disabled) {
+    background: rgba(56, 189, 248, 0.32);
+    border-color: var(--accent-blue);
+    color: #ffffff;
+}
+.danmaku-send-btn:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
 }

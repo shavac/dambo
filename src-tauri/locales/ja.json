@@ -87,5 +87,20 @@
   "overlay.drag_title": "ウィンドウをドラッグ",
   "overlay.pin_title": "常に最前面に表示",
   "overlay.unpin_title": "最前面表示を解除",
-  "overlay.close_title": "ウィンドウを閉じる (Esc)"
+  "overlay.close_title": "ウィンドウを閉じる (Esc)",
+
+  "danmaku.toggle_title": "弾幕を送信",
+  "danmaku.disabled_not_logged_in": "弾幕を送るには先に Bilibili にログインしてください",
+  "danmaku.disabled_not_connected": "弾幕を送るには先に配信ルームに接続してください",
+  "danmaku.disabled_both": "弾幕を送るにはログインして配信ルームに接続してください",
+  "danmaku.placeholder": "弾幕を入力（Enter で送信・最大40文字）...",
+  "danmaku.send": "送信",
+  "danmaku.sending": "送信中",
+  "danmaku.err_not_logged_in": "Bilibili にログインしていません",
+  "danmaku.err_not_connected": "配信ルームに接続していません",
+  "danmaku.err_empty": "弾幕を入力してください",
+  "danmaku.err_too_long": "弾幕は {max} 文字以内にしてください",
+  "danmaku.err_rate_limited": "送信間隔が短すぎます。少し待ってから再試行してください",
+  "danmaku.err_auth_expired": "ログイン有効期限が切れました。再ログインしてください",
+  "danmaku.err_rejected": "送信に失敗しました: {reason}"
 }

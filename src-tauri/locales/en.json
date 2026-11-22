@@ -87,5 +87,20 @@
   "overlay.drag_title": "Drag window",
   "overlay.pin_title": "Pin on top",
   "overlay.unpin_title": "Unpin from top",
-  "overlay.close_title": "Close window (Esc)"
+  "overlay.close_title": "Close window (Esc)",
+
+  "danmaku.toggle_title": "Send danmaku",
+  "danmaku.disabled_not_logged_in": "Sign in with Bilibili first to send danmaku",
+  "danmaku.disabled_not_connected": "Connect to a live room first to send danmaku",
+  "danmaku.disabled_both": "Sign in and connect to a live room to send danmaku",
+  "danmaku.placeholder": "Send a danmaku (Enter to send, max 40 chars)...",
+  "danmaku.send": "Send",
+  "danmaku.sending": "Sending",
+  "danmaku.err_not_logged_in": "Not signed in to Bilibili",
+  "danmaku.err_not_connected": "Not connected to a live room",
+  "danmaku.err_empty": "Danmaku message cannot be empty",
+  "danmaku.err_too_long": "Danmaku exceeds {max} characters",
+  "danmaku.err_rate_limited": "Sending too fast, please wait a moment",
+  "danmaku.err_auth_expired": "Session expired, please sign in again",
+  "danmaku.err_rejected": "Send failed: {reason}"
 }

@@ -1,0 +1,8 @@
+{
+  "title": "扑克24点弹幕互动",
+  "description": "A-K扑克牌24点直播互动游戏：弹幕发送算式抢答，自动校验与计分，无解/超时自动切题 (query: ?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5)",
+  "obs": {
+    "width": 560,
+    "height": 420
+  }
+}

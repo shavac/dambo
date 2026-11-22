@@ -87,5 +87,20 @@
   "overlay.drag_title": "拖动窗口",
   "overlay.pin_title": "置顶窗口",
   "overlay.unpin_title": "取消置顶",
-  "overlay.close_title": "关闭窗口 (Esc)"
+  "overlay.close_title": "关闭窗口 (Esc)",
+
+  "danmaku.toggle_title": "发送弹幕",
+  "danmaku.disabled_not_logged_in": "请先扫码登录 B 站账号后再发送弹幕",
+  "danmaku.disabled_not_connected": "请先连接进入直播间后再发送弹幕",
+  "danmaku.disabled_both": "请先登录 B 站账号并连接直播间后再发送弹幕",
+  "danmaku.placeholder": "输入弹幕内容（回车发送，最多 40 字）...",
+  "danmaku.send": "发送",
+  "danmaku.sending": "发送中",
+  "danmaku.err_not_logged_in": "尚未登录 B 站账号",
+  "danmaku.err_not_connected": "当前未连接到直播间",
+  "danmaku.err_empty": "弹幕内容不能为空",
+  "danmaku.err_too_long": "弹幕不能超过 {max} 个字",
+  "danmaku.err_rate_limited": "发送过于频繁，请稍后再试",
+  "danmaku.err_auth_expired": "登录状态已失效，请重新扫码登录",
+  "danmaku.err_rejected": "发送失败：{reason}"
 }

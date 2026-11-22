@@ -9,7 +9,7 @@ pub mod recorder;
 pub mod server;
 pub mod state;
 
-use crate::auth::AuthManager;
+use crate::auth::{AuthManager, DANMAKU_MAX_CHARS, SendDanmakuError};
 use crate::collector::{CollectorContext, CollectorManager, parse_room_input};
 use crate::config::{Config, ConfigManager};
 use crate::event_engine::EventEngine;
@@ -27,6 +27,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -82,6 +83,7 @@ pub struct DamboRuntime {
     pub hub: Arc<StateHub>,
     pub event_engine: Arc<EventEngine>,
     startup_auto_connect: Arc<AtomicBool>,
+    last_danmaku_sent_at: Mutex<Option<Instant>>,
     cancel: CancellationToken,
 }
 
@@ -142,6 +144,7 @@ impl DamboRuntime {
             hub,
             event_engine,
             startup_auto_connect,
+            last_danmaku_sent_at: Mutex::new(None),
             cancel,
         }
     }
@@ -344,6 +347,40 @@ impl DamboRuntime {
         }
 
         self.state_store.set_current_room(None)?;
+        Ok(())
+    }
+
+    /// Validate logged-in session and live room connection, enforce cooldown, and send a danmaku message.
+    pub async fn send_danmaku(&self, msg: &str) -> std::result::Result<(), SendDanmakuError> {
+        let room = self.hub.room_state();
+        if !room.connected || room.room_id == 0 {
+            return Err(SendDanmakuError::NotConnected);
+        }
+        if !self.auth.current_state().is_login || self.auth.current_session().is_none() {
+            return Err(SendDanmakuError::NotLoggedIn);
+        }
+
+        let trimmed = msg.trim();
+        if trimmed.is_empty() {
+            return Err(SendDanmakuError::EmptyMessage);
+        }
+        if trimmed.chars().count() > DANMAKU_MAX_CHARS {
+            return Err(SendDanmakuError::MessageTooLong {
+                max: DANMAKU_MAX_CHARS,
+            });
+        }
+
+        if let Ok(guard) = self.last_danmaku_sent_at.lock()
+            && let Some(prev) = *guard
+            && prev.elapsed() < Duration::from_millis(1000)
+        {
+            return Err(SendDanmakuError::RateLimited("cooldown".to_string()));
+        }
+
+        self.auth.send_danmaku(room.room_id, trimmed).await?;
+        if let Ok(mut guard) = self.last_danmaku_sent_at.lock() {
+            *guard = Some(Instant::now());
+        }
         Ok(())
     }
 
