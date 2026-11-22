@@ -1,11 +1,15 @@
 use crate::model::{AuthState, RoomQuickItem};
 use anyhow::{Context, Result, anyhow};
+use blive_proto::auth::form_urlencode;
+pub use blive_proto::auth::{
+    DANMAKU_MAX_CHARS, QrPollStatus, SendDanmakuError, SessionData, parse_live_user_info_response,
+    parse_nav_response, parse_qr_poll_code, parse_qr_poll_response, parse_send_danmaku_response,
+};
+use blive_proto::commands::value_as_u64;
 use qrcode::QrCode;
 use qrcode::render::{svg, unicode};
 use reqwest::header::{CONTENT_TYPE, COOKIE, ORIGIN, REFERER, SET_COOKIE};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -13,36 +17,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
-            && let Ok(val) = u8::from_str_radix(hex, 16)
-        {
-            out.push(val);
-            i += 3;
-            continue;
-        } else if bytes[i] == b'+' {
-            out.push(b' ');
-            i += 1;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
-fn value_as_u64(v: &Value) -> Option<u64> {
-    v.as_u64()
-        .or_else(|| v.as_i64().filter(|&n| n >= 0).map(|n| n as u64))
-        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-}
 
 /// Render a URL string into `(svg_xml, terminal_unicode_qr)`.
 pub fn render_qr(url: &str) -> Result<(String, String)> {
@@ -62,351 +36,37 @@ pub fn render_qr(url: &str) -> Result<(String, String)> {
     Ok((svg_xml, terminal_qr))
 }
 
-/// Persisted Bilibili session cookies stored in `dambo_session.json`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct SessionData {
-    #[serde(rename = "SESSDATA", alias = "sessdata")]
-    pub sessdata: String,
-    #[serde(rename = "bili_jct", alias = "biliJct")]
-    pub bili_jct: String,
-    #[serde(rename = "DedeUserID", alias = "dede_user_id")]
-    pub dede_user_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub uname: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub face: String,
+fn load_session_file(path: &Path) -> Result<Option<SessionData>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read session file {:?}", path))?;
+    let parsed: SessionData = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse session JSON at {:?}", path))?;
+    Ok(Some(parsed))
 }
 
-impl SessionData {
-    pub fn load(path: &Path) -> Result<Option<Self>> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read session file {:?}", path))?;
-        let parsed: SessionData = serde_json::from_str(&raw)
-            .with_context(|| format!("Failed to parse session JSON at {:?}", path))?;
-        Ok(Some(parsed))
+fn save_session_file(session: &SessionData, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent dir for {:?}", path))?;
     }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent dir for {:?}", path))?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json).with_context(|| format!("Failed to write session to {:?}", path))
-    }
-
-    pub fn remove(path: &Path) -> Result<()> {
-        if path.exists() {
-            fs::remove_file(path)
-                .with_context(|| format!("Failed to delete session file {:?}", path))?;
-        }
-        Ok(())
-    }
-
-    pub fn is_valid_format(&self) -> bool {
-        !self.sessdata.trim().is_empty()
-            && !self.bili_jct.trim().is_empty()
-            && !self.dede_user_id.trim().is_empty()
-    }
-
-    pub fn to_cookie_header(&self) -> String {
-        format!(
-            "SESSDATA={}; bili_jct={}; DedeUserID={}",
-            self.sessdata.trim(),
-            self.bili_jct.trim(),
-            self.dede_user_id.trim()
-        )
-    }
-
-    /// Extract SESSDATA, bili_jct, and DedeUserID from HTTP `Set-Cookie` header values.
-    pub fn from_set_cookie_headers(headers: &[String]) -> Option<Self> {
-        let mut sessdata = String::new();
-        let mut bili_jct = String::new();
-        let mut dede_user_id = String::new();
-
-        for h in headers {
-            if let Some(kv) = h.split(';').next()
-                && let Some((k, v)) = kv.split_once('=')
-            {
-                match k.trim() {
-                    "SESSDATA" => sessdata = v.trim().to_string(),
-                    "bili_jct" => bili_jct = v.trim().to_string(),
-                    "DedeUserID" => dede_user_id = v.trim().to_string(),
-                    _ => {}
-                }
-            }
-        }
-
-        let session = Self {
-            sessdata,
-            bili_jct,
-            dede_user_id,
-            uname: String::new(),
-            face: String::new(),
-        };
-        if session.is_valid_format() {
-            Some(session)
-        } else {
-            None
-        }
-    }
-
-    /// Fallback extractor parsing `SESSDATA`, `bili_jct`, `DedeUserID` from QR poll `data.url` query params.
-    pub fn from_login_url(url: &str) -> Option<Self> {
-        let (_, query) = url.split_once('?')?;
-        let mut sessdata = String::new();
-        let mut bili_jct = String::new();
-        let mut dede_user_id = String::new();
-
-        for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                let decoded = percent_decode(v.trim());
-                match k.trim() {
-                    "SESSDATA" => sessdata = decoded,
-                    "bili_jct" => bili_jct = decoded,
-                    "DedeUserID" => dede_user_id = decoded,
-                    _ => {}
-                }
-            }
-        }
-
-        let session = Self {
-            sessdata,
-            bili_jct,
-            dede_user_id,
-            uname: String::new(),
-            face: String::new(),
-        };
-        if session.is_valid_format() {
-            Some(session)
-        } else {
-            None
-        }
-    }
+    let json = serde_json::to_string_pretty(session)?;
+    fs::write(path, json).with_context(|| format!("Failed to write session to {:?}", path))
 }
 
-/// QR login poll FSM states returned by `passport.bilibili.com/x/passport-login/web/qrcode/poll`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum QrPollStatus {
-    Waiting,
-    Scanned,
-    Expired,
-    Success(SessionData),
-    Error(String),
+fn remove_session_file(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_file(path)
+            .with_context(|| format!("Failed to delete session file {:?}", path))?;
+    }
+    Ok(())
 }
 
-pub fn parse_qr_poll_response(
-    code: i64,
-    message: &str,
-    set_cookies: &[String],
-    fallback_url: Option<&str>,
-) -> QrPollStatus {
-    match code {
-        0 => {
-            if let Some(session) = SessionData::from_set_cookie_headers(set_cookies)
-                .or_else(|| fallback_url.and_then(SessionData::from_login_url))
-            {
-                QrPollStatus::Success(session)
-            } else {
-                QrPollStatus::Error(
-                    "Missing SESSDATA/bili_jct/DedeUserID in Set-Cookie and login URL".to_string(),
-                )
-            }
-        }
-        86101 => QrPollStatus::Waiting,
-        86090 => QrPollStatus::Scanned,
-        86038 => QrPollStatus::Expired,
-        other => QrPollStatus::Error(format!("Bilibili QR poll code {}: {}", other, message)),
-    }
-}
-
-pub fn parse_qr_poll_code(code: i64, message: &str, set_cookies: &[String]) -> QrPollStatus {
-    parse_qr_poll_response(code, message, set_cookies, None)
-}
-
-/// Parses `https://api.bilibili.com/x/web-interface/nav` JSON into an `AuthState`.
-/// Returns `None` on transient/risk-control errors (e.g. `-412`) so fallback APIs can run.
-pub fn parse_nav_response(resp: &Value, fallback_mid: u64) -> Option<AuthState> {
-    let code = resp["code"].as_i64().unwrap_or(-1);
-    let is_login = resp["data"]["isLogin"].as_bool();
-    if code == 0 && is_login == Some(true) {
-        let uname = resp["data"]["uname"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if uname.is_empty() {
-            return None;
-        }
-        return Some(AuthState {
-            is_login: true,
-            uname,
-            mid: value_as_u64(&resp["data"]["mid"]).unwrap_or(fallback_mid),
-            face: resp["data"]["face"]
-                .as_str()
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-        });
-    }
-    if code == -101 || (code == 0 && is_login == Some(false)) {
-        return Some(AuthState::default());
-    }
-    None
-}
-
-/// Parses `https://api.live.bilibili.com/xlive/web-ucenter/user/get_user_info` JSON into an `AuthState`.
-/// Returns `None` on transient/risk-control errors so cached auth state is preserved.
-pub fn parse_live_user_info_response(resp: &Value, fallback_mid: u64) -> Option<AuthState> {
-    let code = resp["code"].as_i64().unwrap_or(-1);
-    if code == 0 {
-        let data = &resp["data"];
-        let uname = data["uname"].as_str().unwrap_or("").trim().to_string();
-        if uname.is_empty() {
-            return None;
-        }
-        return Some(AuthState {
-            is_login: true,
-            uname,
-            mid: value_as_u64(&data["uid"]).unwrap_or(fallback_mid),
-            face: data["face"].as_str().unwrap_or("").trim().to_string(),
-        });
-    }
-    if code == -101 {
-        return Some(AuthState::default());
-    }
-    None
-}
-
-/// Maximum character count allowed per sent Bilibili live danmaku message.
-pub const DANMAKU_MAX_CHARS: usize = 40;
-
-/// Structured errors returned when sending a Bilibili live danmaku message.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SendDanmakuError {
-    NotLoggedIn,
-    NotConnected,
-    EmptyMessage,
-    MessageTooLong { max: usize },
-    RateLimited(String),
-    AuthExpired(String),
-    Rejected(String),
-    Network(String),
-}
-
-impl fmt::Display for SendDanmakuError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotLoggedIn => write!(f, "Not logged in"),
-            Self::NotConnected => write!(f, "Not connected to a live room"),
-            Self::EmptyMessage => write!(f, "Danmaku message is empty"),
-            Self::MessageTooLong { max } => {
-                write!(f, "Danmaku message exceeds {} characters", max)
-            }
-            Self::RateLimited(msg) => {
-                if msg.is_empty() {
-                    write!(f, "Sending too fast")
-                } else {
-                    write!(f, "Rate limited: {}", msg)
-                }
-            }
-            Self::AuthExpired(msg) => {
-                if msg.is_empty() {
-                    write!(f, "Login session expired")
-                } else {
-                    write!(f, "Login session expired: {}", msg)
-                }
-            }
-            Self::Rejected(msg) => write!(f, "{}", msg),
-            Self::Network(msg) => write!(f, "{}", msg),
-        }
-    }
-}
-
-impl std::error::Error for SendDanmakuError {}
-
-fn form_urlencode(pairs: &[(&str, &str)]) -> String {
-    fn push_encoded(out: &mut String, raw: &str) {
-        for &b in raw.as_bytes() {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                out.push(b as char);
-            } else if b == b' ' {
-                out.push('+');
-            } else {
-                out.push('%');
-                out.push(
-                    char::from_digit(u32::from(b >> 4), 16)
-                        .unwrap_or('0')
-                        .to_ascii_uppercase(),
-                );
-                out.push(
-                    char::from_digit(u32::from(b & 0x0F), 16)
-                        .unwrap_or('0')
-                        .to_ascii_uppercase(),
-                );
-            }
-        }
-    }
-
-    let mut encoded = String::new();
-    for (idx, (k, v)) in pairs.iter().enumerate() {
-        if idx > 0 {
-            encoded.push('&');
-        }
-        push_encoded(&mut encoded, k);
-        encoded.push('=');
-        push_encoded(&mut encoded, v);
-    }
-    encoded
-}
-
-/// Parses `https://api.live.bilibili.com/msg/send` JSON into `Ok(())` or a typed `SendDanmakuError`.
-pub fn parse_send_danmaku_response(resp: &Value) -> std::result::Result<(), SendDanmakuError> {
-    let code = resp["code"].as_i64().unwrap_or(-1);
-    let msg_field = resp["msg"].as_str().unwrap_or("").trim();
-    let message_field = resp["message"].as_str().unwrap_or("").trim();
-    let detail = if !message_field.is_empty() {
-        message_field
-    } else {
-        msg_field
-    };
-
-    match code {
-        0 => {
-            if msg_field.is_empty() {
-                return Ok(());
-            }
-            match msg_field {
-                "f" | "k" | "fire" => Err(SendDanmakuError::Rejected(format!(
-                    "filtered ({})",
-                    msg_field
-                ))),
-                "msg in 1s" | "max limit exceeded" => {
-                    Err(SendDanmakuError::RateLimited(msg_field.to_string()))
-                }
-                other => Err(SendDanmakuError::Rejected(other.to_string())),
-            }
-        }
-        -101 | -111 => Err(SendDanmakuError::AuthExpired(if detail.is_empty() {
-            format!("code {}", code)
-        } else {
-            detail.to_string()
-        })),
-        10030 | 10031 => Err(SendDanmakuError::RateLimited(detail.to_string())),
-        other => Err(SendDanmakuError::Rejected(if detail.is_empty() {
-            format!("code {}", other)
-        } else {
-            detail.to_string()
-        })),
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct QrGenerateResult {
     pub url: String,
     pub qrcode_key: String,
@@ -425,7 +85,7 @@ pub struct AuthManager {
 impl AuthManager {
     pub fn new<P: AsRef<Path>>(session_path: P) -> Self {
         let path = session_path.as_ref().to_path_buf();
-        let loaded = match SessionData::load(&path) {
+        let loaded = match load_session_file(&path) {
             Ok(Some(s)) if s.is_valid_format() => Some(s),
             Ok(_) => None,
             Err(e) => {
@@ -492,7 +152,7 @@ impl AuthManager {
         if !trimmed_face.is_empty() {
             session.face = trimmed_face.to_string();
         }
-        session.save(&self.session_path)?;
+        save_session_file(&session, &self.session_path)?;
         let mid = session.dede_user_id.parse().unwrap_or(0);
         *self.session.write().expect("AuthManager RwLock poisoned") = Some(session);
         self.state_tx.send_replace(AuthState {
@@ -528,7 +188,7 @@ impl AuthManager {
             }
         };
         if let Some(sess) = snapshot_to_save
-            && let Err(e) = sess.save(&self.session_path)
+            && let Err(e) = save_session_file(&sess, &self.session_path)
         {
             log::warn!(
                 "Failed to persist cached profile name to {:?}: {:#}",
@@ -556,7 +216,7 @@ impl AuthManager {
     }
 
     pub fn logout(&self) -> Result<()> {
-        SessionData::remove(&self.session_path)?;
+        remove_session_file(&self.session_path)?;
         *self.session.write().expect("AuthManager RwLock poisoned") = None;
         self.state_tx.send_replace(AuthState::default());
         log::info!("🔓 Bilibili session cleared");
@@ -565,7 +225,7 @@ impl AuthManager {
 
     /// Clear in-memory and on-disk session credentials when an authenticated API reports expiry.
     pub fn invalidate_session(&self) {
-        if let Err(e) = SessionData::remove(&self.session_path) {
+        if let Err(e) = remove_session_file(&self.session_path) {
             log::warn!(
                 "Failed to remove expired session file {:?}: {}",
                 self.session_path,
@@ -961,8 +621,8 @@ mod tests {
             "SESSDATA=abc%2Cdef; bili_jct=csrf123; DedeUserID=3829104"
         );
 
-        session.save(&path).unwrap();
-        let loaded = SessionData::load(&path).unwrap().unwrap();
+        save_session_file(&session, &path).unwrap();
+        let loaded = load_session_file(&path).unwrap().unwrap();
         assert_eq!(loaded, session);
 
         let mgr = AuthManager::new(&path);
@@ -991,152 +651,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_nav_and_live_user_info_responses() {
-        let nav_ok = serde_json::json!({
-            "code": 0,
-            "data": {
-                "isLogin": true,
-                "uname": "主播A",
-                "mid": 123456,
-                "face": "https://i0.hdslb.com/a.jpg"
-            }
-        });
-        let parsed = parse_nav_response(&nav_ok, 999).unwrap();
-        assert!(parsed.is_login);
-        assert_eq!(parsed.uname, "主播A");
-        assert_eq!(parsed.mid, 123456);
-        assert_eq!(parsed.face, "https://i0.hdslb.com/a.jpg");
-
-        let nav_logged_out = serde_json::json!({"code": 0, "data": {"isLogin": false}});
-        assert!(!parse_nav_response(&nav_logged_out, 999).unwrap().is_login);
-        let nav_expired = serde_json::json!({"code": -101});
-        assert!(!parse_nav_response(&nav_expired, 999).unwrap().is_login);
-        let nav_risk = serde_json::json!({"code": -412, "message": "risk"});
-        assert!(parse_nav_response(&nav_risk, 999).is_none());
-
-        let live_ok = serde_json::json!({
-            "code": 0,
-            "data": {
-                "uid": 123456,
-                "uname": "主播B",
-                "face": "https://i0.hdslb.com/b.jpg"
-            }
-        });
-        let live_parsed = parse_live_user_info_response(&live_ok, 999).unwrap();
-        assert!(live_parsed.is_login);
-        assert_eq!(live_parsed.uname, "主播B");
-        assert_eq!(live_parsed.mid, 123456);
-        assert_eq!(live_parsed.face, "https://i0.hdslb.com/b.jpg");
-
-        let live_expired = serde_json::json!({"code": -101});
-        assert!(
-            !parse_live_user_info_response(&live_expired, 999)
-                .unwrap()
-                .is_login
-        );
-        let live_risk = serde_json::json!({"code": -412});
-        assert!(parse_live_user_info_response(&live_risk, 999).is_none());
-    }
-
-    #[test]
-    fn test_from_set_cookie_headers_and_qr_poll_fsm() {
-        let cookies = vec![
-            "SESSDATA=s123; Path=/; Domain=.bilibili.com; HttpOnly".to_string(),
-            "bili_jct=j456; Path=/; Domain=.bilibili.com".to_string(),
-            "DedeUserID=998877; Path=/".to_string(),
-        ];
-
-        assert_eq!(
-            parse_qr_poll_code(86101, "未扫码", &[]),
-            QrPollStatus::Waiting
-        );
-        assert_eq!(
-            parse_qr_poll_code(86090, "已扫码", &[]),
-            QrPollStatus::Scanned
-        );
-        assert_eq!(
-            parse_qr_poll_code(86038, "已过期", &[]),
-            QrPollStatus::Expired
-        );
-
-        match parse_qr_poll_code(0, "", &cookies) {
-            QrPollStatus::Success(s) => {
-                assert_eq!(s.sessdata, "s123");
-                assert_eq!(s.bili_jct, "j456");
-                assert_eq!(s.dede_user_id, "998877");
-            }
-            other => panic!("Unexpected poll status: {:?}", other),
-        }
-
-        assert!(matches!(
-            parse_qr_poll_code(0, "", &["SESSDATA=only_one; Path=/".to_string()]),
-            QrPollStatus::Error(_)
-        ));
-    }
-
-    #[test]
-    fn test_render_qr_and_from_login_url() {
+    fn test_render_qr() {
         let url =
             "https://passport.bilibili.com/h5-app/passport/login/scan?navhide=1&qrcode_key=abc123";
         let (svg_xml, term_qr) = render_qr(url).unwrap();
         assert!(svg_xml.contains("<svg"));
         assert!(svg_xml.contains("</svg>"));
         assert!(!term_qr.trim().is_empty());
-
-        let login_url = "https://passport.biligame.com/x/passport-login/web/crossDomain?DedeUserID=123456&DedeUserID__ckMd5=aaa&Expires=123&SESSDATA=val1%2Cval2%2A&bili_jct=csrf999";
-        let parsed = SessionData::from_login_url(login_url).unwrap();
-        assert_eq!(parsed.dede_user_id, "123456");
-        assert_eq!(parsed.sessdata, "val1,val2*");
-        assert_eq!(parsed.bili_jct, "csrf999");
-
-        match parse_qr_poll_response(0, "", &[], Some(login_url)) {
-            QrPollStatus::Success(s) => assert_eq!(s.dede_user_id, "123456"),
-            other => panic!("Expected fallback login URL success, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_form_urlencode_utf8_and_special_chars() {
-        let encoded = form_urlencode(&[("msg", "hello 弹幕+100%&!"), ("csrf", "abc_123-XYZ.~")]);
-        assert_eq!(
-            encoded,
-            "msg=hello+%E5%BC%B9%E5%B9%95%2B100%25%26%21&csrf=abc_123-XYZ.~"
-        );
-    }
-
-    #[test]
-    fn test_parse_send_danmaku_response_variants() {
-        assert_eq!(
-            parse_send_danmaku_response(&serde_json::json!({"code": 0, "msg": "", "message": ""})),
-            Ok(())
-        );
-        assert_eq!(
-            parse_send_danmaku_response(&serde_json::json!({"code": 0, "msg": "f"})),
-            Err(SendDanmakuError::Rejected("filtered (f)".to_string()))
-        );
-        assert_eq!(
-            parse_send_danmaku_response(
-                &serde_json::json!({"code": -101, "message": "账号未登录"})
-            ),
-            Err(SendDanmakuError::AuthExpired("账号未登录".to_string()))
-        );
-        assert_eq!(
-            parse_send_danmaku_response(
-                &serde_json::json!({"code": -111, "message": "csrf 校验失败"})
-            ),
-            Err(SendDanmakuError::AuthExpired("csrf 校验失败".to_string()))
-        );
-        assert_eq!(
-            parse_send_danmaku_response(
-                &serde_json::json!({"code": 10030, "message": "发送过于频繁"})
-            ),
-            Err(SendDanmakuError::RateLimited("发送过于频繁".to_string()))
-        );
-        assert_eq!(
-            parse_send_danmaku_response(
-                &serde_json::json!({"code": 1003212, "message": "超出限制"})
-            ),
-            Err(SendDanmakuError::Rejected("超出限制".to_string()))
-        );
     }
 }

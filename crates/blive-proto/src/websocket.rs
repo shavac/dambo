@@ -2,9 +2,10 @@
 //! WebSocket client for Bilibili live danmaku messages (refactored from bili_live_dm)
 
 use base64::{Engine as _, engine::general_purpose};
+use flate2::read::ZlibDecoder;
 use native_tls::TlsStream;
-use prost::Message as _;
 use serde_json::Value;
+use std::io::Read as _;
 use std::net::TcpStream;
 use std::panic;
 use tungstenite::{Message, WebSocket, client};
@@ -452,20 +453,80 @@ pub fn get_msg_header(v_s: &[u8]) -> MsgHead {
 
 pub fn decompress(body: &[u8]) -> std::io::Result<Vec<u8>> {
     use brotlic::DecompressorReader;
-    use std::io::Read;
     let mut decompressed_reader: DecompressorReader<&[u8]> = DecompressorReader::new(body);
     let mut decoded_input = Vec::new();
     let _ = decompressed_reader.read_to_end(&mut decoded_input)?;
     Ok(decoded_input)
 }
 
-// Only the fields needed to identify room entries; prost skips other fields.
-#[derive(prost::Message)]
-struct InteractWordV2 {
-    #[prost(string, tag = "2")]
-    uname: String,
-    #[prost(uint32, tag = "5")]
-    msg_type: u32,
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct FrameDecodeResult {
+    pub auth_ack: bool,
+    pub popularity: Option<u32>,
+}
+
+/// Panic-free Bilibili binary WebSocket packet decoder supporting plain JSON (`ver == 0`),
+/// Zlib (`ver == 2`), and Brotli (`ver == 3` via `decompress`).
+pub fn decode_bili_frames(buf: &[u8], out_jsons: &mut Vec<Value>) -> FrameDecodeResult {
+    let mut result = FrameDecodeResult::default();
+    let mut offset = 0usize;
+
+    while offset + 16 <= buf.len() {
+        let head = get_msg_header(&buf[offset..offset + 16]);
+        let pack_len = head.pack_len as usize;
+        let hdr_len = (head.raw_header_size as usize).max(16);
+        if pack_len < hdr_len || offset + pack_len > buf.len() {
+            break;
+        }
+        let body = &buf[offset + hdr_len..offset + pack_len];
+
+        match head.operation {
+            8 => {
+                result.auth_ack = true;
+            }
+            3 => {
+                if body.len() >= 4 {
+                    let pop = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+                    result.popularity = Some(pop);
+                }
+            }
+            5 => match head.ver {
+                3 => {
+                    if let Ok(decompressed) = decompress(body) {
+                        let sub = decode_bili_frames(&decompressed, out_jsons);
+                        result.auth_ack |= sub.auth_ack;
+                        if sub.popularity.is_some() {
+                            result.popularity = sub.popularity;
+                        }
+                    }
+                }
+                2 => {
+                    let mut decoder = ZlibDecoder::new(body);
+                    let mut decompressed = Vec::new();
+                    if decoder.read_to_end(&mut decompressed).is_ok() {
+                        let sub = decode_bili_frames(&decompressed, out_jsons);
+                        result.auth_ack |= sub.auth_ack;
+                        if sub.popularity.is_some() {
+                            result.popularity = sub.popularity;
+                        }
+                    }
+                }
+                0 => {
+                    if let Ok(val) = serde_json::from_slice::<Value>(body) {
+                        out_jsons.push(val);
+                    }
+                }
+                other => {
+                    log::debug!("Ignoring unknown Bilibili packet compression ver={}", other);
+                }
+            },
+            _ => {}
+        }
+
+        offset += pack_len;
+    }
+
+    result
 }
 
 /// here we detail [info format is online](https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/live/message_stream.md)
@@ -497,15 +558,23 @@ pub fn handle(json: Value) -> Option<BiliMessage> {
             let entry = data["pb"]
                 .as_str()
                 .and_then(|pb| general_purpose::STANDARD.decode(pb).ok())
-                .and_then(|bytes| InteractWordV2::decode(bytes.as_slice()).ok());
+                .and_then(|bytes| crate::pb::decode_interact_word(bytes.as_slice()));
             match entry {
-                Some(entry) if entry.msg_type == 1 => Some(BiliMessage::RoomEntry {
-                    user: if entry.uname.is_empty() {
-                        "<unknown>".to_string()
+                Some(entry) if entry.msg_type == 1 => {
+                    let user = if !entry.username.trim().is_empty() {
+                        entry.username
+                    } else if let Some(uinfo_name) = entry
+                        .uinfo
+                        .and_then(|u| u.base)
+                        .map(|b| b.name)
+                        .filter(|n| !n.trim().is_empty())
+                    {
+                        uinfo_name
                     } else {
-                        entry.uname
-                    },
-                }),
+                        "<unknown>".to_string()
+                    };
+                    Some(BiliMessage::RoomEntry { user })
+                }
                 // Preserve other interactions and malformed payloads as raw events.
                 _ => Some(BiliMessage::Raw(json)),
             }
@@ -546,5 +615,50 @@ mod tests {
         let room_id = "24779526";
         let (tx, _rx) = channel(10);
         let _client = BiliLiveClient::new(&cookies, room_id, tx);
+    }
+
+    fn build_raw_frame(ver: u16, op: u32, body: &[u8]) -> Vec<u8> {
+        let pack_len = (16 + body.len()) as u32;
+        let mut out = Vec::with_capacity(pack_len as usize);
+        out.extend_from_slice(&pack_len.to_be_bytes());
+        out.extend_from_slice(&16u16.to_be_bytes());
+        out.extend_from_slice(&ver.to_be_bytes());
+        out.extend_from_slice(&op.to_be_bytes());
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn test_decode_bili_frames_plain_zlib_and_truncated_safety() {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+
+        let auth_ack = build_raw_frame(1, 8, b"{}");
+        let plain = build_raw_frame(0, 5, br#"{"cmd":"LIVE"}"#);
+
+        let inner = build_raw_frame(0, 5, br#"{"cmd":"PREPARING"}"#);
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&inner).unwrap();
+        let zlib_body = encoder.finish().unwrap();
+        let zlib_frame = build_raw_frame(2, 5, &zlib_body);
+
+        let mut combined = Vec::new();
+        combined.extend_from_slice(&auth_ack);
+        combined.extend_from_slice(&plain);
+        combined.extend_from_slice(&zlib_frame);
+
+        let mut out = Vec::new();
+        let res = decode_bili_frames(&combined, &mut out);
+        assert!(res.auth_ack);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["cmd"], "LIVE");
+        assert_eq!(out[1]["cmd"], "PREPARING");
+
+        // Truncated/corrupt frame must never panic
+        let mut out_bad = Vec::new();
+        let _ = decode_bili_frames(&[0, 0, 0, 99, 0, 16, 0, 0, 0, 5, 0, 0, 0, 1], &mut out_bad);
+        assert!(out_bad.is_empty());
     }
 }
