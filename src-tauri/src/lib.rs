@@ -32,6 +32,7 @@ struct AppContext {
     qr_poll_cancel: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
     panel_min_width: Arc<std::sync::Mutex<f64>>,
     panel_expanded: Arc<std::sync::atomic::AtomicBool>,
+    panel_drag_origin: Arc<std::sync::Mutex<Option<tauri::PhysicalPosition<i32>>>>,
 }
 
 fn compute_panel_width_bounds(requested_min_width: f64) -> (f64, f64) {
@@ -730,6 +731,40 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+fn normalize_os_path_str(path: &Path, is_windows: bool) -> String {
+    let raw_in = path.to_string_lossy();
+    let is_win_abs = is_windows
+        && (raw_in.starts_with("\\\\")
+            || (raw_in.len() >= 2
+                && raw_in.as_bytes()[0].is_ascii_alphabetic()
+                && raw_in.as_bytes()[1] == b':'));
+
+    let resolved = if path.as_os_str().is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else if path.is_relative() && !is_win_abs {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+
+    let normalized = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+    let raw = normalized.to_string_lossy().into_owned();
+
+    if is_windows {
+        let mut s = raw.replace('/', "\\");
+        if let Some(stripped) = s.strip_prefix("\\\\?\\UNC\\") {
+            s = format!("\\\\{}", stripped);
+        } else if let Some(stripped) = s.strip_prefix("\\\\?\\") {
+            s = stripped.to_string();
+        }
+        s
+    } else {
+        raw
+    }
+}
+
 fn open_in_os(target: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -747,25 +782,27 @@ fn open_in_os(target: &str) {
     }
 }
 
-fn open_dir_in_os(dir: &PathBuf) {
-    let target = if dir.as_os_str().is_empty() {
+fn open_dir_in_os(dir: &Path) {
+    let base = if dir.as_os_str().is_empty() {
         PathBuf::from(".")
     } else {
         let _ = std::fs::create_dir_all(dir);
-        dir.clone()
+        dir.to_path_buf()
     };
-    open_in_os(&target.to_string_lossy());
+    let target = normalize_os_path_str(&base, cfg!(target_os = "windows"));
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("explorer").arg(&target).spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        open_in_os(&target);
+    }
 }
 
 fn open_file_in_os(path: &Path) {
-    let resolved = if path.is_relative() {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    } else {
-        path.to_path_buf()
-    };
-    let target = resolved.to_string_lossy().into_owned();
+    let target = normalize_os_path_str(path, cfg!(target_os = "windows"));
 
     #[cfg(target_os = "macos")]
     {
@@ -1078,6 +1115,78 @@ async fn set_panel_width(
 }
 
 #[tauri::command]
+async fn begin_panel_move(
+    window: tauri::WebviewWindow,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    let win = window.clone();
+    let origin_store = ctx.panel_drag_origin.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+    window
+        .run_on_main_thread(move || {
+            let res = match win.outer_position() {
+                Ok(pos) => {
+                    if let Ok(mut guard) = origin_store.lock() {
+                        *guard = Some(pos);
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(res);
+        })
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Panel move init dropped before completing on main thread".to_string())?
+}
+
+#[tauri::command]
+async fn move_panel_by(
+    window: tauri::WebviewWindow,
+    dx: f64,
+    dy: f64,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    if !dx.is_finite() || !dy.is_finite() {
+        return Ok(());
+    }
+    let win = window.clone();
+    let origin_store = ctx.panel_drag_origin.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+    window
+        .run_on_main_thread(move || {
+            let origin = origin_store.lock().ok().and_then(|g| *g);
+            let res = if let Some(origin) = origin {
+                let scale = win.scale_factor().unwrap_or(1.0);
+                let target = tauri::PhysicalPosition::new(
+                    origin.x.saturating_add((dx * scale).round() as i32),
+                    origin.y.saturating_add((dy * scale).round() as i32),
+                );
+                win.set_position(tauri::Position::Physical(target))
+                    .map_err(|e| e.to_string())
+            } else {
+                Ok(())
+            };
+            let _ = tx.send(res);
+        })
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Panel move dropped before completing on main thread".to_string())?
+}
+
+#[tauri::command]
+async fn end_panel_move(ctx: State<'_, AppContext>) -> Result<(), String> {
+    if let Ok(mut guard) = ctx.panel_drag_origin.lock() {
+        *guard = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn open_config_file(ctx: State<'_, AppContext>) -> Result<(), String> {
     open_config_file_in_os(&ctx.runtime);
     Ok(())
@@ -1333,6 +1442,7 @@ pub fn run(config_path: &str) {
             qr_poll_cancel: qr_poll_cancel.clone(),
             panel_min_width: Arc::new(std::sync::Mutex::new(PANEL_BASE_MIN_WIDTH)),
             panel_expanded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            panel_drag_origin: Arc::new(std::sync::Mutex::new(None)),
         })
         .on_window_event(move |window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed)
@@ -1362,6 +1472,9 @@ pub fn run(config_path: &str) {
             set_dropdown_expanded,
             sync_panel_min_width,
             set_panel_width,
+            begin_panel_move,
+            move_panel_by,
+            end_panel_move,
             open_config_file,
             open_folder,
             set_always_on_top,
@@ -1634,5 +1747,21 @@ mod tests {
         assert_eq!(clamp_panel_width(999.0, 520.0), 860.0);
         assert_eq!(clamp_panel_width(600.0, 620.0), 620.0);
         assert_eq!(clamp_panel_width(f64::NAN, 540.0), 540.0);
+    }
+
+    #[test]
+    fn test_normalize_os_path_str_windows_separators_and_unc_prefix() {
+        assert_eq!(
+            normalize_os_path_str(Path::new(r"C:\Users\demo\dambo\var/records"), true),
+            r"C:\Users\demo\dambo\var\records"
+        );
+        assert_eq!(
+            normalize_os_path_str(Path::new(r"\\?\C:\Users\demo\dambo\var/logs"), true),
+            r"C:\Users\demo\dambo\var\logs"
+        );
+        assert_eq!(
+            normalize_os_path_str(Path::new(r"\\?\UNC\server\share\var/records"), true),
+            r"\\server\share\var\records"
+        );
     }
 }

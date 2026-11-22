@@ -834,7 +834,7 @@ resizeHandleEl?.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
-    if (IS_MACOS) {
+    if (IS_MACOS || e.pointerType !== 'mouse') {
         startPointerEastResize(resizeHandleEl, e);
         return;
     }
@@ -843,7 +843,108 @@ resizeHandleEl?.addEventListener('pointerdown', (e) => {
     });
 });
 
-document.querySelector('.pod-container')?.addEventListener('pointerdown', (e) => {
+let activePointerMove = null;
+
+function stopPointerPanelMove() {
+    if (!activePointerMove) return;
+    const drag = activePointerMove;
+    activePointerMove = null;
+
+    if (drag.rafId !== null) {
+        cancelAnimationFrame(drag.rafId);
+    }
+    window.removeEventListener('pointermove', drag.onMove);
+    window.removeEventListener('pointerup', drag.onEnd);
+    window.removeEventListener('pointercancel', drag.onEnd);
+    drag.target.removeEventListener('lostpointercapture', drag.onEnd);
+
+    try {
+        if (drag.target.hasPointerCapture?.(drag.pointerId)) {
+            drag.target.releasePointerCapture(drag.pointerId);
+        }
+    } catch (_) {
+        // Ignore if capture is already released
+    }
+
+    if (invoke) {
+        invoke('end_panel_move').catch(() => {});
+    }
+}
+
+function startPointerPanelMove(target, startEvent) {
+    if (!target || !invoke) return;
+    stopPointerPanelMove();
+
+    const pointerId = startEvent.pointerId;
+    const startScreenX = startEvent.screenX;
+    const startScreenY = startEvent.screenY;
+    let lastSentDx = 0;
+    let lastSentDy = 0;
+    let pendingDx = 0;
+    let pendingDy = 0;
+    let rafId = null;
+
+    invoke('begin_panel_move').catch((err) => {
+        console.error('Failed to begin pointer panel move:', err);
+    });
+
+    const flushMove = () => {
+        rafId = null;
+        if (activePointerMove) {
+            activePointerMove.rafId = null;
+        }
+        if (pendingDx === lastSentDx && pendingDy === lastSentDy) return;
+        const dx = pendingDx;
+        const dy = pendingDy;
+        lastSentDx = dx;
+        lastSentDy = dy;
+        invoke('move_panel_by', { dx, dy }).catch((err) => {
+            console.error('Failed to move panel:', err);
+        });
+    };
+
+    const onMove = (ev) => {
+        if (ev.pointerId !== pointerId) return;
+        pendingDx = Math.round(ev.screenX - startScreenX);
+        pendingDy = Math.round(ev.screenY - startScreenY);
+        if (rafId === null) {
+            rafId = requestAnimationFrame(flushMove);
+            if (activePointerMove) {
+                activePointerMove.rafId = rafId;
+            }
+        }
+    };
+
+    const onEnd = (ev) => {
+        if (ev && ev.pointerId !== undefined && ev.pointerId !== pointerId) return;
+        if (pendingDx !== lastSentDx || pendingDy !== lastSentDy) {
+            flushMove();
+        }
+        stopPointerPanelMove();
+    };
+
+    activePointerMove = {
+        target,
+        pointerId,
+        onMove,
+        onEnd,
+        rafId: null,
+    };
+
+    try {
+        target.setPointerCapture(pointerId);
+    } catch (_) {
+        // Window listeners continue tracking if capture fails
+    }
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
+    target.addEventListener('lostpointercapture', onEnd);
+}
+
+const podContainerEl = document.querySelector('.pod-container');
+podContainerEl?.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (
         e.target instanceof Element &&
@@ -855,6 +956,8 @@ document.querySelector('.pod-container')?.addEventListener('pointerdown', (e) =>
     }
     if (e.pointerType !== 'mouse') {
         e.preventDefault();
+        startPointerPanelMove(podContainerEl, e);
+        return;
     }
     Promise.resolve(startPanelDragging()).catch((err) => {
         console.error('Failed to start panel drag:', err);
@@ -1030,6 +1133,7 @@ document.addEventListener('keydown', (e) => {
 
 window.addEventListener('blur', () => {
     stopPointerEastResize();
+    stopPointerPanelMove();
     closeAllMenus();
 });
 
