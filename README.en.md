@@ -2,15 +2,20 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-**dambo** is a ready-to-use Bilibili live-room danmaku collector, transparent OBS overlay host, desktop floating widget launcher, lossless session recorder, and AI-ready real-time event stream node.
+> **Dambo — An Advanced Danmaku Platform for the AI Era.**
 
-Whether you want transparent danmaku overlays on stream, a quick chat box to reply to viewers right from your desktop, interactive chat mini-games like 24-Point Poker, or automatic JSONL recording and WebSocket feeds for bots and AI pipelines, **dambo** works out of the box.
+**dambo** is a lightweight, high-performance Bilibili live-room danmaku platform that brings together **live danmaku collection & desktop chat input**, **transparent OBS overlays & desktop floating widgets**, **lossless session recording**, and **AI-ready real-time event streams** out of the box.
+
+Whether you want ultra-lightweight transparent overlays while gaming, a quick desktop chat box to interact with viewers, interactive chat mini-games like 24-Point Poker, AI-generated custom plugins, or structured WebSocket event feeds for bots and AI pipelines, **dambo** handles it smoothly.
 
 - **AI Plugin Guide**: [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) (Chinese: [PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)) — upload this file directly to an AI assistant and let it build or customize plugins for your stream.
 
 ---
 
-## Key Capabilities
+## Key Capabilities & Advantages
+
+- **High Performance & Low Resource Footprint**
+  - Built on a native **Rust + Tokio + Tauri** async engine with zero-dependency Pure-Web plugins (no Electron runtime or frontend bundler overhead, bounded ring buffers, and traffic-shaping event streams), keeping CPU and memory usage minimal even during heavy chat bursts or gaming streams.
 
 - **Desktop Control Capsule & System Tray (`dambo-ui`)**
   - Compact frameless floating toolbar: drag by the left grip handle, resize width from the right edge, switch **简体中文 / 日本語 / English** live, or control everything from the system tray.

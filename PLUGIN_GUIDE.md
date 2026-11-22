@@ -106,6 +106,8 @@ static/html/<plugin-id>/
  * @property {number=} num Gift quantity or Guard subscription months
  * @property {number=} guard_level `1`=总督, `2`=提督, `3`=舰长
  * @property {number[]=} ids Deleted SuperChat IDs (present when `kind === 'superchat_delete'`)
+ * @property {string=} batch_combo_id Native gift combo batch ID (omitted when not in a combo)
+ * @property {number=} combo_stay_time Native gift combo stay duration in seconds (`0` or omitted when not in a combo)
  * @property {number} timestamp 13-digit Unix timestamp in ms
  */
 
@@ -217,6 +219,16 @@ static/html/<plugin-id>/
  */
 
 /**
+ * @typedef {Object} InteractFormattedInfo
+ * @property {string} kind `'enter'` | `'follow'` | `'share'` | `'special_follow'` | `'mutual_follow'` | `'guard_enter'`
+ * @property {number} msgType Raw `msg_type` (`1`~`5`, or `0` if unknown)
+ * @property {number} guardLevel `1`=总督, `2`=提督, `3`=舰长, `0`=non-guard
+ * @property {string} guardName `'总督'` | `'提督'` | `'舰长'` | `''`
+ * @property {string} actionText Standardized fallback action phrase (e.g. `'进入了直播间'`, `'关注了直播间'`)
+ * @property {string} summaryText Cleaned `item.content` or `actionText` fallback
+ */
+
+/**
  * @typedef {Object} RemainingDurationOptions
  * @property {boolean=} isSnapshot default `true` (`false` returns `totalMs`)
  * @property {number=} minMs default `0`
@@ -236,6 +248,7 @@ static/html/<plugin-id>/
  * @property {number} comboTotalCoin Cumulative native combo gold seeds (`0` if omitted)
  * @property {number} unitPrice Unit price in seeds (`0` if omitted)
  * @property {number} priceSeeds Event `price` field in gold seeds (`0` for free)
+ * @property {number} comboStayTimeMs Server combo stay window in ms (`0` if omitted)
  * @property {string} mergeKey `'batch:<id>'` or `'combo:<user>|<gift>|<coinType>'`
  */
 
@@ -256,6 +269,7 @@ static/html/<plugin-id>/
 /**
  * @typedef {Object} GiftComboTrackerOptions
  * @property {number=} windowMs Sliding merge window in ms (default `4000`)
+ * @property {boolean=} useServerComboStayTime Use `item.combo_stay_time * 1000` when `> 0`, default `false`
  * @property {((entry: GiftComboEntry, item: Object, opts: Object) => boolean)=} canMerge Guard hook before merging into an active entry
  * @property {((entry: GiftComboEntry, item: Object, opts: Object) => void)=} onCreate Invoked when a new combo entry starts
  * @property {((entry: GiftComboEntry, delta: {deltaCount: number, deltaPriceSeeds: number, meta: GiftFormattedInfo}, item: Object, opts: Object) => void)=} onUpdate Invoked when an existing combo entry increments
@@ -306,7 +320,7 @@ static/html/<plugin-id>/
     connect(options),
     utils: {
         DEFAULT_AVATAR_SVG: 'data:image/svg+xml;utf8,<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="24" height="24" viewBox="0 0 24 24" fill="%2364748b"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>',
-        /** @param {string | null | undefined} url @returns {string} Upgrades Bilibili CDN http:// or // URLs to https:// */
+        /** @param {string | null | undefined} url @returns {string} Upgrades http:// or // URLs to https:// */
         normalizeUrl(url),
         /** @param {string | SnapshotItem | EventItem | null | undefined} itemOrKind @returns {boolean} True for 'superchat' or 'super_chat' */
         isSuperChat(itemOrKind),
@@ -326,6 +340,8 @@ static/html/<plugin-id>/
         guardLevelName(level),
         /** @param {SnapshotItem | EventItem | null | undefined} item @returns {GuardFormattedInfo} */
         formatGuard(item),
+        /** @param {SnapshotItem | EventItem | null | undefined} item @returns {InteractFormattedInfo} */
+        formatInteract(item),
         /** @param {SnapshotItem | EventItem | null | undefined} item @returns {number} Recommended pin duration in ms */
         superChatDurationMs(item),
         /** @param {SnapshotItem | EventItem | {timestamp?: number} | null | undefined} item @param {number} totalMs @param {RemainingDurationOptions | number} [options] @returns {number} Remaining TTL in ms (0 if expired) */
@@ -562,9 +578,10 @@ When building feature-rich overlays (pinned SuperChat/Guard bars, enter docks, s
    - **Pinned SC / Guard**: Compute `totalMs = Dambo.utils.superChatDurationMs(item)` and `remainingMs = Dambo.utils.remainingDurationMs(item, totalMs, { isSnapshot: Boolean(meta?.isSnapshot), minMs: 3000 })`; skip if `remainingMs <= 0`.
    - **Ephemeral Enter Dock (`ENTER_TTL_MS = 3000`)**: Compute `delayMs = Dambo.utils.remainingDurationMs(item, ENTER_TTL_MS, { isSnapshot: Boolean(meta?.isSnapshot) })`; skip if `delayMs <= 0`.
 
-4. **Guard & Gift Normalization / Combo Merging**:
+4. **Guard, Gift & Interact Normalization / Combo Merging**:
    - **Guard (`kind === 'guard'`)**: Call `const g = Dambo.utils.formatGuard(item)` to strip `<%...%>` wrappers, leading `${item.uname}`, and `在主播(的)房间/直播间` prefixes, returning `{ guardName, badgeLabel, actionText, highlightText, summaryText }`.
-   - **Gift (`kind === 'gift'`)**: Use `Dambo.utils.formatGift(item)` or `const giftCombos = Dambo.utils.createGiftComboTracker({ windowMs: 4000, onCreate, onUpdate, onExpire })` to merge active gift combos by `batch_combo_id` / `combo_id` or `uid/uname + gift_id/gift_name + coin_type` (keeping `'gold'` and `'silver'` separate, handling both incremental `num` and cumulative `combo_num`/`combo_total_coin`), and call `giftCombos.pruneExpiredSnapshots()` after replaying snapshot history.
+   - **Interact (`enter` / `follow` / `share` / `special_follow` / `mutual_follow` / `guard_enter`)**: Call `const info = Dambo.utils.formatInteract(item)` to normalize `msg_type`, `guardLevel`/`guardName`, and non-empty fallback text (`summaryText`, avoiding blank `enter` rows).
+   - **Gift (`kind === 'gift'`)**: Use `Dambo.utils.formatGift(item)` or `const giftCombos = Dambo.utils.createGiftComboTracker({ windowMs: 4000, useServerComboStayTime: true, onCreate, onUpdate, onExpire })` to merge active gift combos by `batch_combo_id` / `combo_id` or `uid/uname + gift_id/gift_name + coin_type` (keeping `'gold'` and `'silver'` separate, handling both incremental `num` and cumulative `combo_num`/`combo_total_coin`), and call `giftCombos.pruneExpiredSnapshots()` after replaying snapshot history.
 
 5. **Channel B (`/ws/event`) Aggregated Event Consumption Pattern**:
    Use `channel: 'event'` for dashboards, alerts, TTS, or high-density stream summarization where reservoir-aggregated counts (`ev.count`) and representative users (`ev.sample_users`) are needed:

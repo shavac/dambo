@@ -103,6 +103,8 @@ static/html/<plugin-id>/
  * @property {number=} num 礼物数量或大航海开通月数
  * @property {number=} guard_level `1`=总督, `2`=提督, `3`=舰长
  * @property {number[]=} ids 被撤回的 SuperChat ID 列表（仅 `kind === 'superchat_delete'` 时存在）
+ * @property {string=} batch_combo_id 原生礼物连击批次 ID（非连击时省略）
+ * @property {number=} combo_stay_time 原生礼物连击停留秒数（`0` 或省略表示非连击）
  * @property {number} timestamp 13 位 Unix 毫秒时间戳
  */
 
@@ -214,6 +216,16 @@ static/html/<plugin-id>/
  */
 
 /**
+ * @typedef {Object} InteractFormattedInfo
+ * @property {string} kind `'enter'` | `'follow'` | `'share'` | `'special_follow'` | `'mutual_follow'` | `'guard_enter'`
+ * @property {number} msgType 原始 `msg_type`（`1`~`5`，未知时为 `0`）
+ * @property {number} guardLevel `1`=总督, `2`=提督, `3`=舰长, `0`=非大航海
+ * @property {string} guardName `'总督'` | `'提督'` | `'舰长'` | `''`
+ * @property {string} actionText 标准化中文动作短语（如 `'进入了直播间'`、`'关注了直播间'`）
+ * @property {string} summaryText 清洗后的展示文本或兜底 `actionText`
+ */
+
+/**
  * @typedef {Object} RemainingDurationOptions
  * @property {boolean=} isSnapshot 默认 `true`（`false` 时直接返回 `totalMs`）
  * @property {number=} minMs 默认 `0`
@@ -233,6 +245,7 @@ static/html/<plugin-id>/
  * @property {number} comboTotalCoin 原生连击累计金瓜子数（缺省为 `0`）
  * @property {number} unitPrice 礼物单价（缺省为 `0`）
  * @property {number} priceSeeds 事件 `price` 字段（金瓜子，`0` 表示免费）
+ * @property {number} comboStayTimeMs 服务端连击停留窗口（毫秒，缺省为 `0`）
  * @property {string} mergeKey 推荐归并主键（优先 `'batch:<id>'`，否则 `'combo:<user>|<gift>|<coinType>'`）
  */
 
@@ -253,6 +266,7 @@ static/html/<plugin-id>/
 /**
  * @typedef {Object} GiftComboTrackerOptions
  * @property {number=} windowMs 滑动合并时间窗口（毫秒），默认 `4000`
+ * @property {boolean=} useServerComboStayTime 为 `true` 且事件包含 `combo_stay_time > 0` 时采用服务端连击停留窗口，默认 `false`
  * @property {((entry: GiftComboEntry, item: Object, opts: Object) => boolean)=} canMerge 合并前自定义校验钩子
  * @property {((entry: GiftComboEntry, item: Object, opts: Object) => void)=} onCreate 新建连击条目回调
  * @property {((entry: GiftComboEntry, delta: {deltaCount: number, deltaPriceSeeds: number, meta: GiftFormattedInfo}, item: Object, opts: Object) => void)=} onUpdate 连击刷新增量回调
@@ -303,7 +317,7 @@ static/html/<plugin-id>/
     connect(options),
     utils: {
         DEFAULT_AVATAR_SVG: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="%2364748b"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>',
-        /** @param {string | null | undefined} url @returns {string} 将 B 站 CDN 的 http:// 或 // 升级为 https:// */
+        /** @param {string | null | undefined} url @returns {string} 将 http:// 或 // 升级为 https:// */
         normalizeUrl(url),
         /** @param {string | SnapshotItem | EventItem | null | undefined} itemOrKind @returns {boolean} 匹配 'superchat' 或 'super_chat' */
         isSuperChat(itemOrKind),
@@ -323,6 +337,8 @@ static/html/<plugin-id>/
         guardLevelName(level),
         /** @param {SnapshotItem | EventItem | null | undefined} item @returns {GuardFormattedInfo} */
         formatGuard(item),
+        /** @param {SnapshotItem | EventItem | null | undefined} item @returns {InteractFormattedInfo} */
+        formatInteract(item),
         /** @param {SnapshotItem | EventItem | null | undefined} item @returns {number} 推荐置顶时长（毫秒） */
         superChatDurationMs(item),
         /** @param {SnapshotItem | EventItem | {timestamp?: number} | null | undefined} item @param {number} totalMs @param {RemainingDurationOptions | number} [options] @returns {number} 剩余有效时长（毫秒，过期返回 0） */
@@ -558,9 +574,10 @@ static/html/<plugin-id>/
    - **置顶 SC / 舰长**：计算 `totalMs = Dambo.utils.superChatDurationMs(item)` 与 `remainingMs = Dambo.utils.remainingDurationMs(item, totalMs, { isSnapshot: Boolean(meta?.isSnapshot), minMs: 3000 })`；若 `remainingMs <= 0` 则跳过。
    - **瞬态进房停靠（`ENTER_TTL_MS = 3000`）**：计算 `delayMs = Dambo.utils.remainingDurationMs(item, ENTER_TTL_MS, { isSnapshot: Boolean(meta?.isSnapshot) })`；若 `delayMs <= 0` 则跳过。
 
-4. **上舰与礼物字段标准化 / 连击滑动归并**：
+4. **上舰、礼物与互动字段标准化 / 连击滑动归并**：
    - **上舰（`kind === 'guard'`）**：统一调用 `const g = Dambo.utils.formatGuard(item)`，自动剥离 `<%...%>` 标记、开头重复 `${item.uname}` 及 `在主播(的)房间/直播间` 前缀，返回 `{ guardName, badgeLabel, actionText, highlightText, summaryText }`。
-   - **礼物（`kind === 'gift'`）**：使用 `Dambo.utils.formatGift(item)` 提取标准化字段，或使用 `const giftCombos = Dambo.utils.createGiftComboTracker({ windowMs: 4000, onCreate, onUpdate, onExpire })` 基于 `batch_combo_id` / `combo_id` 或 `uid/uname + gift_id/gift_name + coin_type` 在 4 秒滑动窗口内完成去重、免费/付费隔离与增量/累计双模式计数；快照回放结束后调用 `giftCombos.pruneExpiredSnapshots()` 清理历史过期记录。
+   - **互动（`enter` / `follow` / `share` / `special_follow` / `mutual_follow` / `guard_enter`）**：统一调用 `const info = Dambo.utils.formatInteract(item)`，标准化 `msg_type`、`guardLevel`/`guardName` 与非空兜底动作文案（`summaryText`，避免 `enter` 等事件正文为空时出现空白行）。
+   - **礼物（`kind === 'gift'`）**：使用 `Dambo.utils.formatGift(item)` 提取标准化字段，或使用 `const giftCombos = Dambo.utils.createGiftComboTracker({ windowMs: 4000, useServerComboStayTime: true, onCreate, onUpdate, onExpire })` 基于 `batch_combo_id` / `combo_id` 或 `uid/uname + gift_id/gift_name + coin_type` 在滑动窗口（优先采用服务端 `combo_stay_time`，否则回退 4 秒）内完成去重、免费/付费隔离与增量/累计双模式计数；快照回放结束后调用 `giftCombos.pruneExpiredSnapshots()` 清理历史过期记录。
 
 5. **Channel B（`/ws/event`）聚合事件消费模式**：
    适用于仪表盘、语音播报（TTS）、提醒或高并发弹幕摘要场景，直接消费蓄水池聚合计数（`ev.count`）与代表用户列表（`ev.sample_users`）：
