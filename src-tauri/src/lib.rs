@@ -92,6 +92,7 @@ fn apply_panel_window_bounds_sync(
     let (min_w, max_w) = compute_panel_width_bounds(requested_min_width);
     let (min_h, max_h) = compute_panel_height_bounds_for_base(requested_base_height);
     let target_h = clamp_panel_height(requested_height, requested_base_height);
+    #[cfg(target_os = "macos")]
     let top_left = window.outer_position().ok();
     let target_w = match explicit_width {
         Some(width) => clamp_panel_width(width, requested_min_width),

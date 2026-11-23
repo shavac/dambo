@@ -27,6 +27,8 @@ jobs:
             artifact_name: dambo-macos-arm64
           - os: windows-latest
             artifact_name: dambo-windows-x64
+          - os: ubuntu-22.04
+            artifact_name: dambo-linux-x64
 
     steps:
       - name: Exclude workspace from Windows Defender
@@ -79,6 +81,23 @@ jobs:
         run: |
           command -v cmake >/dev/null 2>&1 || brew install cmake
 
+      - name: Install Linux system dependencies
+        if: startsWith(matrix.os, 'ubuntu-')
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libxdo-dev \
+            pkg-config \
+            cmake \
+            build-essential
+
       - name: Run workspace tests (release)
         run: cargo test --release --workspace
 
@@ -123,6 +142,22 @@ jobs:
           Copy-Item "PLUGIN_GUIDE.md" -Destination "$StageDir\PLUGIN_GUIDE.md"
           Copy-Item "PLUGIN_GUIDE.zh.md" -Destination "$StageDir\PLUGIN_GUIDE.zh.md"
 
+      - name: Stage Linux release directory
+        if: startsWith(matrix.os, 'ubuntu-') && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE_DIR="dist/${{ matrix.artifact_name }}"
+          rm -rf "$STAGE_DIR"
+          mkdir -p "$STAGE_DIR/etc"
+
+          cp target/release/dambo-ui "$STAGE_DIR/dambo-ui"
+          cp target/release/dambo-cli "$STAGE_DIR/dambo-cli"
+          chmod +x "$STAGE_DIR/dambo-ui" "$STAGE_DIR/dambo-cli"
+          cp etc/config.sample.toml "$STAGE_DIR/etc/config.toml"
+          cp README.md README.en.md PLUGIN_GUIDE.md PLUGIN_GUIDE.zh.md "$STAGE_DIR/"
+          cp -R static "$STAGE_DIR/static"
+
       - name: Upload staged release directory
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
@@ -149,13 +184,23 @@ jobs:
           mkdir -p release-assets
           cd release-staging
 
-          chmod +x dambo-macos-arm64/dambo-cli dambo-macos-arm64/Dambo.app/Contents/MacOS/*
+          if [ -d dambo-macos-arm64 ]; then
+            chmod +x dambo-macos-arm64/dambo-cli dambo-macos-arm64/Dambo.app/Contents/MacOS/*
+          fi
+          if [ -d dambo-linux-x64 ]; then
+            chmod +x dambo-linux-x64/dambo-ui dambo-linux-x64/dambo-cli
+          fi
 
           for dir in dambo-*; do
             [ -d "$dir" ] || continue
             platform="${dir#dambo-}"
-            archive="../release-assets/dambo-${GITHUB_REF_NAME}-${platform}.zip"
-            zip -ry "$archive" "$dir"
+            if [[ "$platform" == linux-* ]]; then
+              archive="../release-assets/dambo-${GITHUB_REF_NAME}-${platform}.tar.gz"
+              tar -czf "$archive" "$dir"
+            else
+              archive="../release-assets/dambo-${GITHUB_REF_NAME}-${platform}.zip"
+              zip -ry "$archive" "$dir"
+            fi
           done
 
           ls -lh ../release-assets/
@@ -164,5 +209,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: "Dambo ${{ github.ref_name }}"
-          files: release-assets/*.zip
+          files: |
+            release-assets/*.zip
+            release-assets/*.tar.gz
           generate_release_notes: true

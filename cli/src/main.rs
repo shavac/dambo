@@ -1,17 +1,25 @@
+mod command;
+mod format;
+mod logger;
+mod tui;
+
+use crate::format::{connect_host, format_room_info_plain, format_user_info_plain};
+use crate::tui::TuiChannels;
 use anyhow::Result;
 use clap::Parser;
 use dambo_core::DamboRuntime;
 use dambo_core::auth::QrPollStatus;
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 #[derive(Parser, Debug)]
 #[command(name = "dambo-cli")]
 #[command(
     author = "kshava",
     version,
-    about = "Bilibili live danmaku collector, lossless recorder, and event-shaping node"
+    about = "Bilibili live danmaku collector, lossless recorder, and interactive CLI"
 )]
 struct Args {
     /// Path to the dambo TOML configuration file
@@ -29,6 +37,10 @@ struct Args {
     /// Enable sidecar raw Bilibili packet capture (*_raw.jsonl with pb_decoded/dm_v2_decoded)
     #[arg(long)]
     record_raw: bool,
+
+    /// Disable interactive TUI and run in headless logging mode
+    #[arg(long)]
+    headless: bool,
 }
 
 async fn next_os_shutdown_signal() -> Result<()> {
@@ -83,7 +95,7 @@ async fn run_cli_qr_login(runtime: &DamboRuntime, shutdown_rx: &mut watch::Recei
     let mut qr = match qr_res {
         Ok(q) => q,
         Err(e) => {
-            log::warn!("⚠️ 获取 B 站登录二维码失败 ({}), 将以游客模式继续启动", e);
+            log::warn!("⚠️ 获取 B 站登录二维码失败 ({}), 将以游客模式继续", e);
             return true;
         }
     };
@@ -132,10 +144,7 @@ async fn run_cli_qr_login(runtime: &DamboRuntime, shutdown_rx: &mut watch::Recei
             }
             Ok(QrPollStatus::Success(_)) => {
                 let state = runtime.auth.current_state();
-                println!(
-                    "✅ 登录成功！当前账号: @{} (UID: {})",
-                    state.uname, state.mid
-                );
+                println!("✅ 登录成功！{}", format_user_info_plain(&state));
                 return true;
             }
             Ok(QrPollStatus::Error(msg)) => {
@@ -150,18 +159,65 @@ async fn run_cli_qr_login(runtime: &DamboRuntime, shutdown_rx: &mut watch::Recei
     }
 }
 
+async fn run_headless(
+    runtime: Arc<DamboRuntime>,
+    mut room_rx: watch::Receiver<dambo_core::model::RoomStateSnapshot>,
+    mut event_rx: broadcast::Receiver<dambo_core::model::ChannelBMessage>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) {
+    let cfg = runtime.config_snapshot();
+    let c_host = connect_host(&cfg.server.host);
+    let base_http = format!("http://{}:{}", c_host, cfg.server.port);
+    let base_ws = format!("ws://{}:{}", c_host, cfg.server.port);
+
+    log::info!("🚀 dambo-cli headless node started:");
+    log::info!("   • OBS Overlay     : {}/", base_http);
+    log::info!("   • Danmaku Monitor : {}/list", base_http);
+    log::info!("   • Channel A       : {}/ws", base_ws);
+    log::info!("   • Channel B       : {}/ws/event", base_ws);
+
+    let mut announced_room_id: Option<u64> = None;
+    let initial_state = room_rx.borrow().clone();
+    if initial_state.room_id > 0 && initial_state.connected {
+        let info = runtime.hub.room_info();
+        println!("{}", format_room_info_plain(&info, &initial_state));
+        announced_room_id = Some(initial_state.room_id);
+    }
+
+    loop {
+        tokio::select! {
+            _ = wait_for_shutdown(shutdown_rx) => break,
+            res = room_rx.changed() => {
+                if res.is_err() {
+                    break;
+                }
+                let state = room_rx.borrow().clone();
+                if state.room_id == 0 {
+                    announced_room_id = None;
+                } else if state.connected && announced_room_id != Some(state.room_id) {
+                    let info = runtime.hub.room_info();
+                    println!("{}", format_room_info_plain(&info, &state));
+                    announced_room_id = Some(state.room_id);
+                }
+            }
+            res = event_rx.recv() => {
+                if let Ok(dambo_core::model::ChannelBMessage::RoomInfo(_)) = res {
+                    let state = runtime.hub.room_state();
+                    if state.room_id > 0 && state.connected && announced_room_id != Some(state.room_id) {
+                        let info = runtime.hub.room_info();
+                        println!("{}", format_room_info_plain(&info, &state));
+                        announced_room_id = Some(state.room_id);
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
     let runtime = Arc::new(DamboRuntime::from_config_path(&args.config)?);
     let log_level = runtime.config_snapshot().log.level_filter();
-    let dep_level = log_level.min(log::LevelFilter::Warn);
-    let default_filter = format!(
-        "{},dambo_core={},dambo_cli={}",
-        dep_level.as_str().to_ascii_lowercase(),
-        log_level.as_str().to_ascii_lowercase(),
-        log_level.as_str().to_ascii_lowercase()
-    );
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&default_filter))
-        .init();
+    let logger_handle = logger::init_logger(log_level)?;
 
     if !args.no_login {
         let should_prompt_qr = if runtime.auth.current_session().is_some() {
@@ -174,7 +230,7 @@ async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Resul
             };
             match val_res {
                 Ok(state) if state.is_login => {
-                    log::info!("✅ 已登录 B 站账号: @{} (UID: {})", state.uname, state.mid);
+                    println!("{}", format_user_info_plain(&state));
                     false
                 }
                 Ok(_) => {
@@ -194,11 +250,18 @@ async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Resul
             log::info!("🛑 已取消登录，退出 dambo-cli");
             return Ok(());
         }
+    } else {
+        println!("{}", format_user_info_plain(&runtime.auth.current_state()));
     }
 
     if args.record_raw {
         runtime.set_record_raw_override(true);
     }
+
+    let ws_rx = runtime.hub.subscribe_ws();
+    let room_rx = runtime.room_state_rx();
+    let auth_rx = runtime.auth_state_rx();
+    let event_rx = runtime.subscribe_event();
 
     let start_res = tokio::select! {
         _ = wait_for_shutdown(&mut shutdown_rx) => {
@@ -210,17 +273,27 @@ async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Resul
     };
     start_res?;
 
-    let cfg = runtime.config_snapshot();
-    let base_http = format!("http://{}:{}", cfg.server.host, cfg.server.port);
-    let base_ws = format!("ws://{}:{}", cfg.server.host, cfg.server.port);
+    let use_tui =
+        !args.headless && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if use_tui {
+        let channels = TuiChannels {
+            ws_rx,
+            room_rx,
+            auth_rx,
+            event_rx,
+            logger_handle,
+        };
+        tui::run_tui(
+            runtime.clone(),
+            channels,
+            &mut shutdown_rx,
+            |rt, mut rx| async move { run_cli_qr_login(&rt, &mut rx).await },
+        )
+        .await?;
+    } else {
+        run_headless(runtime.clone(), room_rx, event_rx, &mut shutdown_rx).await;
+    }
 
-    log::info!("🚀 dambo-cli headless node started:");
-    log::info!("   • OBS Overlay     : {}/", base_http);
-    log::info!("   • Danmaku Monitor : {}/list", base_http);
-    log::info!("   • Channel A       : {}/ws", base_ws);
-    log::info!("   • Channel B       : {}/ws/event", base_ws);
-
-    wait_for_shutdown(&mut shutdown_rx).await;
     log::info!("🛑 Shutting down dambo-cli...");
     runtime.shutdown();
     Ok(())
@@ -265,5 +338,25 @@ mod tests {
                 .unwrap()
                 .unwrap();
         });
+    }
+
+    #[test]
+    fn test_cli_args_parsing() {
+        let args = Args::try_parse_from([
+            "dambo-cli",
+            "--config",
+            "custom.toml",
+            "--room",
+            "21452505",
+            "--no-login",
+            "--record-raw",
+            "--headless",
+        ])
+        .unwrap();
+        assert_eq!(args.config, "custom.toml");
+        assert_eq!(args.room.as_deref(), Some("21452505"));
+        assert!(args.no_login);
+        assert!(args.record_raw);
+        assert!(args.headless);
     }
 }
