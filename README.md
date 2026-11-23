@@ -129,5 +129,15 @@ Dambo 默认自带 4 款即开即用的网页插件：
 | --- | --- |
 | `GET /` 或 `GET /{插件名}` | 直接在浏览器 / OBS 中打开对应挂件页面 |
 | `GET /sdk/dambo.js` | 内置零依赖纯 Web 插件 SDK |
-| `GET /ws` | 实时视觉流 WebSocket（`Snapshot`、`Event`、`RoomState`） |
+| `GET /ws` | 实时弹幕与挂件事件流 WebSocket（`Snapshot`、`Event`、`RoomState`） |
 | `GET /ws/event` | 经流量整形、刷屏合并与礼物连击结算的批次流 WebSocket（适合接入机器人、TTS 与 AI 管线） |
+
+---
+
+## 代码签名与隐私声明（Code Signing Policy）
+
+> Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+- **签名范围**：Windows 正式发行包中的 `dambo-ui.exe` 与 `dambo-cli.exe` 由官方 GitHub Actions 流水线构建并提交至 SignPath.io 进行代码签名；内置纯 Web 插件与第三方资源保持未修改分发。
+- **团队角色**：项目提交者与代码审核者为本仓库维护成员，发布与签名审批由 SignPath 项目管理员负责，仅允许来自受保护源码仓库与官方 GitHub-hosted CI 构建的产物触发签名。
+- **隐私政策**：Dambo 是一款完全在本地运行的桌面与命令行工具，**不收集、不统计也不向第三方上传任何遥测数据、使用分析或崩溃报告**。仅在用户主动扫码登录或连接直播间时与哔哩哔哩官方接口通信，登录凭证与录制文件均保存在用户本地目录（`var/`）。更多安全反馈方式见 [SECURITY.md](SECURITY.md)。

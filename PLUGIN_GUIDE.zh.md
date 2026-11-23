@@ -62,7 +62,7 @@ static/html/<plugin-id>/
 
 ### 3.1 通道 A（`channel: 'feed'`，`/ws`）与 通道 B（`channel: 'event'`，`/ws/event`）
 
-- **通道 A（`/ws` — 实时视觉叠加流）**：
+- **通道 A（`/ws` — 实时挂件弹幕流）**：
   - 建连后立即推送一帧 `Snapshot`（当客户端消费落后于广播缓冲时也会自动重发 `Snapshot`）。
   - 绝不会下发 `"combo_end"`、`"room_info"` 或 `"session_end"`。
   - `Snapshot.items` 环形缓冲区仅保留 `"chat" | "gift" | "superchat" | "super_chat" | "guard"`。

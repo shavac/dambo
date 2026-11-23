@@ -123,6 +123,10 @@
             }
         }
 
+        if (options.extraBadge) {
+            appendSpan(identity, options.extraBadge.className, options.extraBadge.text);
+        }
+
         appendSpan(identity, 'sender-name', item.uname || item.username || 'Viewer');
         if (showColon) {
             appendSpan(identity, 'name-colon', '：');
@@ -288,8 +292,11 @@
         const div = document.createElement('div');
         div.className = 'danmaku-item item-gift';
 
-        appendSpan(div, 'event-badge badge-gift', '🎁');
-        div.appendChild(buildUserIdentity(item));
+        div.appendChild(
+            buildUserIdentity(item, {
+                extraBadge: { className: 'event-badge badge-gift', text: '🎁' },
+            })
+        );
         appendSpan(div, 'event-action', '送出了');
         appendSpan(div, 'event-highlight', giftName);
         const countEl = appendSpan(div, 'gift-combo-count', formatGiftComboCount(initialCount));
@@ -371,8 +378,12 @@
         const div = document.createElement('div');
         div.className = 'danmaku-item item-guard';
 
-        appendSpan(div, 'event-badge badge-guard', `⚓ ${guardInfo.badgeLabel}`);
-        div.appendChild(buildUserIdentity(item, { showGuard: false }));
+        div.appendChild(
+            buildUserIdentity(item, {
+                showGuard: false,
+                extraBadge: { className: 'event-badge badge-guard', text: `⚓ ${guardInfo.badgeLabel}` },
+            })
+        );
         if (guardInfo.actionText) {
             appendSpan(div, 'event-action', guardInfo.actionText);
         }
@@ -410,10 +421,15 @@
         div.className = `danmaku-item item-interaction item-${kind}`;
 
         const icon = INTERACT_ICONS[kind] || '👋';
-        if (!(kind === 'guard_enter' && Dambo.utils.guardLevelName(item?.guard_level))) {
-            appendSpan(div, 'event-icon', icon);
-        }
-        div.appendChild(buildUserIdentity(item));
+        const skipDuplicateGuardIcon =
+            kind === 'guard_enter' && Boolean(Dambo.utils.guardLevelName(item?.guard_level));
+        div.appendChild(
+            buildUserIdentity(item, {
+                extraBadge: skipDuplicateGuardIcon
+                    ? null
+                    : { className: 'event-icon', text: icon },
+            })
+        );
         const actionText =
             kind === 'like'
                 ? item.content || '为主播点赞了'

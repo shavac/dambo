@@ -52,8 +52,10 @@ html, body {
 }
 .sticky-cards {
     display: flex;
+    flex-direction: column;
+    align-items: stretch;
     gap: 8px;
-    flex-wrap: wrap;
+    width: 100%;
 }
 .sc-card {
     background: rgba(239, 68, 68, 0.15);
@@ -61,8 +63,8 @@ html, body {
     border-radius: 6px;
     padding: 6px 10px;
     font-size: 12px;
-    flex: 1;
-    min-width: 200px;
+    width: 100%;
+    flex: 0 0 auto;
     position: relative;
     overflow: hidden;
 }

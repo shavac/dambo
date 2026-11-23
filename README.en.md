@@ -128,5 +128,15 @@ Want a custom theme, giveaway spinner, song-request board, or chat mini-game? **
 | --- | --- |
 | `GET /` or `GET /{plugin}` | Open any built-in or custom plugin page in a browser / OBS |
 | `GET /sdk/dambo.js` | Embedded zero-dependency Pure-Web Plugin SDK |
-| `GET /ws` | Channel A WebSocket — real-time visual feed (`Snapshot`, `Event`, `RoomState`) |
+| `GET /ws` | Channel A WebSocket — real-time danmaku & overlay event feed (`Snapshot`, `Event`, `RoomState`) |
 | `GET /ws/event` | Channel B WebSocket — shaped, combo-settled event batches for bots, TTS & AI pipelines |
+
+---
+
+## Code Signing Policy & Privacy
+
+> Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+- **Signed Artifacts**: Windows release executables (`dambo-ui.exe` and `dambo-cli.exe`) built by official GitHub-hosted Actions workflows are submitted to SignPath.io for code signing. Static web plugins and user configuration files remain plain-text.
+- **Team Roles**: Repository maintainers act as committers and reviewers; release signing requests are approved by SignPath project administrators and restricted to builds originating directly from this public repository's GitHub Actions workflows.
+- **Privacy Policy**: Dambo runs entirely locally and **does not collect, track, or transmit any hidden telemetry, analytics, or crash reports**. Network requests are made solely to official Bilibili APIs when the user explicitly chooses to sign in or connect to a live room, and all session cookies and recordings remain strictly on local disk (`var/`). See [SECURITY.md](SECURITY.md) for vulnerability reporting.

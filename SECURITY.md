@@ -15,3 +15,8 @@ Please include:
 ## Sensitive Data Reminder
 
 - Never attach `var/session.json`, `SESSDATA`, `bili_jct`, or `*_raw.jsonl` files containing personal cookies or private session tokens to public issues or pull requests.
+
+## Code Signing & Privacy Policy
+
+- **Code Signing**: Free code signing for official Windows release binaries (`dambo-ui.exe`, `dambo-cli.exe`) is provided by [SignPath.io](https://signpath.io/) with certificates issued by [SignPath Foundation](https://signpath.org/). Only transparent GitHub-hosted CI builds from this repository are submitted for signing.
+- **Privacy**: This software does not include any third-party analytics, tracking, or automatic telemetry upload. All session credentials and recorded `.jsonl` logs stay on the user's local machine.
