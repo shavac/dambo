@@ -14,7 +14,6 @@ concurrency:
 
 permissions:
   contents: write
-  actions: read
 
 jobs:
   build:
@@ -123,46 +122,6 @@ jobs:
           Copy-Item "README.en.md" -Destination "$StageDir\README.en.md"
           Copy-Item "PLUGIN_GUIDE.md" -Destination "$StageDir\PLUGIN_GUIDE.md"
           Copy-Item "PLUGIN_GUIDE.zh.md" -Destination "$StageDir\PLUGIN_GUIDE.zh.md"
-
-      - name: Upload unsigned Windows binaries for SignPath
-        id: upload-unsigned-windows
-        if: matrix.os == 'windows-latest' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && vars.SIGNPATH_ORGANIZATION_ID != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}-unsigned
-          path: |
-            target/release/dambo-ui.exe
-            target/release/dambo-cli.exe
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Sign Windows binaries with SignPath
-        if: matrix.os == 'windows-latest' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && vars.SIGNPATH_ORGANIZATION_ID != ''
-        uses: signpath/github-action-submit-signing-request@v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'dambo' }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIG_SLUG || '' }}
-          github-artifact-id: ${{ steps.upload-unsigned-windows.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: dist/signed-windows
-
-      - name: Overlay signed Windows binaries into release directory
-        if: matrix.os == 'windows-latest' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && vars.SIGNPATH_ORGANIZATION_ID != ''
-        shell: pwsh
-        run: |
-          $StageDir = "dist\${{ matrix.artifact_name }}"
-          $SignedDir = "dist\signed-windows"
-          foreach ($bin in @("dambo-ui.exe", "dambo-cli.exe")) {
-            $found = Get-ChildItem -Path $SignedDir -Filter $bin -Recurse -File | Select-Object -First 1
-            if (-not $found) {
-              Write-Error "Signed binary $bin was not found in $SignedDir"
-              exit 1
-            }
-            Copy-Item $found.FullName -Destination (Join-Path $StageDir $bin) -Force
-          }
 
       - name: Upload staged release directory
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
