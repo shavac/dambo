@@ -1,4 +1,4 @@
-# dambo
+# dambo — Danmaku Platform for the AI Era
 
 [简体中文](README.md) | [English](README.en.md)
 
@@ -78,7 +78,18 @@ Open **Plugins (...)** on the capsule (or **Plugins** in the system tray menu):
 
 - **Use in OBS Studio**: Click **Copy OBS URL**, create a **Browser** source in OBS, paste the URL, and set the recommended width/height from the table below for transparent overlay rendering.
 - **Float on Desktop**: Click **Open on Desktop** to pop out any plugin as a transparent desktop window. Hover near the top-right corner of the overlay to drag it, toggle **Always on Top**, or close it (or press `Esc`).
-- **Plugin Management & LAN Access**: Click **Manage** on a plugin card (or **Open Manage Page** in the tray menu) to open `/{plugin}/m` in your browser for configuration and ACL approval. To open `/list/` from a phone or tablet on the same network, set `host = "0.0.0.0"` under `[server]` in `etc/config.toml`.
+- **LAN Multi-Device Access**: To open monitor views (such as `/list/`) from a phone or tablet on the same Wi-Fi network, set `host = "0.0.0.0"` under `[server]` in `etc/config.toml`.
+
+### 5. Plugin Management Console (`/{plugin}/m`)
+
+Every plugin exposes a dedicated browser management page at `GET /{plugin}/m` for live configuration and permission control:
+
+- **How to Open**: Click **Manage** on a plugin card in the control capsule, select a plugin under **Plugins -> Open Manage Page** in the system tray, or navigate directly to `http://localhost:3838/{plugin}/m` in your browser.
+- **Custom Page or Built-in Console**: If the plugin folder includes `manage.html` (with optional `manage.css` / `manage.js`), Dambo serves that custom UI; otherwise Dambo automatically renders its zero-code built-in console:
+  - **Live Config Form**: Renders typed controls from `plugin.json` `defaults`; changes are persisted immediately to `var/dambo.redb` and pushed live to active OBS / desktop overlay views (with per-field and full-reset support).
+  - **Cross-Plugin Access Control (ACL)**: Approve, adjust, or revoke incoming data/topic access requests from other plugins, and inspect outgoing permission requests.
+  - **Topics & Storage Browser**: Inspect, toggle (`public` / `private`), or remove plugin event topics, and browse/edit/clear typed keys across both `persist` and `memory` namespaces.
+- **Security Boundaries**: Local browser document navigation automatically mints an `HttpOnly; SameSite=Strict` admin session cookie, and framing is blocked (`X-Frame-Options: DENY` / `CSP frame-ancestors 'none'`). When exposing `[server].host` beyond loopback (e.g. `0.0.0.0`), configure `[server].admin_token` in `etc/config.toml` so remote browsers unlock management actions via the prompt modal.
 
 ---
 
@@ -97,12 +108,14 @@ Dambo includes four ready-to-use web plugins out of the box:
 
 ## Build Custom Plugins with AI (`PLUGIN_GUIDE`)
 
-Want a custom theme, giveaway spinner, song-request board, or chat mini-game? **No manual coding required**:
+### Build Plugins from Scratch with Any AI Assistant
 
-1. Upload **[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)** (or Chinese **[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)**) directly to your preferred AI assistant.
-2. Describe what you want in plain language (for example: *"Using the uploaded PLUGIN_GUIDE.md, build a minimalist cyberpunk gift-alert banner plugin"*) and tell the AI to **follow the guide strictly**.
-3. Click **Plugins -> Open Plugins Folder** in Dambo (`static/html/`), create a new folder for your plugin, and place the AI-generated files inside (`plugin.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus optional `manage.html` / `manage.css` / `manage.js` and static assets).
-4. Dambo hot-reloads the folder in ~200ms—your custom plugin appears right away in the UI and tray menu without restarting.
+No coding required—turn an idea into a working plugin in two simple steps with any AI assistant (ChatGPT / Claude / Gemini / DeepSeek, etc.):
+
+1. **Refine Your Idea**: Download [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md) from this repo, upload it to your AI, and describe your idea in one sentence (e.g., *"I want a gift battery goal progress bar"*).
+2. **Generate the Plugin**: Answer the AI's 2 rounds of multiple-choice questions to lock down the details, then upload [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md) when prompted and reply **`开始生成`** (or *"Start generating"*). Drop the generated folder into `static/html/` and it is ready to use.
+
+> You can also use the existing all-in-one guide **[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)** (Chinese: **[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)**): click **Plugins -> Open Plugins Folder** in Dambo (`static/html/`) and drop in the generated folder (`plugin.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus optional `manage.html` / `manage.css` / `manage.js` and static assets). Dambo hot-reloads it in ~200ms—no restart required.
 
 ---
 

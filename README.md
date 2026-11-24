@@ -1,4 +1,4 @@
-# dambo（弹宝）
+# dambo（弹宝） — AI 时代的弹幕平台
 
 [简体中文](README.md) | [English](README.en.md)
 
@@ -78,7 +78,18 @@ cargo run -p dambo-cli --release -- --config etc/config.toml
 
 - **接入 OBS Studio**：点击插件卡片上的 **复制 OBS URL**，在 OBS 来源中新建 **浏览器** 源，粘贴地址并按下方建议尺寸设置宽高即可实现透明叠加。
 - **桌面独立悬浮查看**：点击 **桌面打开**，插件会作为透明悬浮窗直接浮在屏幕上；将鼠标移到浮窗右上角可拖动位置、切换窗口置顶或关闭（也可用 `Esc` 关闭）。
-- **在浏览器打开管理页 / 多端查看**：可在控制舱插件卡片点击 **管理页**（或托盘菜单 **打开管理页**）通过浏览器打开 `/{插件名}/m` 配置参数与跨插件权限；若想用同一 Wi-Fi 下的手机/平板打开监看面板（如 `/list/`），可在配置文件 `etc/config.toml` 的 `[server]` 下将 `host` 改为 `"0.0.0.0"`。
+- **局域网多端查看**：若想用同一 Wi-Fi 下的手机/平板打开监看面板（如 `/list/`），可在配置文件 `etc/config.toml` 的 `[server]` 下将 `host` 改为 `"0.0.0.0"`。
+
+### 5. 插件管理界面（`/{插件名}/m`）
+
+每个插件都拥有独立的管理页入口 `GET /{插件名}/m`，用于在浏览器中调整挂件参数与权限：
+
+- **打开方式**：在控制舱 **插件** 菜单中点击对应插件的 **管理页** 按钮，或在系统托盘 **插件 -> 打开管理页** 选择对应插件，也可以直接在浏览器访问 `http://localhost:3838/{插件名}/m`。
+- **自定义页与内置兜底控制台**：如果插件目录下提供了 `manage.html`（及可选 `manage.css` / `manage.js`），宿主会直接渲染自定义管理页面；若未提供（如内置插件与绝大多数 AI 生成插件），Dambo 会自动提供开箱即用的内置通用控制台，无需手写管理前端：
+  - **配置参数热更新**：依据 `plugin.json` 的 `defaults` 自动生成表单，修改后立即持久化到 `var/dambo.redb` 并实时推送到 OBS / 桌面展示页生效（支持单字段或全部恢复默认）。
+  - **跨插件权限审批（ACL）**：集中审批、调整或撤销其他插件对当前插件数据或私有订阅源的访问请求，并可查看对外发起的申请。
+  - **订阅源（Topics）与存储浏览**：查看、切换或删除插件订阅源（公开 / 私有），以及按命名空间浏览、编辑持久化（`persist`）与内存态（`memory`）强类型键值。
+- **访问与安全边界**：管理页默认通过本地浏览器导航自动签发 `HttpOnly`、`SameSite=Strict` 会话 Cookie 解锁，并禁止被 `iframe` 嵌入（`X-Frame-Options: DENY` / `CSP frame-ancestors 'none'`）；若将 `[server].host` 开放到局域网（如 `0.0.0.0`），需在 `etc/config.toml` 中配置 `[server].admin_token`，非本机浏览器会在管理页弹窗输入口令后解锁。
 
 ---
 
@@ -97,12 +108,14 @@ Dambo 默认自带 4 款即开即用的网页插件：
 
 ## 让 AI 帮你定制专属插件（`PLUGIN_GUIDE` 用法）
 
-想改内置挂件的字体/配色/排版，或者让直播间多一个投票器、抽奖机、点歌台或专属桌面小组件？**不需要懂前端或写代码**：
+### 使用 AI 助手零基础制作插件
 
-1. 把仓库中的 **[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)**（如果使用英文对话请上传 **[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)**）直接上传并发送给你常用的 AI 助手。
-2. 用大白话告诉 AI 你的想法（例如：*“参考我上传的 PLUGIN_GUIDE.zh.md，帮我做一个二次元风格的礼物感谢播报条插件”*，或*“按照这份向导，给直播间做一个关键词弹幕计数器”*），**让 AI 严格依据此向导实现你的需求**即可。
-3. 在控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`），在里面新建一个文件夹并放入 AI 给你的文件（标准结构为 `plugin.html`、`plugin.json`、`plugin.css`、`plugin.js`，可选 `manage.html` / `manage.css` / `manage.js` 自定义管理页；图片/字体/音效等静态资源可放同级目录下）。
-4. 保存后约 200ms 内控制舱会自动识别上线，**无需重启 Dambo** 即可直接在桌面打开或复制到 OBS 使用。
+无需编写代码，只需两步即可让任意 AI（ChatGPT / Claude / Gemini / DeepSeek 等）为你生成可用插件：
+
+1. **梳理想法**：下载本仓库的 [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md) 上传给 AI，并用一句话描述你的初步想法（例如：*“我想做一个礼物电池目标进度条”*）。
+2. **生成代码**：回答 AI 的 2 轮选择题确认细节后，按 AI 提示上传 [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md) 并回复 **`开始生成`**，将生成的文件夹放入 `static/html/` 即可使用。
+
+> 也可使用现有完整单文件规范 **[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)**（英文版：**[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)**）：在控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`）放入 AI 生成的插件文件夹（标准结构为 `plugin.html`、`plugin.json`、`plugin.css`、`plugin.js`，可选 `manage.html` / `manage.css` / `manage.js` 及同级静态资源），保存后约 200ms 内控制舱会自动识别上线，**无需重启 Dambo** 即可直接在桌面打开、管理或复制到 OBS 使用。
 
 ---
 
