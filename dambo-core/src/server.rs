@@ -37,23 +37,8 @@ pub struct AppState {
 /// Embedded official pure-Web Plugin SDK served at `GET /sdk/dambo.js`.
 pub const DAMBO_SDK_JS: &str = include_str!("../assets/dambo.js");
 
-/// Built-in fallback management page placeholder (replaced with full SDK UI in Phase 4).
-pub const MANAGE_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dambo Plugin Management</title>
-</head>
-<body>
-  <main id="dambo-manage-root">
-    <h1>Dambo Plugin Management</h1>
-    <p>Built-in fallback management UI (Phase 4 full SDK UI pending).</p>
-  </main>
-  <script src="/sdk/dambo.js"></script>
-</body>
-</html>
-"#;
+/// Embedded built-in fallback management page rendered at `GET /{plugin}/m` when `manage.html` is absent.
+pub const MANAGE_FALLBACK_HTML: &str = include_str!("../assets/manage_fallback.html");
 
 async fn serve_sdk_js() -> Response {
     (
@@ -659,8 +644,18 @@ mod tests {
     #[test]
     fn test_embedded_sdk_exports_core_api_and_utils() {
         assert!(!DAMBO_SDK_JS.is_empty());
+        assert!(DAMBO_SDK_JS.contains("VERSION: '2.0.0'"));
         assert!(DAMBO_SDK_JS.contains("class DamboClient"));
+        assert!(DAMBO_SDK_JS.contains("class DamboError"));
         assert!(DAMBO_SDK_JS.contains("function connect(options)"));
+        assert!(DAMBO_SDK_JS.contains("DamboError: DamboError"));
+        assert!(DAMBO_SDK_JS.contains("plugin: pluginApi"));
+        assert!(DAMBO_SDK_JS.contains("plugins: pluginsApi"));
+        assert!(DAMBO_SDK_JS.contains("config: configApi"));
+        assert!(DAMBO_SDK_JS.contains("storage: storageApi"));
+        assert!(DAMBO_SDK_JS.contains("memory: memoryApi"));
+        assert!(DAMBO_SDK_JS.contains("topics: topicsApi"));
+        assert!(DAMBO_SDK_JS.contains("acl: aclApi"));
         assert!(DAMBO_SDK_JS.contains("formatGuard: formatGuard"));
         assert!(DAMBO_SDK_JS.contains("formatInteract: formatInteract"));
         assert!(DAMBO_SDK_JS.contains("formatGift: formatGift"));
@@ -670,5 +665,21 @@ mod tests {
         assert!(DAMBO_SDK_JS.contains("createAutoScroll: createAutoScroll"));
         assert!(DAMBO_SDK_JS.contains("createTimerBag: createTimerBag"));
         assert!(DAMBO_SDK_JS.contains("normalizeUrl: normalizeUrl"));
+    }
+
+    #[test]
+    fn test_embedded_manage_fallback_security_and_sdk_only() {
+        assert!(MANAGE_FALLBACK_HTML.contains("id=\"dambo-manage-root\""));
+        assert!(MANAGE_FALLBACK_HTML.contains("<script src=\"/sdk/dambo.js\"></script>"));
+        assert!(MANAGE_FALLBACK_HTML.contains("Dambo.config"));
+        assert!(MANAGE_FALLBACK_HTML.contains("Dambo.acl"));
+        assert!(MANAGE_FALLBACK_HTML.contains("Dambo.topics"));
+        assert!(MANAGE_FALLBACK_HTML.contains("Dambo.storage"));
+        assert!(MANAGE_FALLBACK_HTML.contains("Dambo.memory"));
+        assert!(MANAGE_FALLBACK_HTML.contains("Dambo.plugin.unlockManage"));
+        // Strict XSS & Referer safety guarantees
+        assert!(!MANAGE_FALLBACK_HTML.contains("innerHTML"));
+        assert!(!MANAGE_FALLBACK_HTML.contains("no-referrer"));
+        assert!(!MANAGE_FALLBACK_HTML.contains("fetch("));
     }
 }

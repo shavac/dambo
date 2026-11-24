@@ -1,0 +1,1187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dambo 插件控制台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-alt: #162032;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --radius: 10px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    #dambo-manage-root {
+      max-width: 1120px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+    }
+    .card-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .card-title {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 600;
+    }
+    .muted { color: var(--muted); font-size: 12px; }
+    .meta-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 8px 0;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text);
+    }
+    .badge.ok { border-color: rgba(34, 197, 94, 0.45); color: #86efac; }
+    .badge.warn { border-color: rgba(245, 158, 11, 0.45); color: #fcd34d; }
+    .badge.danger { border-color: rgba(239, 68, 68, 0.45); color: #fca5a5; }
+    .badge.accent { border-color: rgba(56, 189, 248, 0.45); color: #7dd3fc; }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    button, .btn-link {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--panel-alt);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: 7px;
+      font-size: 13px;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    button:hover, .btn-link:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); color: #082f49; border-color: var(--accent); font-weight: 600; }
+    button.primary:hover { background: var(--accent-hover); }
+    button.danger { border-color: rgba(239, 68, 68, 0.5); color: #fca5a5; }
+    button.danger:hover { background: rgba(239, 68, 68, 0.15); }
+    button.small { padding: 4px 9px; font-size: 12px; }
+    input, select, textarea {
+      background: var(--panel-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 6px 9px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    input[type="color"] { padding: 2px; width: 46px; height: 32px; }
+    input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+    textarea { min-height: 68px; resize: vertical; width: 100%; }
+    .config-list, .kv-list, .acl-list, .topic-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .item-box {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .item-box.overridden { border-color: rgba(56, 189, 248, 0.6); }
+    .item-top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 10px;
+    }
+    .tabs {
+      display: inline-flex;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 3px;
+      gap: 4px;
+    }
+    .tabs button.active {
+      background: var(--accent);
+      color: #082f49;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 900;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: #0f172a;
+      border: 1px solid var(--accent);
+      color: var(--text);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+      max-width: 380px;
+      display: none;
+    }
+    .toast.visible { display: block; }
+    .toast.error { border-color: var(--danger); color: #fecaca; }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.78);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 16px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      width: 100%;
+      max-width: 380px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .hidden { display: none !important; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      background: rgba(15, 23, 42, 0.7);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <main id="dambo-manage-root">
+    <!-- 1. Plugin Info Header -->
+    <section class="card" id="sec-info">
+      <div class="card-header">
+        <div>
+          <h1 class="card-title" id="plugin-title">正在加载插件信息…</h1>
+          <div class="muted" id="plugin-desc"></div>
+        </div>
+        <div class="row">
+          <a class="btn-link primary" id="open-view-link" href="./" target="_blank" rel="noopener">打开展示页</a>
+          <button type="button" id="copy-view-btn">复制展示页地址</button>
+          <button type="button" id="reload-all-btn">刷新面板</button>
+        </div>
+      </div>
+      <div class="meta-badges" id="plugin-badges"></div>
+    </section>
+
+    <!-- 2. Typed Default Config Form -->
+    <section class="card hidden" id="sec-config">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">默认配置（plugin.json defaults + persist/config）</h2>
+          <div class="muted">修改立即持久化并实时推送到在线展示页；未覆盖项保持插件默认定义</div>
+        </div>
+        <div class="row">
+          <button type="button" class="danger small" id="reset-all-cfg-btn">全部恢复默认</button>
+        </div>
+      </div>
+      <div class="config-list" id="config-list"></div>
+    </section>
+
+    <!-- 3. Unified ACL Management -->
+    <section class="card" id="sec-acl">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">跨插件权限管理（ACL）</h2>
+          <div class="muted">由当前插件自主审批或撤销其他插件的数据与私有订阅源访问请求</div>
+        </div>
+      </div>
+      <h3 class="muted" style="margin: 4px 0 8px;">待审批申请</h3>
+      <div class="acl-list" id="acl-pending-list"></div>
+      <h3 class="muted" style="margin: 14px 0 8px;">已授权 / 已处理规则</h3>
+      <div class="acl-list" id="acl-granted-list"></div>
+      <h3 class="muted" style="margin: 14px 0 8px;">对外发起的申请</h3>
+      <div class="acl-list" id="acl-outgoing-list"></div>
+    </section>
+
+    <!-- 4. Topics Management -->
+    <section class="card" id="sec-topics">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">插件归属订阅源（Topics）</h2>
+          <div class="muted">公开订阅源允许其他插件免审批直接订阅；切换为私有后立即裁断未授权连接</div>
+        </div>
+      </div>
+      <div class="topic-list" id="topic-list"></div>
+    </section>
+
+    <!-- 5. Persist / Memory Data Browser & Editor -->
+    <section class="card" id="sec-data">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">存储浏览与强类型编辑器</h2>
+          <div class="muted">直接查看、修改或新增当前插件的持久化（persist）与内存态（memory）键值对</div>
+        </div>
+        <div class="tabs">
+          <button type="button" class="active" data-store-tab="persist">持久化 (persist)</button>
+          <button type="button" data-store-tab="memory">内存态 (memory)</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-bottom: 12px;">
+        <label>命名空间：
+          <select id="ns-select"></select>
+        </label>
+        <input type="text" id="ns-custom-input" placeholder="或输入新命名空间" style="width: 170px;" />
+        <input type="text" id="prefix-filter-input" placeholder="前缀过滤 (prefix)" style="width: 160px;" />
+        <button type="button" id="refresh-data-btn">加载</button>
+        <button type="button" class="danger small" id="clear-ns-btn">清空当前命名空间</button>
+      </div>
+
+      <div class="kv-list" id="kv-list"></div>
+
+      <details style="margin-top: 14px;">
+        <summary style="cursor: pointer; font-weight: 600;">新增 / 定义强类型键值（set(ns, key, val, schema)）</summary>
+        <div class="item-box" style="margin-top: 10px;">
+          <div class="field-grid">
+            <label>键名 (key)<br /><input type="text" id="new-key-input" placeholder="例如 high_score" style="width: 100%;" /></label>
+            <label>类型 (type)<br />
+              <select id="new-type-select" style="width: 100%;">
+                <option value="string">string</option>
+                <option value="number">number</option>
+                <option value="bool">bool</option>
+                <option value="enum">enum</option>
+                <option value="list">list (JSON)</option>
+                <option value="struct">struct (JSON)</option>
+              </select>
+            </label>
+            <label id="new-enum-opts-wrap" class="hidden">可选项 (逗号分隔)<br /><input type="text" id="new-enum-opts" placeholder="light,dark,auto" style="width: 100%;" /></label>
+            <label>值 (JSON 或文本)<br /><input type="text" id="new-val-input" placeholder="例如 hello / 100 / true" style="width: 100%;" /></label>
+          </div>
+          <div class="row">
+            <button type="button" class="primary small" id="add-kv-btn">写入条目</button>
+          </div>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <!-- Remote Unlock Modal (admin_token) -->
+  <div class="modal-backdrop" id="auth-modal">
+    <form class="modal" id="auth-form">
+      <h2 class="card-title">需要远程管理口令</h2>
+      <div class="muted">当前主机开启了 [server].admin_token，请输入管理员口令以解锁管理操作。</div>
+      <input type="password" id="auth-token-input" placeholder="输入 admin_token" autocomplete="current-password" required />
+      <div class="muted hidden" id="auth-error-text" style="color: #fca5a5;"></div>
+      <div class="row" style="justify-content: flex-end;">
+        <button type="submit" class="primary">验证并解锁</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/sdk/dambo.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      const pluginTitleEl = document.getElementById('plugin-title');
+      const pluginDescEl = document.getElementById('plugin-desc');
+      const pluginBadgesEl = document.getElementById('plugin-badges');
+      const openViewLinkEl = document.getElementById('open-view-link');
+      const copyViewBtnEl = document.getElementById('copy-view-btn');
+      const reloadAllBtnEl = document.getElementById('reload-all-btn');
+
+      const secConfigEl = document.getElementById('sec-config');
+      const configListEl = document.getElementById('config-list');
+      const resetAllCfgBtnEl = document.getElementById('reset-all-cfg-btn');
+
+      const aclPendingEl = document.getElementById('acl-pending-list');
+      const aclGrantedEl = document.getElementById('acl-granted-list');
+      const aclOutgoingEl = document.getElementById('acl-outgoing-list');
+
+      const topicListEl = document.getElementById('topic-list');
+
+      const storeTabBtns = Array.from(document.querySelectorAll('[data-store-tab]'));
+      const nsSelectEl = document.getElementById('ns-select');
+      const nsCustomEl = document.getElementById('ns-custom-input');
+      const prefixFilterEl = document.getElementById('prefix-filter-input');
+      const refreshDataBtnEl = document.getElementById('refresh-data-btn');
+      const clearNsBtnEl = document.getElementById('clear-ns-btn');
+      const kvListEl = document.getElementById('kv-list');
+
+      const newKeyEl = document.getElementById('new-key-input');
+      const newTypeEl = document.getElementById('new-type-select');
+      const newEnumWrapEl = document.getElementById('new-enum-opts-wrap');
+      const newEnumOptsEl = document.getElementById('new-enum-opts');
+      const newValEl = document.getElementById('new-val-input');
+      const addKvBtnEl = document.getElementById('add-kv-btn');
+
+      const authModalEl = document.getElementById('auth-modal');
+      const authFormEl = document.getElementById('auth-form');
+      const authTokenInputEl = document.getElementById('auth-token-input');
+      const authErrorEl = document.getElementById('auth-error-text');
+      const toastEl = document.getElementById('toast');
+
+      let currentMeta = null;
+      let activeStore = 'persist';
+      let activeNs = '';
+      let toastTimer = null;
+      let offDataWatch = null;
+      let offCfgWatch = null;
+      let offAclWatch = null;
+
+      function showToast(msg, isError) {
+        if (toastTimer) clearTimeout(toastTimer);
+        toastEl.textContent = String(msg || '');
+        toastEl.className = isError ? 'toast visible error' : 'toast visible';
+        toastTimer = setTimeout(() => {
+          toastEl.className = 'toast';
+        }, 3200);
+      }
+
+      function handleApiError(err, fallbackMsg) {
+        if (err && err.code === 'UNAUTHORIZED') {
+          authErrorEl.classList.add('hidden');
+          authModalEl.classList.add('open');
+          authTokenInputEl.focus();
+          return;
+        }
+        const text = (err && err.message) ? err.message : (fallbackMsg || '操作失败');
+        showToast(text, true);
+      }
+
+      function makeBadge(text, cls) {
+        const span = document.createElement('span');
+        span.className = cls ? ('badge ' + cls) : 'badge';
+        span.textContent = text;
+        return span;
+      }
+
+      function clearChildren(el) {
+        el.replaceChildren();
+      }
+
+      function renderEmpty(container, text) {
+        clearChildren(container);
+        const div = document.createElement('div');
+        div.className = 'muted';
+        div.textContent = text;
+        container.appendChild(div);
+      }
+
+      function createTypedInput(entry, readValueOut) {
+        const t = entry.type;
+        const meta = entry.meta || {};
+        const wrap = document.createElement('div');
+        wrap.className = 'row';
+        wrap.style.flex = '1';
+
+        if (t === 'bool') {
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = Boolean(entry.value);
+          wrap.appendChild(cb);
+          readValueOut.get = () => cb.checked;
+          return wrap;
+        }
+
+        if (t === 'number') {
+          const inp = document.createElement('input');
+          inp.type = meta.format === 'slider' ? 'range' : 'number';
+          if (typeof meta.min === 'number') inp.min = String(meta.min);
+          if (typeof meta.max === 'number') inp.max = String(meta.max);
+          if (typeof meta.step === 'number') inp.step = String(meta.step);
+          else inp.step = meta.format === 'integer' ? '1' : 'any';
+          inp.value = String(entry.value);
+          wrap.appendChild(inp);
+
+          if (meta.format === 'slider') {
+            const numReadout = document.createElement('span');
+            numReadout.className = 'badge';
+            numReadout.textContent = inp.value;
+            inp.addEventListener('input', () => {
+              numReadout.textContent = inp.value;
+            });
+            wrap.appendChild(numReadout);
+          }
+          readValueOut.get = () => Number(inp.value);
+          return wrap;
+        }
+
+        if (t === 'enum') {
+          const sel = document.createElement('select');
+          const opts = Array.isArray(meta.options) ? meta.options : [];
+          for (const opt of opts) {
+            const o = document.createElement('option');
+            if (typeof opt === 'string') {
+              o.value = opt;
+              o.textContent = opt;
+            } else {
+              o.value = String(opt.value);
+              o.textContent = opt.label ? `${opt.label} (${opt.value})` : String(opt.value);
+            }
+            if (o.value === String(entry.value)) o.selected = true;
+            sel.appendChild(o);
+          }
+          wrap.appendChild(sel);
+          readValueOut.get = () => sel.value;
+          return wrap;
+        }
+
+        if (t === 'string') {
+          if (meta.format === 'textarea') {
+            const ta = document.createElement('textarea');
+            ta.value = String(entry.value ?? '');
+            if (meta.placeholder) ta.placeholder = meta.placeholder;
+            wrap.appendChild(ta);
+            readValueOut.get = () => ta.value;
+            return wrap;
+          }
+          const inp = document.createElement('input');
+          if (meta.format === 'color') inp.type = 'color';
+          else if (meta.format === 'url') inp.type = 'url';
+          else inp.type = 'text';
+          inp.value = String(entry.value ?? '');
+          if (meta.placeholder) inp.placeholder = meta.placeholder;
+          if (meta.format !== 'color') inp.style.minWidth = '240px';
+          wrap.appendChild(inp);
+          readValueOut.get = () => inp.value;
+          return wrap;
+        }
+
+        // list / struct -> JSON editor (multi-checkbox if list of enum)
+        if (t === 'list' && meta.item && meta.item.type === 'enum' && meta.item.meta && Array.isArray(meta.item.meta.options)) {
+          const selected = new Set(Array.isArray(entry.value) ? entry.value : []);
+          const checkboxes = [];
+          for (const opt of meta.item.meta.options) {
+            const val = typeof opt === 'string' ? opt : String(opt.value);
+            const labelText = typeof opt === 'string' ? opt : (opt.label || val);
+            const lbl = document.createElement('label');
+            lbl.className = 'row';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = selected.has(val);
+            const span = document.createElement('span');
+            span.textContent = labelText;
+            lbl.appendChild(cb);
+            lbl.appendChild(span);
+            wrap.appendChild(lbl);
+            checkboxes.push({ val, cb });
+          }
+          readValueOut.get = () => checkboxes.filter((x) => x.cb.checked).map((x) => x.val);
+          return wrap;
+        }
+
+        const ta = document.createElement('textarea');
+        ta.value = JSON.stringify(entry.value, null, 2);
+        wrap.appendChild(ta);
+        readValueOut.get = () => JSON.parse(ta.value);
+        return wrap;
+      }
+
+      function renderMetaHeader(meta) {
+        currentMeta = meta;
+        pluginTitleEl.textContent = `${meta.name || meta.plugin_name} 管理控制台`;
+        pluginDescEl.textContent = meta.description || '无描述信息';
+        openViewLinkEl.href = meta.route || `/${meta.plugin_name}/`;
+
+        clearChildren(pluginBadgesEl);
+        pluginBadgesEl.appendChild(makeBadge(`目录: ${meta.plugin_name}`, 'accent'));
+        pluginBadgesEl.appendChild(makeBadge(`plugin_id: ${meta.plugin_id}`));
+        pluginBadgesEl.appendChild(makeBadge(`version: ${meta.version}`));
+        pluginBadgesEl.appendChild(makeBadge(`namedomain: ${meta.namedomain}`, 'ok'));
+        if (meta.obs && (meta.obs.width || meta.obs.height)) {
+          pluginBadgesEl.appendChild(makeBadge(`OBS: ${meta.obs.width || '?'}×${meta.obs.height || '?'}`));
+        }
+      }
+
+      async function loadConfigPanel(forceMeta) {
+        try {
+          const meta = await Dambo.plugin.meta({ force: Boolean(forceMeta) });
+          renderMetaHeader(meta);
+          const cfg = meta.config || {};
+          const keys = Object.keys(cfg);
+          if (keys.length === 0) {
+            secConfigEl.classList.add('hidden');
+            return;
+          }
+          secConfigEl.classList.remove('hidden');
+          clearChildren(configListEl);
+
+          for (const key of keys) {
+            const entry = cfg[key];
+            const metaInfo = entry.meta || {};
+            const box = document.createElement('div');
+            box.className = entry.is_overridden ? 'item-box overridden' : 'item-box';
+
+            const top = document.createElement('div');
+            top.className = 'item-top';
+            const left = document.createElement('div');
+            left.className = 'row';
+            const title = document.createElement('strong');
+            title.textContent = metaInfo.label || key;
+            left.appendChild(title);
+            const codeKey = document.createElement('code');
+            codeKey.textContent = key;
+            left.appendChild(codeKey);
+            left.appendChild(makeBadge(entry.type));
+            if (entry.is_overridden) {
+              left.appendChild(makeBadge('已自定义覆写', 'accent'));
+            }
+            top.appendChild(left);
+
+            const actions = document.createElement('div');
+            actions.className = 'row';
+            const reader = {};
+            const inputNode = createTypedInput(entry, reader);
+
+            const saveBtn = document.createElement('button');
+            saveBtn.type = 'button';
+            saveBtn.className = 'primary small';
+            saveBtn.textContent = '保存';
+            saveBtn.addEventListener('click', async () => {
+              try {
+                const nextVal = reader.get();
+                await Dambo.config.set(key, nextVal);
+                showToast(`已保存配置 ${key}`);
+                await loadConfigPanel(true);
+              } catch (err) {
+                handleApiError(err, '保存配置失败');
+              }
+            });
+            actions.appendChild(saveBtn);
+
+            if (entry.is_overridden) {
+              const resetBtn = document.createElement('button');
+              resetBtn.type = 'button';
+              resetBtn.className = 'small';
+              resetBtn.textContent = '恢复默认';
+              resetBtn.addEventListener('click', async () => {
+                try {
+                  await Dambo.config.reset(key);
+                  showToast(`已恢复配置 ${key} 默认值`);
+                  await loadConfigPanel(true);
+                } catch (err) {
+                  handleApiError(err, '恢复默认失败');
+                }
+              });
+              actions.appendChild(resetBtn);
+            }
+            top.appendChild(actions);
+            box.appendChild(top);
+
+            if (metaInfo.description) {
+              const desc = document.createElement('div');
+              desc.className = 'muted';
+              desc.textContent = metaInfo.description;
+              box.appendChild(desc);
+            }
+            box.appendChild(inputNode);
+            configListEl.appendChild(box);
+          }
+        } catch (err) {
+          handleApiError(err, '加载配置失败');
+        }
+      }
+
+      function formatRequesterText(item) {
+        const d = item.requester_display;
+        if (d && d.installed) {
+          const title = d.name || d.plugin_name || item.requester;
+          return `${title} (${item.requester})`;
+        }
+        return `${item.requester} [已卸载]`;
+      }
+
+      function allowedGrantLevels(resource) {
+        if (resource.startsWith('topic:')) return ['subscribe'];
+        if (resource === 'persist:config') return ['read'];
+        return ['read', 'write'];
+      }
+
+      async function loadAclPanel() {
+        try {
+          const data = await Dambo.acl.list();
+          const incoming = Array.isArray(data.incoming) ? data.incoming : [];
+          const outgoing = Array.isArray(data.outgoing) ? data.outgoing : [];
+
+          const pending = incoming.filter((r) => r.status === 'pending');
+          const resolved = incoming.filter((r) => r.status !== 'pending');
+
+          if (pending.length === 0) {
+            renderEmpty(aclPendingEl, '暂无待审批申请');
+          } else {
+            clearChildren(aclPendingEl);
+            for (const rec of pending) {
+              const box = document.createElement('div');
+              box.className = 'item-box';
+              const top = document.createElement('div');
+              top.className = 'item-top';
+
+              const info = document.createElement('div');
+              info.className = 'row';
+              const reqTitle = document.createElement('strong');
+              reqTitle.textContent = formatRequesterText(rec);
+              info.appendChild(reqTitle);
+              info.appendChild(makeBadge(rec.resource, 'accent'));
+              if (rec.requested_level) {
+                info.appendChild(makeBadge(`申请: ${rec.requested_level}`, 'warn'));
+              }
+              if (rec.level && rec.level !== 'none') {
+                info.appendChild(makeBadge(`当前保留: ${rec.level}`, 'ok'));
+              }
+              top.appendChild(info);
+
+              const controls = document.createElement('div');
+              controls.className = 'row';
+              const sel = document.createElement('select');
+              for (const lvl of allowedGrantLevels(rec.resource)) {
+                const o = document.createElement('option');
+                o.value = lvl;
+                o.textContent = lvl;
+                if (rec.requested_level === lvl) o.selected = true;
+                sel.appendChild(o);
+              }
+              const approveBtn = document.createElement('button');
+              approveBtn.type = 'button';
+              approveBtn.className = 'primary small';
+              approveBtn.textContent = '批准';
+              approveBtn.addEventListener('click', async () => {
+                try {
+                  await Dambo.acl.set(rec.requester, { resource: rec.resource, level: sel.value });
+                  showToast(`已授予 ${rec.requester} -> ${rec.resource} (${sel.value})`);
+                  await loadAclPanel();
+                } catch (err) {
+                  handleApiError(err, '审批失败');
+                }
+              });
+
+              const denyBtn = document.createElement('button');
+              denyBtn.type = 'button';
+              denyBtn.className = 'danger small';
+              denyBtn.textContent = '拒绝';
+              denyBtn.addEventListener('click', async () => {
+                try {
+                  await Dambo.acl.set(rec.requester, { resource: rec.resource, level: 'none' });
+                  showToast(`已拒绝 ${rec.requester} -> ${rec.resource}`);
+                  await loadAclPanel();
+                } catch (err) {
+                  handleApiError(err, '拒绝失败');
+                }
+              });
+
+              controls.appendChild(sel);
+              controls.appendChild(approveBtn);
+              controls.appendChild(denyBtn);
+              top.appendChild(controls);
+              box.appendChild(top);
+
+              if (rec.reason) {
+                const reasonEl = document.createElement('div');
+                reasonEl.className = 'muted';
+                reasonEl.textContent = `申请理由: ${rec.reason}`;
+                box.appendChild(reasonEl);
+              }
+              aclPendingEl.appendChild(box);
+            }
+          }
+
+          if (resolved.length === 0) {
+            renderEmpty(aclGrantedEl, '暂无已授权或已拒绝规则');
+          } else {
+            clearChildren(aclGrantedEl);
+            for (const rec of resolved) {
+              const box = document.createElement('div');
+              box.className = 'item-box';
+              const top = document.createElement('div');
+              top.className = 'item-top';
+
+              const info = document.createElement('div');
+              info.className = 'row';
+              const reqTitle = document.createElement('strong');
+              reqTitle.textContent = formatRequesterText(rec);
+              info.appendChild(reqTitle);
+              info.appendChild(makeBadge(rec.resource, 'accent'));
+              info.appendChild(
+                makeBadge(`${rec.status} (${rec.level})`, rec.level === 'none' ? 'danger' : 'ok')
+              );
+              top.appendChild(info);
+
+              const controls = document.createElement('div');
+              controls.className = 'row';
+              const sel = document.createElement('select');
+              for (const lvl of allowedGrantLevels(rec.resource).concat(['none'])) {
+                const o = document.createElement('option');
+                o.value = lvl;
+                o.textContent = lvl;
+                if (rec.level === lvl) o.selected = true;
+                sel.appendChild(o);
+              }
+              const updBtn = document.createElement('button');
+              updBtn.type = 'button';
+              updBtn.className = 'small';
+              updBtn.textContent = '更新等级';
+              updBtn.addEventListener('click', async () => {
+                try {
+                  await Dambo.acl.set(rec.requester, { resource: rec.resource, level: sel.value });
+                  showToast(`已更新 ${rec.requester} -> ${sel.value}`);
+                  await loadAclPanel();
+                } catch (err) {
+                  handleApiError(err, '更新失败');
+                }
+              });
+
+              const delBtn = document.createElement('button');
+              delBtn.type = 'button';
+              delBtn.className = 'danger small';
+              delBtn.textContent = '撤销删除';
+              delBtn.addEventListener('click', async () => {
+                try {
+                  await Dambo.acl.remove(rec.requester, rec.resource);
+                  showToast(`已撤销 ${rec.requester} -> ${rec.resource}`);
+                  await loadAclPanel();
+                } catch (err) {
+                  handleApiError(err, '撤销失败');
+                }
+              });
+
+              controls.appendChild(sel);
+              controls.appendChild(updBtn);
+              controls.appendChild(delBtn);
+              top.appendChild(controls);
+              box.appendChild(top);
+              aclGrantedEl.appendChild(box);
+            }
+          }
+
+          if (outgoing.length === 0) {
+            renderEmpty(aclOutgoingEl, '暂无对外发起的权限申请');
+          } else {
+            clearChildren(aclOutgoingEl);
+            for (const rec of outgoing) {
+              const box = document.createElement('div');
+              box.className = 'item-box';
+              const top = document.createElement('div');
+              top.className = 'row';
+              const ownerEl = document.createElement('strong');
+              ownerEl.textContent = `目标: ${rec.owner}`;
+              top.appendChild(ownerEl);
+              top.appendChild(makeBadge(rec.resource, 'accent'));
+              top.appendChild(
+                makeBadge(
+                  `${rec.status} / 当前: ${rec.level}` +
+                    (rec.requested_level ? ` (申请 ${rec.requested_level})` : ''),
+                  rec.status === 'granted' ? 'ok' : (rec.status === 'pending' ? 'warn' : 'danger')
+                )
+              );
+              box.appendChild(top);
+              aclOutgoingEl.appendChild(box);
+            }
+          }
+        } catch (err) {
+          handleApiError(err, '加载 ACL 列表失败');
+        }
+      }
+
+      async function loadTopicsPanel() {
+        try {
+          const list = await Dambo.topics.list('@self');
+          if (!list || list.length === 0) {
+            renderEmpty(topicListEl, '当前插件尚未声明任何订阅源（首次 publish 或 configure 后自动列出）');
+            return;
+          }
+          clearChildren(topicListEl);
+          for (const topic of list) {
+            const box = document.createElement('div');
+            box.className = 'item-box';
+            const top = document.createElement('div');
+            top.className = 'item-top';
+
+            const left = document.createElement('div');
+            left.className = 'row';
+            const title = document.createElement('strong');
+            title.textContent = topic.name;
+            left.appendChild(title);
+            left.appendChild(
+              makeBadge(topic.public ? 'public (免审批)' : 'private (需ACL)', topic.public ? 'ok' : 'warn')
+            );
+            top.appendChild(left);
+
+            const controls = document.createElement('div');
+            controls.className = 'row';
+            const toggleBtn = document.createElement('button');
+            toggleBtn.type = 'button';
+            toggleBtn.className = 'small';
+            toggleBtn.textContent = topic.public ? '设为私有' : '设为公开';
+            toggleBtn.addEventListener('click', async () => {
+              try {
+                await Dambo.topics.configure(topic.name, {
+                  public: !topic.public,
+                  description: topic.description,
+                });
+                showToast(`订阅源 ${topic.name} 已设为${!topic.public ? '公开' : '私有'}`);
+                await loadTopicsPanel();
+              } catch (err) {
+                handleApiError(err, '切换可见性失败');
+              }
+            });
+
+            const rmBtn = document.createElement('button');
+            rmBtn.type = 'button';
+            rmBtn.className = 'danger small';
+            rmBtn.textContent = '删除';
+            rmBtn.addEventListener('click', async () => {
+              try {
+                await Dambo.topics.remove(topic.name);
+                showToast(`已删除订阅源 ${topic.name}`);
+                await loadTopicsPanel();
+              } catch (err) {
+                handleApiError(err, '删除订阅源失败');
+              }
+            });
+
+            controls.appendChild(toggleBtn);
+            controls.appendChild(rmBtn);
+            top.appendChild(controls);
+            box.appendChild(top);
+
+            if (topic.description) {
+              const desc = document.createElement('div');
+              desc.className = 'muted';
+              desc.textContent = topic.description;
+              box.appendChild(desc);
+            }
+            topicListEl.appendChild(box);
+          }
+        } catch (err) {
+          handleApiError(err, '加载订阅源失败');
+        }
+      }
+
+      function currentStoreHandle() {
+        return activeStore === 'memory' ? Dambo.memory : Dambo.storage;
+      }
+
+      function rebindDataWatch(ns) {
+        if (offDataWatch) {
+          offDataWatch();
+          offDataWatch = null;
+        }
+        if (!ns) return;
+        const prefix = prefixFilterEl.value.trim() || undefined;
+        offDataWatch = currentStoreHandle().watch(
+          ns,
+          () => {
+            loadEntriesOnly();
+          },
+          prefix ? { prefix } : undefined
+        );
+      }
+
+      async function loadNamespacesAndEntries() {
+        try {
+          const store = currentStoreHandle();
+          const namespaces = await store.namespaces();
+          clearChildren(nsSelectEl);
+          for (const ns of namespaces) {
+            const opt = document.createElement('option');
+            opt.value = ns;
+            opt.textContent = ns;
+            nsSelectEl.appendChild(opt);
+          }
+          const customNs = nsCustomEl.value.trim();
+          if (customNs) {
+            activeNs = customNs;
+          } else if (namespaces.includes(activeNs)) {
+            nsSelectEl.value = activeNs;
+          } else if (namespaces.length > 0) {
+            activeNs = namespaces[0];
+            nsSelectEl.value = activeNs;
+          } else {
+            activeNs = '';
+          }
+          rebindDataWatch(activeNs);
+          await loadEntriesOnly();
+        } catch (err) {
+          handleApiError(err, '加载命名空间失败');
+        }
+      }
+
+      async function loadEntriesOnly() {
+        const ns = nsCustomEl.value.trim() || nsSelectEl.value || activeNs;
+        activeNs = ns;
+        if (!ns) {
+          renderEmpty(kvListEl, '当前存储尚无命名空间，可在下方“新增条目”直接创建');
+          return;
+        }
+        try {
+          const prefix = prefixFilterEl.value.trim() || undefined;
+          const entries = await currentStoreHandle().list(ns, {
+            prefix,
+            withSchema: true,
+          });
+          const keys = Object.keys(entries);
+          if (keys.length === 0) {
+            renderEmpty(kvListEl, `命名空间 "${ns}" 中暂无匹配键值`);
+            return;
+          }
+          clearChildren(kvListEl);
+          for (const key of keys) {
+            const entry = entries[key];
+            const box = document.createElement('div');
+            box.className = 'item-box';
+
+            const top = document.createElement('div');
+            top.className = 'item-top';
+            const left = document.createElement('div');
+            left.className = 'row';
+            const keyCode = document.createElement('code');
+            keyCode.textContent = key;
+            left.appendChild(keyCode);
+            left.appendChild(makeBadge(entry.type));
+            top.appendChild(left);
+
+            const controls = document.createElement('div');
+            controls.className = 'row';
+            const reader = {};
+            const inputNode = createTypedInput(entry, reader);
+
+            const saveBtn = document.createElement('button');
+            saveBtn.type = 'button';
+            saveBtn.className = 'primary small';
+            saveBtn.textContent = '更新';
+            saveBtn.addEventListener('click', async () => {
+              try {
+                const nextVal = reader.get();
+                await currentStoreHandle().set(ns, key, nextVal);
+                showToast(`已更新 ${ns}/${key}`);
+              } catch (err) {
+                handleApiError(err, '更新失败');
+              }
+            });
+
+            const delBtn = document.createElement('button');
+            delBtn.type = 'button';
+            delBtn.className = 'danger small';
+            delBtn.textContent = '删除';
+            delBtn.addEventListener('click', async () => {
+              try {
+                await currentStoreHandle().delete(ns, key);
+                showToast(`已删除 ${ns}/${key}`);
+                await loadEntriesOnly();
+              } catch (err) {
+                handleApiError(err, '删除失败');
+              }
+            });
+
+            controls.appendChild(saveBtn);
+            controls.appendChild(delBtn);
+            top.appendChild(controls);
+            box.appendChild(top);
+            box.appendChild(inputNode);
+            kvListEl.appendChild(box);
+          }
+        } catch (err) {
+          handleApiError(err, '读取键值列表失败');
+        }
+      }
+
+      function parseNewEntryValue(typeStr, rawText) {
+        if (typeStr === 'number') {
+          const n = Number(rawText);
+          if (!Number.isFinite(n)) throw new Error('请输入有效数字');
+          return n;
+        }
+        if (typeStr === 'bool') {
+          const lower = rawText.trim().toLowerCase();
+          if (lower === 'true' || lower === '1') return true;
+          if (lower === 'false' || lower === '0') return false;
+          throw new Error('bool 类型请输入 true / false');
+        }
+        if (typeStr === 'list' || typeStr === 'struct') {
+          return JSON.parse(rawText);
+        }
+        return rawText;
+      }
+
+      // Wire UI actions
+      copyViewBtnEl.addEventListener('click', async () => {
+        const rel = (currentMeta && currentMeta.route) ? currentMeta.route : `/${Dambo.plugin.name}/`;
+        const fullUrl = new URL(rel, window.location.origin).toString();
+        try {
+          await navigator.clipboard.writeText(fullUrl);
+          showToast('已复制展示页地址: ' + fullUrl);
+        } catch (_) {
+          showToast('展示页地址: ' + fullUrl);
+        }
+      });
+
+      reloadAllBtnEl.addEventListener('click', () => {
+        initManagePage();
+      });
+
+      resetAllCfgBtnEl.addEventListener('click', async () => {
+        try {
+          await Dambo.config.reset();
+          showToast('已恢复全部默认配置');
+          await loadConfigPanel(true);
+        } catch (err) {
+          handleApiError(err, '全部恢复默认失败');
+        }
+      });
+
+      for (const btn of storeTabBtns) {
+        btn.addEventListener('click', () => {
+          activeStore = btn.getAttribute('data-store-tab') || 'persist';
+          for (const b of storeTabBtns) {
+            b.classList.toggle('active', b === btn);
+          }
+          nsCustomEl.value = '';
+          loadNamespacesAndEntries();
+        });
+      }
+
+      nsSelectEl.addEventListener('change', () => {
+        nsCustomEl.value = '';
+        activeNs = nsSelectEl.value;
+        rebindDataWatch(activeNs);
+        loadEntriesOnly();
+      });
+
+      refreshDataBtnEl.addEventListener('click', () => {
+        const customNs = nsCustomEl.value.trim();
+        if (customNs) activeNs = customNs;
+        rebindDataWatch(activeNs);
+        loadEntriesOnly();
+      });
+
+      clearNsBtnEl.addEventListener('click', async () => {
+        const ns = nsCustomEl.value.trim() || nsSelectEl.value || activeNs;
+        if (!ns) return;
+        try {
+          const count = await currentStoreHandle().clearNamespace(ns);
+          showToast(`已清空命名空间 ${ns} (${count} 条)`);
+          await loadNamespacesAndEntries();
+          if (activeStore === 'persist' && ns === 'config') {
+            await loadConfigPanel(true);
+          }
+        } catch (err) {
+          handleApiError(err, '清空命名空间失败');
+        }
+      });
+
+      newTypeEl.addEventListener('change', () => {
+        newEnumWrapEl.classList.toggle('hidden', newTypeEl.value !== 'enum');
+      });
+
+      addKvBtnEl.addEventListener('click', async () => {
+        const ns = (nsCustomEl.value.trim() || nsSelectEl.value || '').trim();
+        const key = newKeyEl.value.trim();
+        const typeStr = newTypeEl.value;
+        if (!ns || !key) {
+          showToast('请指定命名空间和键名', true);
+          return;
+        }
+        try {
+          const val = parseNewEntryValue(typeStr, newValEl.value);
+          const schema = { type: typeStr };
+          if (typeStr === 'enum') {
+            const opts = newEnumOptsEl.value
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+            schema.meta = { options: opts };
+          }
+          await currentStoreHandle().set(ns, key, val, schema);
+          showToast(`已写入 ${ns}/${key}`);
+          newKeyEl.value = '';
+          newValEl.value = '';
+          await loadNamespacesAndEntries();
+        } catch (err) {
+          handleApiError(err, '写入失败');
+        }
+      });
+
+      authFormEl.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        try {
+          await Dambo.plugin.unlockManage(authTokenInputEl.value);
+          authModalEl.classList.remove('open');
+          authTokenInputEl.value = '';
+          authErrorEl.classList.add('hidden');
+          showToast('远程管理解锁成功');
+          await initManagePage();
+        } catch (err) {
+          authErrorEl.textContent = (err && err.message) ? err.message : '口令验证失败';
+          authErrorEl.classList.remove('hidden');
+        }
+      });
+
+      async function initManagePage() {
+        if (!offCfgWatch) {
+          offCfgWatch = Dambo.config.watch(() => loadConfigPanel(true));
+        }
+        if (!offAclWatch) {
+          offAclWatch = Dambo.acl.onChange(() => loadAclPanel());
+        }
+        await loadConfigPanel(true);
+        await Promise.all([loadAclPanel(), loadTopicsPanel(), loadNamespacesAndEntries()]);
+      }
+
+      initManagePage();
+    })();
+  </script>
+</body>
+</html>

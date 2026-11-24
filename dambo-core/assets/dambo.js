@@ -7,7 +7,7 @@
  * - Zero external dependencies and zero desktop/Tauri bridge globals (standard Web APIs only).
  * - Compatible with both OBS Browser Source and Dambo desktop transparent overlay windows.
  *
- * @version 1.1.0
+ * @version 2.0.0
  */
 (function (root, factory) {
     if (typeof module === 'object' && module.exports) {
@@ -1692,10 +1692,875 @@
         return client;
     }
 
+    // =========================================================================
+    // Layer 2 平台 SDK（基于 Layer 1 /api/v1/* REST + 懒连接单一 SSE）
+    // =========================================================================
+
+    /**
+     * 平台 REST / 业务错误统一异常类。
+     */
+    class DamboError extends Error {
+        /**
+         * @param {string} message
+         * @param {{ code?: string, status?: number, details?: any }=} opts
+         */
+        constructor(message, opts) {
+            super(message || 'Dambo API error');
+            this.name = 'DamboError';
+            this.code = (opts && opts.code) || 'INTERNAL_ERROR';
+            this.status = (opts && typeof opts.status === 'number') ? opts.status : 0;
+            this.details = opts ? opts.details : undefined;
+        }
+    }
+
+    function parsePluginContext() {
+        if (typeof window === 'undefined' || !window.location || !window.location.pathname) {
+            return { pluginName: '', mode: 'view' };
+        }
+        const rawSegments = window.location.pathname.split('/');
+        const segments = [];
+        for (let i = 0; i < rawSegments.length; i++) {
+            if (rawSegments[i]) {
+                segments.push(rawSegments[i]);
+            }
+        }
+        if (segments.length === 0) {
+            return { pluginName: '', mode: 'view' };
+        }
+        let first = segments[0];
+        try {
+            first = decodeURIComponent(first);
+        } catch (_) {
+            // keep raw segment
+        }
+        const lowerFirst = first.toLowerCase();
+        if (lowerFirst === 'sdk' || lowerFirst === 'api' || lowerFirst === 'ws') {
+            return { pluginName: '', mode: 'view' };
+        }
+        const mode = (segments.length >= 2 && segments[1] === 'm') ? 'manage' : 'view';
+        return { pluginName: first, mode: mode };
+    }
+
+    let metaCache = null;
+    let metaInflight = null;
+
+    function apiFetch(method, path, body, opts) {
+        if (typeof fetch !== 'function') {
+            return Promise.reject(new DamboError('Fetch API unavailable in this environment', {
+                code: 'UNSUPPORTED_ENVIRONMENT',
+                status: 0,
+            }));
+        }
+        const ctx = parsePluginContext();
+        const headers = {};
+        if (!(opts && opts.skipPluginHeader) && ctx.pluginName) {
+            headers['X-Dambo-Plugin'] = ctx.pluginName;
+        }
+        const init = {
+            method: method,
+            credentials: 'same-origin',
+            headers: headers,
+        };
+        if (body !== undefined) {
+            headers['Content-Type'] = 'application/json';
+            init.body = JSON.stringify(body);
+        }
+
+        return fetch(path, init).then(function (res) {
+            return res.text().then(function (rawText) {
+                let parsed = null;
+                if (rawText) {
+                    try {
+                        parsed = JSON.parse(rawText);
+                    } catch (_) {
+                        parsed = null;
+                    }
+                }
+                if (!res.ok) {
+                    const errObj = (parsed && parsed.error) || {};
+                    throw new DamboError(
+                        errObj.message || ('HTTP ' + res.status + ' calling ' + path),
+                        {
+                            code: errObj.code || 'HTTP_ERROR',
+                            status: res.status,
+                            details: errObj.details,
+                        }
+                    );
+                }
+                return parsed;
+            });
+        });
+    }
+
+    const sseManager = (function () {
+        let nextListenerId = 1;
+        const watchListeners = [];
+        const topicListeners = [];
+        const aclListeners = [];
+        const ownerMap = new Map();
+
+        let selfNamedomain = null;
+        let es = null;
+        let clientId = null;
+        let connectTimer = null;
+        let syncTimer = null;
+        let openSignature = '';
+        let connectedSignature = '';
+
+        function totalListeners() {
+            return watchListeners.length + topicListeners.length + aclListeners.length;
+        }
+
+        function clearTimers() {
+            if (connectTimer !== null) {
+                clearTimeout(connectTimer);
+                connectTimer = null;
+            }
+            if (syncTimer !== null) {
+                clearTimeout(syncTimer);
+                syncTimer = null;
+            }
+        }
+
+        function closeEventSource() {
+            clearTimers();
+            if (es !== null) {
+                try {
+                    es.close();
+                } catch (_) {}
+                es = null;
+            }
+            clientId = null;
+            selfNamedomain = null;
+            openSignature = '';
+            connectedSignature = '';
+            ownerMap.clear();
+        }
+
+        function buildDesiredSubscriptions() {
+            const watches = [];
+            const watchSeen = Object.create(null);
+            for (let i = 0; i < watchListeners.length; i++) {
+                const w = watchListeners[i];
+                const key = w.store + '\0' + w.owner + '\0' + w.namespace + '\0' + (w.prefix || '');
+                if (!watchSeen[key]) {
+                    watchSeen[key] = true;
+                    const item = {
+                        store: w.store,
+                        owner: w.owner,
+                        namespace: w.namespace,
+                    };
+                    if (w.prefix) {
+                        item.prefix = w.prefix;
+                    }
+                    watches.push(item);
+                }
+            }
+
+            const topics = [];
+            const topicSeen = Object.create(null);
+            for (let j = 0; j < topicListeners.length; j++) {
+                const t = topicListeners[j];
+                const key = t.owner + '\0' + t.topic;
+                if (!topicSeen[key]) {
+                    topicSeen[key] = true;
+                    topics.push({
+                        owner: t.owner,
+                        topic: t.topic,
+                    });
+                }
+            }
+
+            return { watches: watches, topics: topics };
+        }
+
+        function signatureOf(subs) {
+            return JSON.stringify(subs);
+        }
+
+        function buildEventsUrl(subs) {
+            const ctx = parsePluginContext();
+            const params = [
+                'plugin=' + encodeURIComponent(ctx.pluginName),
+                'mode=' + encodeURIComponent(ctx.mode),
+            ];
+            if (subs.watches.length > 0) {
+                params.push('watches=' + encodeURIComponent(JSON.stringify(subs.watches)));
+            }
+            if (subs.topics.length > 0) {
+                params.push('topics=' + encodeURIComponent(JSON.stringify(subs.topics)));
+            }
+            return '/api/v1/events?' + params.join('&');
+        }
+
+        function updateOwnerMapFromAccepted(accepted) {
+            if (!accepted) return;
+            if (Array.isArray(accepted.watches)) {
+                for (let i = 0; i < accepted.watches.length; i++) {
+                    const w = accepted.watches[i];
+                    if (w && w.requested_owner && w.owner) {
+                        ownerMap.set(w.requested_owner, w.owner);
+                        ownerMap.set(w.owner, w.owner);
+                    }
+                }
+            }
+            if (Array.isArray(accepted.topics)) {
+                for (let j = 0; j < accepted.topics.length; j++) {
+                    const t = accepted.topics[j];
+                    if (t && t.requested_owner && t.owner) {
+                        ownerMap.set(t.requested_owner, t.owner);
+                        ownerMap.set(t.owner, t.owner);
+                    }
+                }
+            }
+        }
+
+        function ownerMatches(requestedOwner, eventOwner) {
+            if (requestedOwner === '@self') {
+                return Boolean(selfNamedomain && eventOwner === selfNamedomain);
+            }
+            if (requestedOwner === eventOwner) {
+                return true;
+            }
+            const mapped = ownerMap.get(requestedOwner);
+            return Boolean(mapped && mapped === eventOwner);
+        }
+
+        function flushSync() {
+            syncTimer = null;
+            if (!es || !clientId || totalListeners() === 0) return;
+            const subs = buildDesiredSubscriptions();
+            const sig = signatureOf(subs);
+            if (sig === connectedSignature) return;
+            const targetClient = clientId;
+            apiFetch('PUT', '/api/v1/events/' + encodeURIComponent(targetClient) + '/subscriptions', subs)
+                .then(function (res) {
+                    if (clientId !== targetClient) return;
+                    connectedSignature = sig;
+                    if (res && res.accepted) {
+                        updateOwnerMapFromAccepted(res.accepted);
+                    }
+                })
+                .catch(function (err) {
+                    console.warn('[dambo-sdk] failed to sync SSE subscriptions:', err);
+                });
+        }
+
+        function scheduleSync() {
+            if (syncTimer !== null) return;
+            syncTimer = setTimeout(flushSync, 10);
+        }
+
+        function openConnectionNow() {
+            connectTimer = null;
+            if (totalListeners() === 0 || es !== null) return;
+            if (typeof EventSource !== 'function') {
+                console.error('[dambo-sdk] EventSource is not supported in this browser');
+                return;
+            }
+            const subs = buildDesiredSubscriptions();
+            openSignature = signatureOf(subs);
+            connectedSignature = '';
+            const url = buildEventsUrl(subs);
+            const source = new EventSource(url);
+            es = source;
+
+            source.addEventListener('connected', function (ev) {
+                if (es !== source) return;
+                try {
+                    const data = JSON.parse(ev.data);
+                    clientId = data.client_id || null;
+                    selfNamedomain = data.namedomain || null;
+                    if (selfNamedomain) {
+                        ownerMap.set('@self', selfNamedomain);
+                        if (data.plugin_name) ownerMap.set(data.plugin_name, selfNamedomain);
+                    }
+                    updateOwnerMapFromAccepted(data.accepted);
+                    connectedSignature = openSignature;
+                    const desiredNow = signatureOf(buildDesiredSubscriptions());
+                    if (desiredNow !== connectedSignature) {
+                        scheduleSync();
+                    }
+                } catch (err) {
+                    console.error('[dambo-sdk] invalid connected payload:', err);
+                }
+            });
+
+            source.addEventListener('data.changed', function (ev) {
+                if (es !== source) return;
+                let data;
+                try {
+                    data = JSON.parse(ev.data);
+                } catch (err) {
+                    console.error('[dambo-sdk] invalid data.changed payload:', err);
+                    return;
+                }
+                if (
+                    selfNamedomain &&
+                    data.owner === selfNamedomain &&
+                    data.store === 'persist' &&
+                    data.namespace === 'config'
+                ) {
+                    metaCache = null;
+                }
+                const listeners = watchListeners.slice();
+                for (let i = 0; i < listeners.length; i++) {
+                    const sub = listeners[i];
+                    if (
+                        sub.store !== data.store ||
+                        sub.namespace !== data.namespace ||
+                        !ownerMatches(sub.owner, data.owner)
+                    ) {
+                        continue;
+                    }
+                    let scoped = data;
+                    if (sub.prefix && data.op !== 'clear') {
+                        const rawKeys = Array.isArray(data.keys) ? data.keys : [];
+                        const matchedKeys = [];
+                        for (let kIdx = 0; kIdx < rawKeys.length; kIdx++) {
+                            if (rawKeys[kIdx].indexOf(sub.prefix) === 0) {
+                                matchedKeys.push(rawKeys[kIdx]);
+                            }
+                        }
+                        if (matchedKeys.length === 0) {
+                            continue;
+                        }
+                        if (matchedKeys.length !== rawKeys.length) {
+                            let matchedValues;
+                            if (data.values && typeof data.values === 'object') {
+                                matchedValues = {};
+                                for (let mIdx = 0; mIdx < matchedKeys.length; mIdx++) {
+                                    const mk = matchedKeys[mIdx];
+                                    if (Object.prototype.hasOwnProperty.call(data.values, mk)) {
+                                        matchedValues[mk] = data.values[mk];
+                                    }
+                                }
+                            }
+                            scoped = {
+                                store: data.store,
+                                owner: data.owner,
+                                namespace: data.namespace,
+                                op: data.op,
+                                keys: matchedKeys,
+                                by: data.by,
+                                ts: data.ts,
+                            };
+                            if (matchedValues !== undefined) {
+                                scoped.values = matchedValues;
+                            }
+                        }
+                    }
+                    try {
+                        sub.cb(scoped);
+                    } catch (cbErr) {
+                        console.error('[dambo-sdk] watch listener error:', cbErr);
+                    }
+                }
+            });
+
+            source.addEventListener('topic.message', function (ev) {
+                if (es !== source) return;
+                let msg;
+                try {
+                    msg = JSON.parse(ev.data);
+                } catch (err) {
+                    console.error('[dambo-sdk] invalid topic.message payload:', err);
+                    return;
+                }
+                const listeners = topicListeners.slice();
+                for (let i = 0; i < listeners.length; i++) {
+                    const sub = listeners[i];
+                    if (sub.topic === msg.topic && ownerMatches(sub.owner, msg.owner)) {
+                        try {
+                            sub.cb(msg);
+                        } catch (cbErr) {
+                            console.error('[dambo-sdk] topic listener error:', cbErr);
+                        }
+                    }
+                }
+            });
+
+            source.addEventListener('acl.changed', function (ev) {
+                if (es !== source) return;
+                let payload;
+                try {
+                    payload = JSON.parse(ev.data);
+                } catch (err) {
+                    console.error('[dambo-sdk] invalid acl.changed payload:', err);
+                    return;
+                }
+                const listeners = aclListeners.slice();
+                for (let i = 0; i < listeners.length; i++) {
+                    try {
+                        listeners[i].cb(payload);
+                    } catch (cbErr) {
+                        console.error('[dambo-sdk] acl listener error:', cbErr);
+                    }
+                }
+            });
+
+            source.onerror = function () {
+                if (es !== source) return;
+                const desiredNow = signatureOf(buildDesiredSubscriptions());
+                if (source.readyState === 2 /* CLOSED */ || desiredNow !== openSignature) {
+                    try {
+                        source.close();
+                    } catch (_) {}
+                    es = null;
+                    clientId = null;
+                    if (totalListeners() > 0) {
+                        scheduleConnect(source.readyState === 2 ? 1000 : 200);
+                    }
+                }
+            };
+        }
+
+        function scheduleConnect(delayMs) {
+            if (connectTimer !== null || es !== null || totalListeners() === 0) return;
+            connectTimer = setTimeout(openConnectionNow, typeof delayMs === 'number' ? delayMs : 10);
+        }
+
+        function ensureConnectedAfterAdd(needsServerSync) {
+            if (es === null) {
+                scheduleConnect(10);
+            } else if (clientId !== null && needsServerSync) {
+                scheduleSync();
+            }
+        }
+
+        function cleanupOrSyncAfterRemove(needsServerSync) {
+            if (totalListeners() === 0) {
+                closeEventSource();
+            } else if (es !== null && clientId !== null && needsServerSync) {
+                scheduleSync();
+            }
+        }
+
+        return {
+            addWatch: function (store, owner, namespace, prefix, cb) {
+                if (typeof cb !== 'function') {
+                    throw new TypeError('Dambo watch callback must be a function');
+                }
+                const id = nextListenerId++;
+                watchListeners.push({
+                    id: id,
+                    store: store,
+                    owner: owner,
+                    namespace: namespace,
+                    prefix: prefix || '',
+                    cb: cb,
+                });
+                ensureConnectedAfterAdd(true);
+                let removed = false;
+                return function off() {
+                    if (removed) return;
+                    removed = true;
+                    for (let i = 0; i < watchListeners.length; i++) {
+                        if (watchListeners[i].id === id) {
+                            watchListeners.splice(i, 1);
+                            break;
+                        }
+                    }
+                    cleanupOrSyncAfterRemove(true);
+                };
+            },
+            addTopic: function (owner, topic, cb) {
+                if (typeof cb !== 'function') {
+                    throw new TypeError('Dambo topic subscribe callback must be a function');
+                }
+                const id = nextListenerId++;
+                topicListeners.push({
+                    id: id,
+                    owner: owner,
+                    topic: topic,
+                    cb: cb,
+                });
+                ensureConnectedAfterAdd(true);
+                let removed = false;
+                return function off() {
+                    if (removed) return;
+                    removed = true;
+                    for (let i = 0; i < topicListeners.length; i++) {
+                        if (topicListeners[i].id === id) {
+                            topicListeners.splice(i, 1);
+                            break;
+                        }
+                    }
+                    cleanupOrSyncAfterRemove(true);
+                };
+            },
+            addAcl: function (cb) {
+                if (typeof cb !== 'function') {
+                    throw new TypeError('Dambo acl.onChange callback must be a function');
+                }
+                const id = nextListenerId++;
+                aclListeners.push({
+                    id: id,
+                    cb: cb,
+                });
+                ensureConnectedAfterAdd(false);
+                let removed = false;
+                return function off() {
+                    if (removed) return;
+                    removed = true;
+                    for (let i = 0; i < aclListeners.length; i++) {
+                        if (aclListeners[i].id === id) {
+                            aclListeners.splice(i, 1);
+                            break;
+                        }
+                    }
+                    cleanupOrSyncAfterRemove(false);
+                };
+            },
+        };
+    })();
+
+    function createStoreHandle(storeName, ownerTarget) {
+        const target = String(ownerTarget || '@self');
+        const base =
+            '/api/v1/data/' + encodeURIComponent(storeName) + '/' + encodeURIComponent(target);
+
+        return {
+            namespaces: function () {
+                return apiFetch('GET', base + '/namespaces').then(function (d) {
+                    return d && Array.isArray(d.namespaces) ? d.namespaces : [];
+                });
+            },
+            get: function (ns, key) {
+                const url =
+                    base + '/ns/' + encodeURIComponent(ns) + '/keys/' + encodeURIComponent(key);
+                return apiFetch('GET', url).then(
+                    function (d) {
+                        return d ? d.value : undefined;
+                    },
+                    function (err) {
+                        if (err instanceof DamboError && err.code === 'KEY_NOT_FOUND') {
+                            return undefined;
+                        }
+                        throw err;
+                    }
+                );
+            },
+            getEntry: function (ns, key) {
+                const url =
+                    base + '/ns/' + encodeURIComponent(ns) + '/keys/' + encodeURIComponent(key);
+                return apiFetch('GET', url).catch(function (err) {
+                    if (err instanceof DamboError && err.code === 'KEY_NOT_FOUND') {
+                        return null;
+                    }
+                    throw err;
+                });
+            },
+            set: function (ns, key, value, schema) {
+                const body = { value: value };
+                if (schema && typeof schema === 'object') {
+                    if (schema.type !== undefined) body.type = schema.type;
+                    if (schema.meta !== undefined) body.meta = schema.meta;
+                }
+                const url =
+                    base + '/ns/' + encodeURIComponent(ns) + '/keys/' + encodeURIComponent(key);
+                return apiFetch('PUT', url, body).then(function (res) {
+                    if (storeName === 'persist' && ns === 'config' && target === '@self') {
+                        metaCache = null;
+                    }
+                    return res;
+                });
+            },
+            delete: function (ns, key) {
+                const url =
+                    base + '/ns/' + encodeURIComponent(ns) + '/keys/' + encodeURIComponent(key);
+                return apiFetch('DELETE', url).then(function (d) {
+                    if (storeName === 'persist' && ns === 'config' && target === '@self') {
+                        metaCache = null;
+                    }
+                    return Boolean(d && d.deleted);
+                });
+            },
+            list: function (ns, opts) {
+                const o = opts || {};
+                const params = [];
+                if (typeof o.prefix === 'string' && o.prefix.length > 0) {
+                    params.push('prefix=' + encodeURIComponent(o.prefix));
+                }
+                if (Array.isArray(o.keys) && o.keys.length > 0) {
+                    params.push('keys=' + encodeURIComponent(o.keys.join(',')));
+                }
+                if (typeof o.limit === 'number' && o.limit >= 0) {
+                    params.push('limit=' + encodeURIComponent(String(Math.floor(o.limit))));
+                }
+                const qs = params.length > 0 ? '?' + params.join('&') : '';
+                const url = base + '/ns/' + encodeURIComponent(ns) + qs;
+                return apiFetch('GET', url).then(function (d) {
+                    const entries = d && d.entries && typeof d.entries === 'object' ? d.entries : {};
+                    if (o.withSchema) {
+                        return entries;
+                    }
+                    const unwrapped = {};
+                    const ks = Object.keys(entries);
+                    for (let i = 0; i < ks.length; i++) {
+                        unwrapped[ks[i]] = entries[ks[i]].value;
+                    }
+                    return unwrapped;
+                });
+            },
+            mset: function (ns, map) {
+                const rawMap = map && typeof map === 'object' ? map : {};
+                const entries = {};
+                const ks = Object.keys(rawMap);
+                for (let i = 0; i < ks.length; i++) {
+                    entries[ks[i]] = { value: rawMap[ks[i]] };
+                }
+                const url = base + '/ns/' + encodeURIComponent(ns) + '/mset';
+                return apiFetch('POST', url, { entries: entries }).then(function (d) {
+                    if (storeName === 'persist' && ns === 'config' && target === '@self') {
+                        metaCache = null;
+                    }
+                    return d && d.entries ? d.entries : {};
+                });
+            },
+            clearNamespace: function (ns) {
+                const url = base + '/ns/' + encodeURIComponent(ns);
+                return apiFetch('DELETE', url).then(function (d) {
+                    if (storeName === 'persist' && ns === 'config' && target === '@self') {
+                        metaCache = null;
+                    }
+                    return d && typeof d.deleted === 'number' ? d.deleted : 0;
+                });
+            },
+            watch: function (ns, cb, opts) {
+                const prefix =
+                    opts && typeof opts.prefix === 'string' && opts.prefix.length > 0
+                        ? opts.prefix
+                        : undefined;
+                return sseManager.addWatch(storeName, target, ns, prefix, cb);
+            },
+        };
+    }
+
+    const pluginApi = {
+        get name() {
+            return parsePluginContext().pluginName;
+        },
+        get mode() {
+            return parsePluginContext().mode;
+        },
+        meta: function (opts) {
+            if (!(opts && opts.force)) {
+                if (metaCache !== null) {
+                    return Promise.resolve(metaCache);
+                }
+                if (metaInflight !== null) {
+                    return metaInflight;
+                }
+            }
+            const p = apiFetch('GET', '/api/v1/plugins/' + encodeURIComponent('@self')).then(
+                function (meta) {
+                    metaCache = meta;
+                    metaInflight = null;
+                    return meta;
+                },
+                function (err) {
+                    metaInflight = null;
+                    throw err;
+                }
+            );
+            metaInflight = p;
+            return p;
+        },
+        unlockManage: function (token) {
+            return apiFetch(
+                'POST',
+                '/api/v1/auth/manage',
+                { token: token == null ? '' : String(token) },
+                { skipPluginHeader: true }
+            );
+        },
+    };
+
+    const pluginsApi = {
+        list: function () {
+            return apiFetch('GET', '/api/v1/plugins').then(function (d) {
+                return d && Array.isArray(d.plugins) ? d.plugins : [];
+            });
+        },
+        get: function (target) {
+            return apiFetch('GET', '/api/v1/plugins/' + encodeURIComponent(String(target)));
+        },
+    };
+
+    const storageSelf = createStoreHandle('persist', '@self');
+    const memorySelf = createStoreHandle('memory', '@self');
+
+    const storageApi = Object.assign({}, storageSelf, {
+        of: function (target) {
+            return createStoreHandle('persist', target);
+        },
+    });
+
+    const memoryApi = Object.assign({}, memorySelf, {
+        of: function (target) {
+            return createStoreHandle('memory', target);
+        },
+    });
+
+    const configApi = {
+        get: function (key) {
+            return pluginApi.meta().then(function (meta) {
+                const cfg = (meta && meta.config) || {};
+                if (key !== undefined && key !== null) {
+                    const k = String(key);
+                    return Object.prototype.hasOwnProperty.call(cfg, k) ? cfg[k].value : undefined;
+                }
+                const out = {};
+                const ks = Object.keys(cfg);
+                for (let i = 0; i < ks.length; i++) {
+                    out[ks[i]] = cfg[ks[i]].value;
+                }
+                return out;
+            });
+        },
+        set: function (keyOrMap, val) {
+            if (keyOrMap && typeof keyOrMap === 'object' && !Array.isArray(keyOrMap)) {
+                return storageSelf.mset('config', keyOrMap).then(function (res) {
+                    metaCache = null;
+                    return res;
+                });
+            }
+            return storageSelf.set('config', String(keyOrMap), val).then(function (res) {
+                metaCache = null;
+                return res;
+            });
+        },
+        reset: function (key) {
+            if (key !== undefined && key !== null) {
+                return storageSelf.delete('config', String(key)).then(function (res) {
+                    metaCache = null;
+                    return res;
+                });
+            }
+            return storageSelf.clearNamespace('config').then(function (res) {
+                metaCache = null;
+                return res;
+            });
+        },
+        schema: function () {
+            return pluginApi.meta().then(function (meta) {
+                return (meta && meta.config) || {};
+            });
+        },
+        watch: function (cb, opts) {
+            return storageSelf.watch(
+                'config',
+                function (ev) {
+                    metaCache = null;
+                    cb(ev);
+                },
+                opts
+            );
+        },
+    };
+
+    const topicsApi = {
+        publish: function (name, payload, opts) {
+            const o = opts || {};
+            const body = { payload: payload };
+            if (o.public !== undefined) body.public = Boolean(o.public);
+            if (o.description !== undefined) body.description = o.description;
+            return apiFetch('POST', '/api/v1/topics/' + encodeURIComponent(String(name)), body).then(
+                function (res) {
+                    metaCache = null;
+                    return res;
+                }
+            );
+        },
+        configure: function (name, opts) {
+            const o = opts || {};
+            const body = { public: Boolean(o.public) };
+            if (o.description !== undefined) body.description = o.description;
+            return apiFetch('PUT', '/api/v1/topics/' + encodeURIComponent(String(name)), body).then(
+                function (res) {
+                    metaCache = null;
+                    return res;
+                }
+            );
+        },
+        remove: function (name) {
+            return apiFetch('DELETE', '/api/v1/topics/' + encodeURIComponent(String(name))).then(
+                function (d) {
+                    metaCache = null;
+                    return Boolean(d && d.deleted);
+                }
+            );
+        },
+        list: function (target) {
+            const p =
+                !target || target === '@self' ? pluginApi.meta() : pluginsApi.get(target);
+            return p.then(function (meta) {
+                return meta && Array.isArray(meta.topics) ? meta.topics : [];
+            });
+        },
+        subscribe: function (target, name, cb) {
+            return sseManager.addTopic(String(target), String(name), cb);
+        },
+    };
+
+    const aclApi = {
+        check: function (target, resource) {
+            const qs =
+                '?target=' +
+                encodeURIComponent(String(target)) +
+                '&resource=' +
+                encodeURIComponent(String(resource));
+            return apiFetch('GET', '/api/v1/acl' + qs);
+        },
+        request: function (target, opts) {
+            const o = opts || {};
+            const body = {
+                target: String(target),
+                resource: o.resource,
+                level: o.level,
+            };
+            if (o.reason !== undefined) body.reason = o.reason;
+            return apiFetch('POST', '/api/v1/acl/requests', body);
+        },
+        list: function () {
+            return apiFetch('GET', '/api/v1/acl');
+        },
+        set: function (requester, opts) {
+            const o = opts || {};
+            const body = {
+                resource: o.resource,
+                level: o.level,
+            };
+            if (o.note !== undefined) body.note = o.note;
+            return apiFetch('PUT', '/api/v1/acl/grants/' + encodeURIComponent(String(requester)), body);
+        },
+        remove: function (requester, resource) {
+            const qs = '?resource=' + encodeURIComponent(String(resource));
+            return apiFetch(
+                'DELETE',
+                '/api/v1/acl/grants/' + encodeURIComponent(String(requester)) + qs
+            ).then(function (d) {
+                return Boolean(d && d.deleted);
+            });
+        },
+        onChange: function (cb) {
+            return sseManager.addAcl(cb);
+        },
+    };
+
     return {
-        VERSION: '1.1.0',
+        VERSION: '2.0.0',
         DamboClient: DamboClient,
+        DamboError: DamboError,
         connect: connect,
+        plugin: pluginApi,
+        plugins: pluginsApi,
+        config: configApi,
+        storage: storageApi,
+        memory: memoryApi,
+        topics: topicsApi,
+        acl: aclApi,
         utils: {
             DEFAULT_AVATAR_SVG: DEFAULT_AVATAR_SVG,
             normalizeUrl: normalizeUrl,
