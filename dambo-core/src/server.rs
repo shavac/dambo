@@ -2,6 +2,9 @@ use crate::config::Config;
 use crate::hub::StateHub;
 use crate::model::{ChannelAMessage, ChannelBMessage};
 use crate::plugin::{PluginRegistry, is_valid_plugin_name};
+use crate::plugin_api::{self, AdminSessionStore};
+use crate::plugin_hub::PluginEventHub;
+use crate::plugin_store::PluginStore;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::body::Body;
@@ -10,7 +13,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use http::{HeaderValue, Request, StatusCode, Uri, header};
+use http::{HeaderMap, HeaderValue, Request, StatusCode, Uri, header};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -18,10 +21,13 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-/// Shared state for Axum HTTP static serving and dual WebSocket channels (`/ws`, `/ws/event`).
+/// Shared state for Axum HTTP static serving, dual WebSocket channels, and Layer 1 plugin APIs.
 pub struct AppState {
     pub config: Arc<Config>,
     pub plugins: Arc<PluginRegistry>,
+    pub plugin_store: Arc<PluginStore>,
+    pub plugin_hub: Arc<PluginEventHub>,
+    pub admin_sessions: Arc<AdminSessionStore>,
     pub hub: Arc<StateHub>,
     pub event_tx: broadcast::Sender<ChannelBMessage>,
     pub html_dir: PathBuf,
@@ -184,13 +190,24 @@ async fn serve_plugin_view(
 
 async fn serve_plugin_manage(
     AxumPath(plugin): AxumPath<String>,
+    plugin_api::OptionalPeerIp(peer_ip): plugin_api::OptionalPeerIp,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Response {
+    let set_cookie = match plugin_api::authorize_and_maybe_mint_manage_cookie(
+        &headers,
+        peer_ip,
+        &state.config.server,
+        &state.admin_sessions,
+    ) {
+        Ok(cookie) => cookie,
+        Err(err) => return plugin_api::ApiError(err).into_response(),
+    };
     if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
         return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
     }
     let manage_path = state.html_dir.join(&plugin).join("manage.html");
-    let res = if manage_path.is_file() {
+    let mut res = if manage_path.is_file() {
         serve_file_response(&manage_path).await
     } else {
         (
@@ -199,6 +216,9 @@ async fn serve_plugin_manage(
         )
             .into_response()
     };
+    if let Some(cookie_hdr) = set_cookie {
+        res.headers_mut().append(header::SET_COOKIE, cookie_hdr);
+    }
     attach_manage_security_headers(res)
 }
 
@@ -337,14 +357,16 @@ async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-/// Build the unified Axum router serving `/`, `/sdk/dambo.js`, `/ws`, `/ws/event`,
+/// Build the unified Axum router serving `/`, `/sdk/dambo.js`, `/ws`, `/ws/event`, `/api/v1/*`,
 /// `/{plugin}` (301), `/{plugin}/`, `/{plugin}/m`, `/{plugin}/m/` (301), and `/{plugin}/{*path}`.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let api = plugin_api::api_router(state.clone());
     Router::new()
         .route("/", get(serve_root))
         .route("/sdk/dambo.js", get(serve_sdk_js))
         .route("/ws", get(ws_channel_a))
         .route("/ws/event", get(ws_channel_b))
+        .nest("/api/v1", api)
         .route("/{plugin}", get(redirect_plugin_root))
         .route("/{plugin}/", get(serve_plugin_view))
         .route("/{plugin}/m", get(serve_plugin_manage))
@@ -365,10 +387,13 @@ pub async fn serve(
         .with_context(|| format!("Failed to bind dambo server to {}", addr))?;
     log::info!("🌐 Dambo HTTP & WS server listening on http://{}", addr);
 
-    axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(cancel.cancelled_owned())
-        .await
-        .context("Axum server error")?;
+    axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(cancel.cancelled_owned())
+    .await
+    .context("Axum server error")?;
 
     Ok(())
 }
@@ -436,6 +461,9 @@ mod tests {
         let mut cfg = Config::default();
         cfg.server.html_dir = temp_dir.to_string_lossy().to_string();
         let plugins = Arc::new(PluginRegistry::new(temp_dir.clone()));
+        let plugin_store = Arc::new(PluginStore::open(temp_dir.join("plugins.redb")).unwrap());
+        let plugin_hub = Arc::new(PluginEventHub::new());
+        let admin_sessions = Arc::new(AdminSessionStore::new());
 
         let hub = Arc::new(StateHub::new(&FeedConfig::default()));
         hub.set_room_info(
@@ -458,6 +486,9 @@ mod tests {
         let state = Arc::new(AppState {
             config: Arc::new(cfg),
             plugins,
+            plugin_store,
+            plugin_hub,
+            admin_sessions,
             hub: hub.clone(),
             event_tx: event_tx.clone(),
             html_dir: temp_dir.clone(),
@@ -467,7 +498,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let cancel_srv = cancel.clone();
-        let router = build_router(state);
+        let router = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
         let srv_handle = tokio::spawn(async move {
             axum::serve(listener, router)
                 .with_graceful_shutdown(cancel_srv.cancelled_owned())

@@ -5,6 +5,8 @@ pub mod event_engine;
 pub mod hub;
 pub mod model;
 pub mod plugin;
+pub mod plugin_api;
+pub mod plugin_hub;
 pub mod plugin_store;
 pub mod plugin_types;
 pub mod recorder;
@@ -21,6 +23,9 @@ use crate::model::{
     RoomStateSnapshot,
 };
 use crate::plugin::{PluginInfo, PluginRegistry};
+use crate::plugin_api::AdminSessionStore;
+use crate::plugin_hub::PluginEventHub;
+use crate::plugin_store::PluginStore;
 use crate::recorder::Recorder;
 use crate::server::AppState;
 use crate::state::{AppPersistedState, RoomHistoryEntry, StateStore};
@@ -76,9 +81,12 @@ pub struct DamboRuntime {
     pub html_dir: PathBuf,
     pub rec_dir: PathBuf,
     pub log_dir: PathBuf,
+    pub plugin_db_path: PathBuf,
     pub config: Arc<Config>,
     pub state_store: Arc<StateStore>,
     pub plugins: Arc<PluginRegistry>,
+    pub plugin_hub: Arc<PluginEventHub>,
+    pub admin_sessions: Arc<AdminSessionStore>,
     pub auth: Arc<AuthManager>,
     pub collector: Arc<CollectorManager>,
     pub recorder: Arc<Mutex<Recorder>>,
@@ -108,6 +116,7 @@ impl DamboRuntime {
     pub fn from_parts(config_manager: ConfigManager, base_dir: PathBuf, cfg: Config) -> Self {
         let session_path = resolve_path(&base_dir, &cfg.bilibili.session_file);
         let state_path = resolve_path(&base_dir, &cfg.server.state_file);
+        let plugin_db_path = resolve_path(&base_dir, &cfg.server.plugin_db_file);
         let html_dir = resolve_path(&base_dir, &cfg.server.html_dir);
         let rec_dir = resolve_path(&base_dir, &cfg.record.dir);
         let log_dir = resolve_path(&base_dir, &cfg.log.path);
@@ -118,6 +127,8 @@ impl DamboRuntime {
         ));
         let effective_record_raw = state_store.record_raw().unwrap_or(cfg.record.record_raw);
         let plugins = Arc::new(PluginRegistry::new(html_dir.clone()));
+        let plugin_hub = Arc::new(PluginEventHub::new());
+        let admin_sessions = Arc::new(AdminSessionStore::new());
 
         let cancel = CancellationToken::new();
         let auth = Arc::new(AuthManager::new(session_path));
@@ -137,9 +148,12 @@ impl DamboRuntime {
             html_dir,
             rec_dir,
             log_dir,
+            plugin_db_path,
             config: Arc::new(cfg),
             state_store,
             plugins,
+            plugin_hub,
+            admin_sessions,
             auth,
             collector,
             recorder,
@@ -266,15 +280,21 @@ impl DamboRuntime {
             event_runner.run(event_cancel).await;
         });
 
-        // 3. Plugin hot watcher & Axum HTTP/WS server
+        // 3. Plugin hot watcher, storage DB, SSE hub & Axum HTTP/WS server
+        let plugin_store = Arc::new(PluginStore::open(self.plugin_db_path.clone())?);
         if let Err(e) = self.plugins.start_watching(self.cancel.child_token()) {
             log::warn!("Plugin directory watcher disabled: {}", e);
         }
+        self.plugin_hub
+            .spawn_registry_watcher(self.plugins.clone(), self.cancel.child_token());
 
         let addr = resolve_bind_addr(&self.config.server.host, self.config.server.port);
         let app_state = Arc::new(AppState {
             config: self.config.clone(),
             plugins: self.plugins.clone(),
+            plugin_store,
+            plugin_hub: self.plugin_hub.clone(),
+            admin_sessions: self.admin_sessions.clone(),
             hub: self.hub.clone(),
             event_tx: self.event_engine.sender(),
             html_dir: self.html_dir.clone(),
