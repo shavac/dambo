@@ -10,7 +10,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use http::{HeaderValue, Request, StatusCode, header};
+use http::{HeaderValue, Request, StatusCode, Uri, header};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +30,24 @@ pub struct AppState {
 
 /// Embedded official pure-Web Plugin SDK served at `GET /sdk/dambo.js`.
 pub const DAMBO_SDK_JS: &str = include_str!("../assets/dambo.js");
+
+/// Built-in fallback management page placeholder (replaced with full SDK UI in Phase 4).
+pub const MANAGE_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dambo Plugin Management</title>
+</head>
+<body>
+  <main id="dambo-manage-root">
+    <h1>Dambo Plugin Management</h1>
+    <p>Built-in fallback management UI (Phase 4 full SDK UI pending).</p>
+  </main>
+  <script src="/sdk/dambo.js"></script>
+</body>
+</html>
+"#;
 
 async fn serve_sdk_js() -> Response {
     (
@@ -91,6 +109,27 @@ async fn serve_file_response(path: &Path) -> Response {
     }
 }
 
+fn redirect_with_query(status: StatusCode, target_path: &str, uri: &Uri) -> Response {
+    let location = match uri.query() {
+        Some(q) if !q.is_empty() => format!("{}?{}", target_path, q),
+        _ => target_path.to_string(),
+    };
+    match HeaderValue::from_str(&location) {
+        Ok(val) => (status, [(header::LOCATION, val)]).into_response(),
+        Err(_) => (StatusCode::BAD_REQUEST, "Invalid redirect target").into_response(),
+    }
+}
+
+fn attach_manage_security_headers(mut res: Response) -> Response {
+    let headers = res.headers_mut();
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    res
+}
+
 fn safe_join_subpath(plugin_dir: &Path, rel_path: &str) -> Option<PathBuf> {
     if rel_path.contains('\0') || rel_path.contains('\\') {
         return None;
@@ -98,7 +137,7 @@ fn safe_join_subpath(plugin_dir: &Path, rel_path: &str) -> Option<PathBuf> {
     let mut candidate = plugin_dir.to_path_buf();
     let trimmed = rel_path.trim_start_matches('/');
     if trimmed.is_empty() {
-        candidate.push("index.html");
+        candidate.push("plugin.html");
         return Some(candidate);
     }
     for comp in Path::new(trimmed).components() {
@@ -117,49 +156,65 @@ fn safe_join_subpath(plugin_dir: &Path, rel_path: &str) -> Option<PathBuf> {
     }
 }
 
-fn is_safe_single_filename(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains('\0')
+async fn serve_root(uri: Uri) -> Response {
+    redirect_with_query(StatusCode::FOUND, "/default/", &uri)
 }
 
-async fn serve_root(State(state): State<Arc<AppState>>) -> Response {
-    let index_path = state.html_dir.join("default").join("index.html");
-    serve_file_response(&index_path).await
-}
-
-async fn serve_plugin_root(
+async fn redirect_plugin_root(
     AxumPath(plugin): AxumPath<String>,
+    uri: Uri,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if is_valid_plugin_name(&plugin) && state.plugins.contains(&plugin) {
-        let index_path = state.html_dir.join(&plugin).join("index.html");
-        return serve_file_response(&index_path).await;
+    if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
+        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
     }
-
-    // Fallback: relative asset referenced from root `/` inside `static/html/default/`
-    if is_safe_single_filename(&plugin) {
-        let default_asset = state.html_dir.join("default").join(&plugin);
-        if default_asset.is_file() {
-            return serve_file_response(&default_asset).await;
-        }
-    }
-
-    (StatusCode::NOT_FOUND, "Plugin not found").into_response()
+    redirect_with_query(StatusCode::MOVED_PERMANENTLY, &format!("/{}/", plugin), &uri)
 }
 
-async fn serve_plugin_slash(
+async fn serve_plugin_view(
     AxumPath(plugin): AxumPath<String>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
     if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
         return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
     }
-    let index_path = state.html_dir.join(&plugin).join("index.html");
-    serve_file_response(&index_path).await
+    let view_path = state.html_dir.join(&plugin).join("plugin.html");
+    serve_file_response(&view_path).await
+}
+
+async fn serve_plugin_manage(
+    AxumPath(plugin): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
+        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+    }
+    let manage_path = state.html_dir.join(&plugin).join("manage.html");
+    let res = if manage_path.is_file() {
+        serve_file_response(&manage_path).await
+    } else {
+        (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            MANAGE_FALLBACK_HTML,
+        )
+            .into_response()
+    };
+    attach_manage_security_headers(res)
+}
+
+async fn redirect_plugin_manage_slash(
+    AxumPath(plugin): AxumPath<String>,
+    uri: Uri,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
+        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+    }
+    redirect_with_query(
+        StatusCode::MOVED_PERMANENTLY,
+        &format!("/{}/m", plugin),
+        &uri,
+    )
 }
 
 async fn serve_plugin_asset(
@@ -282,15 +337,18 @@ async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-/// Build the unified Axum router serving `/`, `/sdk/dambo.js`, `/{plugin}`, `/{plugin}/{*path}`, `/ws`, and `/ws/event`.
+/// Build the unified Axum router serving `/`, `/sdk/dambo.js`, `/ws`, `/ws/event`,
+/// `/{plugin}` (301), `/{plugin}/`, `/{plugin}/m`, `/{plugin}/m/` (301), and `/{plugin}/{*path}`.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(serve_root))
         .route("/sdk/dambo.js", get(serve_sdk_js))
         .route("/ws", get(ws_channel_a))
         .route("/ws/event", get(ws_channel_b))
-        .route("/{plugin}", get(serve_plugin_root))
-        .route("/{plugin}/", get(serve_plugin_slash))
+        .route("/{plugin}", get(redirect_plugin_root))
+        .route("/{plugin}/", get(serve_plugin_view))
+        .route("/{plugin}/m", get(serve_plugin_manage))
+        .route("/{plugin}/m/", get(redirect_plugin_manage_slash))
         .route("/{plugin}/{*path}", get(serve_plugin_asset))
         .layer(middleware::from_fn(no_cache_middleware))
         .with_state(state)
@@ -341,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_static_nocache_and_dual_ws() {
+    async fn test_http_static_nocache_redirects_manage_and_dual_ws() {
         let id = SERVER_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let temp_dir =
             std::env::temp_dir().join(format!("dambo_srv_test_{}_{}", std::process::id(), id));
@@ -349,21 +407,31 @@ mod tests {
         fs::create_dir_all(temp_dir.join("default")).unwrap();
         fs::create_dir_all(temp_dir.join("list")).unwrap();
         fs::create_dir_all(temp_dir.join("custom")).unwrap();
-        fs::create_dir_all(temp_dir.join("no-index")).unwrap();
+        fs::create_dir_all(temp_dir.join("legacy-index")).unwrap();
         fs::write(
-            temp_dir.join("default/index.html"),
+            temp_dir.join("default/plugin.html"),
             "<html>OBS Default</html>",
         )
         .unwrap();
         fs::write(temp_dir.join("default/style.css"), "body { color: white; }").unwrap();
-        fs::write(temp_dir.join("list/index.html"), "<html>Feed List</html>").unwrap();
+        fs::write(temp_dir.join("list/plugin.html"), "<html>Feed List</html>").unwrap();
         fs::write(temp_dir.join("list/feed.js"), "console.log('feed');").unwrap();
         fs::write(
-            temp_dir.join("custom/index.html"),
+            temp_dir.join("custom/plugin.html"),
             "<html>Custom Plugin</html>",
         )
         .unwrap();
+        fs::write(
+            temp_dir.join("custom/manage.html"),
+            "<html>Custom Manage</html>",
+        )
+        .unwrap();
         fs::write(temp_dir.join("custom/app.js"), "console.log('custom');").unwrap();
+        fs::write(
+            temp_dir.join("legacy-index/index.html"),
+            "<html>Legacy Index Ignored</html>",
+        )
+        .unwrap();
 
         let mut cfg = Config::default();
         cfg.server.html_dir = temp_dir.to_string_lossy().to_string();
@@ -407,38 +475,65 @@ mod tests {
                 .unwrap();
         });
 
-        // 1. Verify GET /, GET /style.css fallback, GET /{plugin}, GET /{plugin}/{*path}, and 404/traversal protection
-        let root_res = http_get_raw(addr, "/").await;
-        assert!(root_res.contains("200 OK"));
+        // 1. Verify GET / -> 302 /default/ (preserving query)
+        let root_res = http_get_raw(addr, "/?debug=1").await;
+        assert!(root_res.contains("302 Found"));
+        assert!(root_res.to_lowercase().contains("location: /default/?debug=1"));
+
+        // 2. Verify GET /{plugin} -> 301 /{plugin}/ preserving Query String
+        let list_redir = http_get_raw(addr, "/list?timeout=60&solvable=true").await;
+        assert!(list_redir.contains("301 Moved Permanently"));
         assert!(
-            root_res
+            list_redir
+                .to_lowercase()
+                .contains("location: /list/?timeout=60&solvable=true")
+        );
+
+        // 3. Verify GET /{plugin}/ serves plugin.html with no-cache
+        let default_res = http_get_raw(addr, "/default/").await;
+        assert!(default_res.contains("200 OK"));
+        assert!(
+            default_res
                 .to_lowercase()
                 .contains("cache-control: no-store, no-cache, must-revalidate")
         );
-        assert!(root_res.contains("OBS Default"));
+        assert!(default_res.contains("OBS Default"));
 
-        let root_css_res = http_get_raw(addr, "/style.css").await;
-        assert!(root_css_res.contains("200 OK"));
-        assert!(root_css_res.contains("body { color: white; }"));
+        let default_css = http_get_raw(addr, "/default/style.css").await;
+        assert!(default_css.contains("200 OK"));
+        assert!(default_css.contains("body { color: white; }"));
 
-        let list_res = http_get_raw(addr, "/list").await;
-        assert!(list_res.contains("200 OK"));
-        assert!(list_res.contains("Feed List"));
+        // 4. Verify /{plugin}/m (custom manage.html + built-in fallback + security headers) and /{plugin}/m/ -> 301
+        let custom_manage = http_get_raw(addr, "/custom/m").await;
+        assert!(custom_manage.contains("200 OK"));
+        assert!(custom_manage.contains("Custom Manage"));
+        assert!(custom_manage.to_lowercase().contains("x-frame-options: deny"));
+        assert!(
+            custom_manage
+                .to_lowercase()
+                .contains("content-security-policy: frame-ancestors 'none'")
+        );
 
-        let list_js_res = http_get_raw(addr, "/list/feed.js").await;
-        assert!(list_js_res.contains("200 OK"));
-        assert!(list_js_res.contains("console.log('feed');"));
+        let fallback_manage = http_get_raw(addr, "/list/m").await;
+        assert!(fallback_manage.contains("200 OK"));
+        assert!(fallback_manage.contains("dambo-manage-root"));
+        assert!(fallback_manage.to_lowercase().contains("x-frame-options: deny"));
 
-        let custom_res = http_get_raw(addr, "/custom").await;
-        assert!(custom_res.contains("200 OK"));
-        assert!(custom_res.contains("Custom Plugin"));
+        let manage_redir = http_get_raw(addr, "/custom/m/?tab=acl").await;
+        assert!(manage_redir.contains("301 Moved Permanently"));
+        assert!(
+            manage_redir
+                .to_lowercase()
+                .contains("location: /custom/m?tab=acl")
+        );
 
-        let custom_js_res = http_get_raw(addr, "/custom/app.js").await;
-        assert!(custom_js_res.contains("200 OK"));
-        assert!(custom_js_res.contains("console.log('custom');"));
+        // 5. Verify assets, index.html-only rejection, and traversal protection
+        let custom_js = http_get_raw(addr, "/custom/app.js").await;
+        assert!(custom_js.contains("200 OK"));
+        assert!(custom_js.contains("console.log('custom');"));
 
-        let missing_res = http_get_raw(addr, "/no-index").await;
-        assert!(missing_res.contains("404 Not Found"));
+        let legacy_res = http_get_raw(addr, "/legacy-index/").await;
+        assert!(legacy_res.contains("404 Not Found"));
 
         let traversal_res = http_get_raw(addr, "/default/..%2F..%2Fetc%2Fpasswd").await;
         assert!(traversal_res.contains("404 Not Found"));
@@ -451,7 +546,7 @@ mod tests {
         assert!(sdk_res.contains("class DamboClient"));
         assert!(sdk_res.contains("function connect(options)"));
 
-        // 2. Verify /ws Snapshot + real-time Event
+        // 6. Verify /ws Snapshot + real-time Event
         let ws_a_url = format!("ws://{}/ws", addr);
         let (mut ws_a, _) = tokio_tungstenite::connect_async(&ws_a_url).await.unwrap();
         let first_frame = ws_a.next().await.unwrap().unwrap().into_text().unwrap();
@@ -481,7 +576,7 @@ mod tests {
             ChannelAMessage::Event(ref item) if item.content == "测试弹幕"
         ));
 
-        // 3. Verify /ws/event initial RoomInfo frame + EventBatch forwarding
+        // 7. Verify /ws/event initial RoomInfo frame + EventBatch forwarding
         let ws_b_url = format!("ws://{}/ws/event", addr);
         let (mut ws_b, _) = tokio_tungstenite::connect_async(&ws_b_url).await.unwrap();
         let room_info_frame = ws_b.next().await.unwrap().unwrap().into_text().unwrap();

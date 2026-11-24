@@ -21,10 +21,14 @@ min_passthrough_chars = 4      # Effective char count threshold for 0ms quality-
 max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic gift combo aggregation
 
 [server]
-host = "localhost"             # Use "0.0.0.0" to allow LAN access (e.g., tablet/phone /list/)
-port = 3838                    # HTTP & WebSocket server port
-html_dir = "static/html"       # Plugin root directory watched for hot reload
-state_file = "var/state.json"  # Runtime persisted state (current_room_id, locale, room_history, record_raw)
+host = "localhost"                 # Use "0.0.0.0" to allow LAN access (e.g., tablet/phone /list/)
+port = 3838                        # HTTP & WebSocket server port
+html_dir = "static/html"           # Plugin root directory watched for hot reload
+state_file = "var/state.json"      # Runtime persisted state (current_room_id, locale, room_history, record_raw)
+plugin_db_file = "var/plugins.redb" # Embedded redb database for plugin persistence, ACLs, and topic metadata
+allow_remote_manage = false        # Allow non-loopback LAN clients to access /{plugin}/m management pages
+# admin_token = ""                 # Optional remote management password when allow_remote_manage = true or binding 0.0.0.0
+# allowed_hosts = []               # Optional extra allowed Host headers (e.g., Tailscale/LAN hostnames)
 
 [log]
 level = "warn"                 # off | error | warn | info | debug | trace

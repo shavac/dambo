@@ -126,6 +126,14 @@ pub struct ServerConfig {
     pub html_dir: String,
     #[serde(default = "default_state_file")]
     pub state_file: String,
+    #[serde(default = "default_plugin_db_file")]
+    pub plugin_db_file: String,
+    #[serde(default)]
+    pub allow_remote_manage: bool,
+    #[serde(default)]
+    pub admin_token: Option<String>,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -135,6 +143,10 @@ impl Default for ServerConfig {
             port: default_port(),
             html_dir: default_html_dir(),
             state_file: default_state_file(),
+            plugin_db_file: default_plugin_db_file(),
+            allow_remote_manage: false,
+            admin_token: None,
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -235,6 +247,9 @@ fn default_html_dir() -> String {
 fn default_state_file() -> String {
     "var/state.json".to_string()
 }
+fn default_plugin_db_file() -> String {
+    "var/plugins.redb".to_string()
+}
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -283,6 +298,10 @@ mod tests {
         assert_eq!(def.bilibili.session_file, "var/session.json");
         assert_eq!(def.server.html_dir, "static/html");
         assert_eq!(def.server.state_file, "var/state.json");
+        assert_eq!(def.server.plugin_db_file, "var/plugins.redb");
+        assert!(!def.server.allow_remote_manage);
+        assert_eq!(def.server.admin_token, None);
+        assert!(def.server.allowed_hosts.is_empty());
         assert_eq!(def.log.path, "var/logs");
         assert_eq!(def.record.dir, "var/records");
         assert!(!def.record.record_raw);
@@ -297,6 +316,10 @@ max_combo_wait_secs = 12
 
 [server]
 state_file = "/tmp/custom_state.json"
+plugin_db_file = "/tmp/custom_plugins.redb"
+allow_remote_manage = true
+admin_token = "secret123"
+allowed_hosts = ["dambo.local", "box.ts.net"]
 
 [record]
 enabled = false
@@ -308,6 +331,10 @@ record_raw = true
         assert_eq!(parsed.event.min_passthrough_chars, 6);
         assert_eq!(parsed.event.max_combo_wait_secs, 12);
         assert_eq!(parsed.server.state_file, "/tmp/custom_state.json");
+        assert_eq!(parsed.server.plugin_db_file, "/tmp/custom_plugins.redb");
+        assert!(parsed.server.allow_remote_manage);
+        assert_eq!(parsed.server.admin_token.as_deref(), Some("secret123"));
+        assert_eq!(parsed.server.allowed_hosts, vec!["dambo.local", "box.ts.net"]);
         assert!(!parsed.record.enabled);
         assert!(parsed.record.record_raw);
 

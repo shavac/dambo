@@ -898,7 +898,10 @@ pub fn format_plugins(plugins: &[PluginInfo], host: &str, port: u16) -> Vec<Feed
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(
-                format!(" -> http://{}:{}{}/{}", url_host, port, p.route, size),
+                format!(
+                    " -> http://{}:{}{}{}  [管理: {}]",
+                    url_host, port, p.route, size, p.manage_route
+                ),
                 Style::default().fg(Color::Gray),
             ),
         ])));

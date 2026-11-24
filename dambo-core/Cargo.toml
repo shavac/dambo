@@ -23,6 +23,7 @@ clru = "0.6.3"
 reqwest = { version = "0.13.5", features = ["json", "query", "rustls"] }
 qrcode = { version = "0.15.0", features = ["svg"] }
 notify = "8"
+redb = "2"
 tungstenite = "0.20.1"
 blive-proto = "0.1.0"
 

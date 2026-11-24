@@ -5,6 +5,8 @@ pub mod event_engine;
 pub mod hub;
 pub mod model;
 pub mod plugin;
+pub mod plugin_store;
+pub mod plugin_types;
 pub mod recorder;
 pub mod server;
 pub mod state;
@@ -484,17 +486,17 @@ mod tests {
         fs::create_dir_all(temp_dir.join("static/html/sc-ticker")).unwrap();
         fs::create_dir_all(temp_dir.join("static/html/list")).unwrap();
         fs::write(
-            temp_dir.join("static/html/default/index.html"),
+            temp_dir.join("static/html/default/plugin.html"),
             "<html>d</html>",
         )
         .unwrap();
         fs::write(
-            temp_dir.join("static/html/sc-ticker/index.html"),
+            temp_dir.join("static/html/sc-ticker/plugin.html"),
             "<html>s</html>",
         )
         .unwrap();
         fs::write(
-            temp_dir.join("static/html/list/index.html"),
+            temp_dir.join("static/html/list/plugin.html"),
             "<html>l</html>",
         )
         .unwrap();
@@ -668,7 +670,7 @@ mod tests {
         fs::create_dir_all(temp_dir.join("etc")).unwrap();
         fs::create_dir_all(temp_dir.join("static/html/default")).unwrap();
         fs::write(
-            temp_dir.join("static/html/default/index.html"),
+            temp_dir.join("static/html/default/plugin.html"),
             "<html>d</html>",
         )
         .unwrap();
