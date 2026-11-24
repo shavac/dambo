@@ -3,7 +3,10 @@ mod format;
 mod logger;
 mod tui;
 
-use crate::format::{connect_host, format_room_info_plain, format_user_info_plain};
+use crate::format::{
+    connect_host, display_listen_host, format_room_info_plain, format_user_info_plain,
+    is_wildcard_host,
+};
 use crate::tui::TuiChannels;
 use anyhow::Result;
 use clap::Parser;
@@ -166,11 +169,17 @@ async fn run_headless(
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
     let cfg = runtime.config_snapshot();
-    let c_host = connect_host(&cfg.server.host);
-    let base_http = format!("http://{}:{}", c_host, cfg.server.port);
-    let base_ws = format!("ws://{}:{}", c_host, cfg.server.port);
+    let listen_host = display_listen_host(&cfg.server.host);
+    let url_host = if is_wildcard_host(&cfg.server.host) {
+        connect_host(&cfg.server.host)
+    } else {
+        listen_host.as_str()
+    };
+    let base_http = format!("http://{}:{}", url_host, cfg.server.port);
+    let base_ws = format!("ws://{}:{}", url_host, cfg.server.port);
 
     log::info!("🚀 dambo-cli headless node started:");
+    log::info!("   • Listen Address  : {}:{}", listen_host, cfg.server.port);
     log::info!("   • OBS Overlay     : {}/", base_http);
     log::info!("   • Danmaku Monitor : {}/list", base_http);
     log::info!("   • Channel A       : {}/ws", base_ws);

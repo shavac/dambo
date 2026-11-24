@@ -141,12 +141,31 @@ impl FeedEntry {
     }
 }
 
+/// Returns `true` when `host` is an all-interfaces wildcard bind address.
+pub fn is_wildcard_host(host: &str) -> bool {
+    matches!(host.trim(), "0.0.0.0" | "::" | "[::]")
+}
+
+/// Format the configured server bind host for display without replacing wildcard hosts.
+pub fn display_listen_host(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return "localhost".to_string();
+    }
+    if trimmed.contains(':') && !trimmed.starts_with('[') {
+        format!("[{}]", trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Map wildcard listen hosts (`0.0.0.0`, `::`, etc.) to a locally reachable host string.
 pub fn connect_host(host: &str) -> &str {
     let trimmed = host.trim();
     if trimmed.is_empty()
         || trimmed == "0.0.0.0"
         || trimmed == "::"
+        || trimmed == "[::]"
         || trimmed == "::1"
         || trimmed == "[::1]"
     {
@@ -383,6 +402,7 @@ pub fn format_room_info_lines(
         ));
     }
 
+    let listen_host = display_listen_host(host);
     let c_host = connect_host(host);
     let rec_desc = match (record_enabled, record_raw) {
         (true, true) => "开启 (.jsonl + *_raw.jsonl)",
@@ -423,13 +443,21 @@ pub fn format_room_info_lines(
         "状态",
         vec![Span::styled(status_text, Style::default().fg(status_color))],
     ));
+    let service_text = if is_wildcard_host(host) {
+        format!(
+            "监听 {}:{} | 本机 OBS http://{}:{}/ | 列表 http://{}:{}/list | WS ws://{}:{}/ws",
+            listen_host, port, c_host, port, c_host, port, c_host, port
+        )
+    } else {
+        format!(
+            "OBS http://{}:{}/ | 列表 http://{}:{}/list | WS ws://{}:{}/ws",
+            listen_host, port, listen_host, port, listen_host, port
+        )
+    };
     lines.push(card_row(
         "服务",
         vec![Span::styled(
-            format!(
-                "OBS http://{}:{}/ | 列表 http://{}:{}/list | WS ws://{}:{}/ws",
-                c_host, port, c_host, port, c_host, port
-            ),
+            service_text,
             Style::default().fg(Color::DarkGray),
         )],
     ));
@@ -840,11 +868,23 @@ pub fn format_plugins(plugins: &[PluginInfo], host: &str, port: u16) -> Vec<Feed
     if plugins.is_empty() {
         return vec![FeedEntry::system("插件目录中未发现有效插件")];
     }
-    let c_host = connect_host(host);
-    let mut out = vec![FeedEntry::system(format!(
-        "── 已加载插件 ({}) ──",
-        plugins.len()
-    ))];
+    let listen_host = display_listen_host(host);
+    let url_host = if is_wildcard_host(host) {
+        connect_host(host)
+    } else {
+        listen_host.as_str()
+    };
+    let header = if is_wildcard_host(host) {
+        format!(
+            "── 已加载插件 ({}) · 监听 {}:{} ──",
+            plugins.len(),
+            listen_host,
+            port
+        )
+    } else {
+        format!("── 已加载插件 ({}) ──", plugins.len())
+    };
+    let mut out = vec![FeedEntry::system(header)];
     for p in plugins {
         let tag = if p.is_builtin { "[内置]" } else { "[扩展]" };
         let size = match (p.obs_width, p.obs_height) {
@@ -858,7 +898,7 @@ pub fn format_plugins(plugins: &[PluginInfo], host: &str, port: u16) -> Vec<Feed
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(
-                format!(" -> http://{}:{}{}/{}", c_host, port, p.route, size),
+                format!(" -> http://{}:{}{}/{}", url_host, port, p.route, size),
                 Style::default().fg(Color::Gray),
             ),
         ])));
@@ -997,7 +1037,25 @@ mod tests {
         assert!(room_joined.contains("短号: 512"));
         assert!(room_joined.contains("主播A"));
         assert!(room_joined.contains("虚拟主播 / 虚拟日常"));
+        assert!(room_joined.contains("监听 0.0.0.0:3838"));
         assert!(room_joined.contains("http://localhost:3838/"));
+    }
+
+    #[test]
+    fn test_display_listen_host_and_connect_host() {
+        assert_eq!(display_listen_host("0.0.0.0"), "0.0.0.0");
+        assert_eq!(display_listen_host("::"), "[::]");
+        assert_eq!(display_listen_host("::1"), "[::1]");
+        assert_eq!(display_listen_host(""), "localhost");
+        assert_eq!(display_listen_host("192.168.1.5"), "192.168.1.5");
+
+        assert!(is_wildcard_host("0.0.0.0"));
+        assert!(is_wildcard_host("::"));
+        assert!(!is_wildcard_host("127.0.0.1"));
+
+        assert_eq!(connect_host("0.0.0.0"), "localhost");
+        assert_eq!(connect_host("::"), "localhost");
+        assert_eq!(connect_host("192.168.1.5"), "192.168.1.5");
     }
 
     #[test]

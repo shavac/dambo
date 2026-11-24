@@ -2,7 +2,7 @@ use crate::command::{
     CliCommand, FilterCommand, ParsedInput, complete_command, help_lines, parse_input,
 };
 use crate::format::{
-    DisplayFilter, FeedEntry, FilterMode, connect_host, format_cli_log, format_history,
+    DisplayFilter, FeedEntry, FilterMode, display_listen_host, format_cli_log, format_history,
     format_plugins, format_room_info_lines, format_room_options, format_send_danmaku_error,
     format_snapshot_item, format_user_info_lines,
 };
@@ -862,7 +862,7 @@ impl TuiApp {
 
     fn draw_header(&self, frame: &mut Frame<'_>, area: Rect) {
         let cfg = self.runtime.config_snapshot();
-        let c_host = connect_host(&cfg.server.host);
+        let listen_host = display_listen_host(&cfg.server.host);
         let record_raw = self.runtime.is_record_raw_enabled();
 
         let user_span = if self.auth_state.is_login {
@@ -895,7 +895,7 @@ impl TuiApp {
             rec_span,
             Span::styled("  │  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("http://{}:{}/", c_host, cfg.server.port),
+                format!("监听 {}:{}", listen_host, cfg.server.port),
                 Style::default().fg(Color::Cyan),
             ),
         ]);
