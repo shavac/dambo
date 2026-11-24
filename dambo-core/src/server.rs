@@ -148,8 +148,12 @@ fn safe_join_subpath(plugin_dir: &Path, rel_path: &str) -> Option<PathBuf> {
     }
 }
 
-async fn serve_root(uri: Uri) -> Response {
-    redirect_with_query(StatusCode::FOUND, "/default/", &uri)
+async fn serve_root(State(state): State<Arc<AppState>>) -> Response {
+    if !state.plugins.contains("default") {
+        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+    }
+    let view_path = state.html_dir.join("default").join("plugin.html");
+    serve_file_response(&view_path).await
 }
 
 async fn redirect_plugin_root(
@@ -676,14 +680,16 @@ mod tests {
                 .unwrap();
         });
 
-        // 1. Verify GET / -> 302 /default/ (preserving query)
+        // 1. Verify GET / directly serves default plugin.html (no 302 redirect, preserves URL '/')
         let root_res = http_get_raw(addr, "/?debug=1").await;
-        assert!(root_res.contains("302 Found"));
+        assert!(root_res.contains("200 OK"));
         assert!(
             root_res
                 .to_lowercase()
-                .contains("location: /default/?debug=1")
+                .contains("cache-control: no-store, no-cache, must-revalidate")
         );
+        assert!(!root_res.to_lowercase().contains("location:"));
+        assert!(root_res.contains("OBS Default"));
 
         // 2. Verify GET /{plugin} -> 301 /{plugin}/ preserving Query String
         let list_redir = http_get_raw(addr, "/list?timeout=60&solvable=true").await;

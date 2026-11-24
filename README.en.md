@@ -4,7 +4,7 @@
 
 **dambo** is a lightweight, high-performance Bilibili live-room interaction & overlay toolkit combining **zero-code AI plugin customization**, **transparent OBS overlays & desktop floating widgets**, **desktop chat input**, **lossless session recording**, and **real-time event streams** out of the box.
 
-**Turn chat into custom overlays:** No coding skills needed—send our plugin guide docs to any AI assistant (ChatGPT, Claude, Gemini, DeepSeek, etc.), answer 2 quick rounds of multiple-choice questions, and drop the generated folder into `static/html/`. Dambo hot-reloads it in ~**200ms with no restart** and automatically provides a browser management console.
+**Turn chat into custom overlays:** No coding skills needed—send our plugin guide to any AI assistant (ChatGPT, Claude, Gemini, DeepSeek, etc.) and answer 2 quick rounds of multiple-choice questions to generate your plugin; **or, if you are confident in describing your requirements clearly**, upload the technical specification directly and ask the AI to build strictly to spec in one shot. Drop the folder into `static/html/` and Dambo hot-reloads it in ~**200ms with no restart**, complete with a browser management console.
 
 ### Documentation & Quick Links
 
@@ -25,6 +25,9 @@
   - Once signed in and connected to a room, click the **chat bubble button** on the control capsule to expand a matching full-width danmaku input bar directly underneath and send messages straight into the live chat.
 - **OBS Browser Sources & Always-on-Top Desktop Overlays**
   - Copy any plugin URL into OBS Studio as a transparent Browser Source, or launch it directly as an always-on-top transparent desktop window; plugins hot-reload automatically (~200ms) with no restart needed.
+- **Live Multi-Screen Sync & Cross-Plugin Communication (Zero Backend)**
+  - **Control Once, Sync Everywhere**: Tweak settings, draw raffles, update scores, or make a move in the browser console or desktop widget, and every active OBS Browser Source and floating window updates in real time without a refresh.
+  - **Plugins That Team Up**: Out-of-the-box live config sync (`Dambo.config`), persistent KV (`Dambo.storage`), fast in-memory state (`Dambo.memory`), pub/sub event topics (`Dambo.topics`), and centralized ACL permissions (`Dambo.acl`) over a unified host SSE bus—**build interactive mini-games, shared leaderboards, or complex mod panels with zero custom backend code**.
 - **Ready-to-Use Built-in Plugins**
   - Includes a transparent OBS danmaku overlay (with 4-second gift combo merging and auto-follow bottom scroll), an interactive moderator monitor feed, a SuperChat/Guard countdown ticker, and a live **24-Point Poker** danmaku game.
 - **Lossless JSONL Recording & Dual WebSocket Streams**
@@ -109,12 +112,14 @@ Dambo includes four ready-to-use web plugins out of the box:
 
 ## Build Plugins from Scratch with Any AI Assistant
 
-No coding required—turn an idea into a working plugin in two simple steps with any AI assistant (ChatGPT / Claude / Gemini / DeepSeek, etc.):
+No coding required—turn an idea into a working plugin in two simple steps with any AI assistant (ChatGPT / Claude / Gemini / DeepSeek, etc.), from a simple gift goal bar to interactive mini-games with live controller-to-OBS sync and cross-plugin state sharing (no custom backend server needed):
 
 1. **Refine Your Idea**: Download [`docs/PLUGIN_GUIDE.en.md`](docs/PLUGIN_GUIDE.en.md) ([中文](docs/PLUGIN_GUIDE.md)) from this repo, upload it to your AI, and describe your idea in one sentence (e.g., *"I want a gift battery goal progress bar"*).
 2. **Generate the Plugin**: Answer the AI's 2 rounds of multiple-choice questions to lock down the details, then upload [`docs/PLUGIN_SPEC.en.md`](docs/PLUGIN_SPEC.en.md) ([中文](docs/PLUGIN_SPEC.md)) when prompted and reply **`Start generating`**. Drop the generated folder into `static/html/` and it is ready to use.
 
-> Click **Plugins -> Open Plugins Folder** in Dambo (`static/html/`) and drop in the generated folder (`plugin.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus optional `manage.html` / `manage.css` / `manage.js` and static assets). Dambo hot-reloads it in ~200ms with no restart required. For manual plugin development, see the technical specification **[`docs/PLUGIN_SPEC.en.md`](docs/PLUGIN_SPEC.en.md)** ([中文](docs/PLUGIN_SPEC.md)).
+**Direct Fast-Track (For Clear Specifications)**: If you are confident in your ability to articulate your requirements clearly in one go, you can skip Step 1 altogether—upload [`docs/PLUGIN_SPEC.en.md`](docs/PLUGIN_SPEC.en.md) ([中文](docs/PLUGIN_SPEC.md)) directly to your AI along with your requirements, and instruct it: **"Build this strictly following the uploaded `PLUGIN_SPEC`."**
+
+> Click **Plugins -> Open Plugins Folder** in Dambo (`static/html/`) and drop in the generated folder (`plugin.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus optional `manage.html` / `manage.css` / `manage.js` and static assets). Dambo hot-reloads it in ~200ms with no restart required. For manual plugin development, refer to [`docs/PLUGIN_SPEC.en.md`](docs/PLUGIN_SPEC.en.md) above.
 
 ---
 

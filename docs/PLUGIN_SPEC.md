@@ -14,10 +14,10 @@
      ```
      **严禁**添加 `defer`、`async` 或 `type="module"`。
    - **所有能力统一走 `window.Dambo`**：弹幕事件流使用 `Dambo.connect()`，配置/存储/事件总线/权限使用 `Dambo.config`、`Dambo.storage`、`Dambo.memory`、`Dambo.topics`、`Dambo.acl`；**严禁**绕过 SDK 直连 `/ws`、`/ws/event` 或手拼 `fetch('/api/v1/...')`。
-3. **零硬编码主机名与端口**：
-   - **严禁**写死 `localhost`、`127.0.0.1` 或端口号（如 `3838`）。
-   - HTML `<head>` 中加入 `<base href="/{plugin-name}/">`，本地静态资源统一使用相对路径（`./plugin.css`、`./plugin.js`、`./assets/...`）；SDK 统一使用 `/sdk/dambo.js`。
-   - 调用 `Dambo.connect()` 时省略 `url`（或传 `Dambo.utils.getQueryParam('ws') || undefined`），由 SDK 根据 `window.location` 自动推导。
+3. **本地资源必须用 `./` 相对路径 & 零硬编码主机端口**：
+   - **除 SDK 外严禁以 `/` 开头引用本地文件**：插件自身的 `.css`、`.js`、`assets/`（包括 HTML `<link>` / `<script>` 与 JS 里的图片/音效路径）**必须**使用 `./` 开头的相对路径（`./plugin.css`、`./plugin.js`、`./manage.css`、`./manage.js`、`./assets/...`），配合 `<head>` 中的 `<base href="/{plugin-name}/">` 解析。
+   - **严禁**写成 `/plugin.css`、`/plugin.js`、`/manage.js`、`/{plugin-name}/plugin.js` 或 `/static/html/{plugin-name}/...`（绝对路径会绕过 `<base href>`，直接请求根路径导致 `404` 加载失败）；**唯一允许以 `/` 开头加载的脚本只有 `<script src="/sdk/dambo.js"></script>`**。
+   - **严禁**在任何 `.html` / `.js` / `.css` 中写死 `localhost`、`127.0.0.1` 或端口号（如 `3838`）；调用 `Dambo.connect()` 时省略 `url`（或传 `Dambo.utils.getQueryParam('ws') || undefined`），由 SDK 根据 `window.location` 自动推导。
 4. **Referer 策略严格隔离（极易踩坑）**：
    - `plugin.html`（展示端）`<head>` **必须**包含 `<meta name="referrer" content="no-referrer">`，否则 B 站头像（`face`）与表情图片（`emoticon`/`emots`）会被 CDN 拦截返回 `403`。
    - 自定义 `manage.html`（管理端）**严禁**包含 `no-referrer`，因为管理态鉴权依赖同源 `Referer: /{plugin-name}/m`。
@@ -332,7 +332,7 @@ await Dambo.plugin.unlockManage(token)
 生成完整文件后，AI 应自行核对以下 5 项再输出给用户：
 1. 确认所有文件完整输出，目录名 `<plugin-name>` 仅含 `[A-Za-z0-9_-]` 且不为 `ws`、`api`、`sdk`。
 2. 确认 `plugin.html` 含 `<meta name="referrer" content="no-referrer">` 与 `<base href="/<plugin-name>/">`，且自定义 `manage.html`（如有）**不含** `no-referrer`。
-3. 确认全部 `.html` / `.js` 中**零 `.innerHTML`**、**零硬编码主机端口**、**`<script src="/sdk/dambo.js"></script>` 同步加载且在插件脚本之前**。
+3. 确认全部 `.html` / `.js` 中**零 `.innerHTML`**、**零硬编码主机端口**、**`<script src="/sdk/dambo.js"></script>` 同步加载且在插件脚本之前**，且除 `/sdk/dambo.js` 外，所有插件本地 `.css`/`.js`/静态资源均为 `./...` 相对路径（不存在 `/plugin.js`、`/manage.js`、`/static/html/...` 等绝对路径）。
 4. 确认 `plugin.json` JSON 语法合法，未包含 `permissions` 字段，且展示端保持透明无遮挡、避开右上角 `100×44px`。
 5. 在回答最后附上清晰的 3 步使用指引：
    - 在 Dambo 控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`），新建 `<plugin-name>` 文件夹并将生成的全部文件放入其中；

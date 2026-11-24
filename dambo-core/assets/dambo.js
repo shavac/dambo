@@ -1725,7 +1725,29 @@
             }
         }
         if (segments.length === 0) {
-            return { pluginName: '', mode: 'view' };
+            let rootPlugin = 'default';
+            if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
+                const baseEl = document.querySelector('base[href]');
+                const baseHref = baseEl ? baseEl.getAttribute('href') || '' : '';
+                const baseParts = baseHref.split('/').filter(Boolean);
+                if (baseParts.length > 0) {
+                    let candidate = baseParts[0];
+                    try {
+                        candidate = decodeURIComponent(candidate);
+                    } catch (_) {
+                        // keep raw segment
+                    }
+                    const lowerCandidate = candidate.toLowerCase();
+                    if (
+                        lowerCandidate !== 'sdk' &&
+                        lowerCandidate !== 'api' &&
+                        lowerCandidate !== 'ws'
+                    ) {
+                        rootPlugin = candidate;
+                    }
+                }
+            }
+            return { pluginName: rootPlugin, mode: 'view' };
         }
         let first = segments[0];
         try {

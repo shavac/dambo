@@ -4,7 +4,7 @@
 
 **dambo（弹宝）** 是一款高性能、低资源占用的 B 站直播间交互与挂件工具，集 **AI 零基础定制插件**、**OBS 透明挂件 / 桌面置顶悬浮窗**、**弹幕采集与桌面快捷发弹幕**、**无损互动录制**与 **实时事件流**于一体，开箱即用。
 
-**对话即可定制挂件：** 无需编程基础，只需将插件引导文档发给任意 AI（ChatGPT / Claude / Gemini / DeepSeek 等），回答 2 轮大白话选择题即可生成专属 OBS 挂件与桌面互动工具；放入 `static/html/` 后约 **200ms 自动热重载**，并自带可视化管理页实时调参。
+**对话即可定制挂件：** 无需编程基础，将插件引导文档发给任意 AI（ChatGPT / Claude / Gemini / DeepSeek 等），回答 2 轮大白话选择题即可生成专属 OBS 挂件与桌面互动工具；**如果你对自己的表达能力有信心**，也可直接上传技术规范让 AI 严格照规范一步生成。放入 `static/html/` 后约 **200ms 自动热重载**，并自带可视化管理页实时调参。
 
 ### 文档与资源索引
 
@@ -25,6 +25,9 @@
   - 登录 B 站并进入直播间后，点击控制舱上的**弹幕输入按钮**即可在下方展开与控制栏等宽的输入框，随时直接向当前直播间发送弹幕。
 - **OBS 透明挂件 & 桌面置顶悬浮窗**
   - 一键复制地址添加到 OBS Studio「浏览器」源，或直接在桌面以无边框透明置顶浮窗打开，边打游戏边看弹幕或玩互动挂件；插件目录变更后自动热重载，无需重启。
+- **多端实时联动 & 跨插件通信（免自建后端）**
+  - **控制端操作，全端秒级同步**：主播在管理页或桌面端改配置、抽签、计分、棋盘落子，所有打开的 OBS 浏览器源与桌面悬浮窗即时同步变化，无需刷新页面。
+  - **插件之间还能“组队配合”**：宿主通过统一 SSE 通道直接提供强类型配置热更（`Dambo.config`）、持久化 KV（`Dambo.storage`）、内存高速状态（`Dambo.memory`）、一对多事件广播（`Dambo.topics`）与跨插件权限审批（`Dambo.acl`）；**做互动小游戏、联动积分榜或复杂场控面板，不必再单独写后端或搭 WebSocket 服务**。
 - **开箱即用内置插件**
   - 自带透明弹幕流（带礼物 4 秒连击归并与置底跟随）、场控监看列表、SC/大航海倒计时卡片与 **扑克 24 点弹幕抢答游戏**。
 - **全量无损事件录制 & 实时数据流**
@@ -109,12 +112,14 @@ Dambo 默认自带 4 款即开即用的网页插件：
 
 ## 使用 AI 助手零基础制作插件
 
-无需编写代码，只需两步即可让任意 AI（ChatGPT / Claude / Gemini / DeepSeek 等）为你生成可用插件：
+无需编写代码，只需两步即可让任意 AI（ChatGPT / Claude / Gemini / DeepSeek 等）为你生成可用插件——从简单的礼物进度条，到“管理页遥控、OBS 与桌面端实时联动”甚至跨插件共享数据的互动小游戏都能直接搞定（无需自写后端服务）：
 
 1. **梳理想法**：下载本仓库的 [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md)（[English](docs/PLUGIN_GUIDE.en.md)）上传给 AI，并用一句话描述你的初步想法（例如：*“我想做一个礼物电池目标进度条”*）。
 2. **生成代码**：回答 AI 的 2 轮选择题确认细节后，按 AI 提示上传 [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md)（[English](docs/PLUGIN_SPEC.en.md)）并回复 **`开始生成`**，将生成的文件夹放入 `static/html/` 即可使用。
 
-> 在控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`）放入插件文件夹（标准结构为 `plugin.html`、`plugin.json`、`plugin.css`、`plugin.js`，可选 `manage.html` / `manage.css` / `manage.js` 及同级静态资源），保存后约 200ms 自动识别上线，**无需重启 Dambo** 即可直接在桌面打开、访问管理页或复制到 OBS 使用。如需手动编写，可查阅技术规范 [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md)（[English](docs/PLUGIN_SPEC.en.md)）。
+**一步直达（适合表达清晰的进阶用法）**：如果你对自己的表达能力有信心，能够一次性把功能、样式和交互要求说清楚，也可以跳过第 1 步访谈，直接把 [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md)（[English](docs/PLUGIN_SPEC.en.md)）上传给 AI，附上你的完整需求并明确要求：**“请严格依照上传的 `PLUGIN_SPEC` 规范实现我的需求”**。
+
+> 在控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`）放入插件文件夹（标准结构为 `plugin.html`、`plugin.json`、`plugin.css`、`plugin.js`，可选 `manage.html` / `manage.css` / `manage.js` 及同级静态资源），保存后约 200ms 自动识别上线，**无需重启 Dambo** 即可直接在桌面打开、访问管理页或复制到 OBS 使用。如需手动编写，也可直接查阅上述 [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md) 技术规范。
 
 ---
 

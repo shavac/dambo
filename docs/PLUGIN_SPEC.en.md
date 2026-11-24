@@ -14,10 +14,10 @@
      ```
      **Never** add `defer`, `async`, or `type="module"`.
    - **All capabilities go through `window.Dambo`**: use `Dambo.connect()` for live streams, and `Dambo.config`, `Dambo.storage`, `Dambo.memory`, `Dambo.topics`, `Dambo.acl` for state/config/topics/permissions. **Never** bypass the SDK with raw `new WebSocket('/ws')` or manual `fetch('/api/v1/...')`.
-3. **Zero Hardcoded Hostnames or Ports**:
-   - **Never** hardcode `localhost`, `127.0.0.1`, or port numbers (such as `3838`).
-   - Put `<base href="/{plugin-name}/">` inside HTML `<head>`, load local static assets via relative paths (`./plugin.css`, `./plugin.js`, `./assets/...`), and load the SDK via `/sdk/dambo.js`.
-   - Omit `url` when calling `Dambo.connect()` (or pass `Dambo.utils.getQueryParam('ws') || undefined`) so the SDK derives the endpoint from `window.location`.
+3. **Relative `./` Paths for Local Assets & Zero Hardcoded Hosts/Ports**:
+   - **Never use leading `/` paths for plugin-local files**: every plugin `.css`, `.js`, and `assets/` reference (both in HTML `<link>` / `<script>` tags and inside JS for images/audio) **must** use a `./`-prefixed relative path (`./plugin.css`, `./plugin.js`, `./manage.css`, `./manage.js`, `./assets/...`), resolved against `<base href="/{plugin-name}/">` in `<head>`.
+   - **Never** write `/plugin.css`, `/plugin.js`, `/manage.js`, `/{plugin-name}/plugin.js`, or `/static/html/{plugin-name}/...` (leading-slash absolute paths bypass `<base href>` and hit `404` at server root); **the ONLY allowed leading-`/` asset path is `<script src="/sdk/dambo.js"></script>`**.
+   - **Never** hardcode `localhost`, `127.0.0.1`, or port numbers (such as `3838`) anywhere; omit `url` when calling `Dambo.connect()` (or pass `Dambo.utils.getQueryParam('ws') || undefined`) so the SDK derives the endpoint from `window.location`.
 4. **Strict Referrer Policy Isolation (Common Pitfall)**:
    - `plugin.html` (view page) `<head>` **must** include `<meta name="referrer" content="no-referrer">`; otherwise Bilibili avatars (`face`) and emotes (`emoticon`/`emots`) are blocked by CDN with `403`.
    - Custom `manage.html` (management page) **must NOT** include `no-referrer`, because management authentication relies on same-origin `Referer: /{plugin-name}/m`.
@@ -332,7 +332,7 @@ Standard view script (`plugin.js`):
 Verify all 5 points before outputting the code:
 1. All files are complete; `<plugin-name>` contains only `[A-Za-z0-9_-]` and is not `ws`, `api`, or `sdk`.
 2. `plugin.html` includes `<meta name="referrer" content="no-referrer">` and `<base href="/<plugin-name>/">`; custom `manage.html` (if any) omits `no-referrer`.
-3. **Zero `.innerHTML`**, **zero hardcoded hosts/ports**, and `<script src="/sdk/dambo.js"></script>` is loaded **synchronously before** plugin scripts across every `.html` / `.js` file.
+3. **Zero `.innerHTML`**, **zero hardcoded hosts/ports**, `<script src="/sdk/dambo.js"></script>` is loaded **synchronously before** plugin scripts, and every local `.css`/`.js`/asset reference (everything except `/sdk/dambo.js`) uses a `./...` relative path (no `/plugin.js`, `/manage.js`, or `/static/html/...` absolute paths).
 4. `plugin.json` is valid JSON with no `permissions` field, and the view page stays transparent and clear of the top-right `100×44px` region.
 5. End with a clear 3-step install guide:
    - In Dambo's capsule, click **Plugins -> Open Plugins Folder** (`static/html/`), create `<plugin-name>/`, and drop all generated files inside;

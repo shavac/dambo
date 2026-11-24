@@ -97,7 +97,7 @@
 
 | 路由 | 匹配优先级 | 行为 |
 |---|---|---|
-| `GET /` | 系统 | `302` 重定向至 `/default/` |
+| `GET /` | 系统 / 默认挂件 | 直接返回 `default` 挂件展示页（映射 `static/html/default/plugin.html`，不做 `302` 跳转） |
 | `GET /sdk/dambo.js` | 系统保留 | 返回内置官方 SDK 脚本 |
 | `GET /ws` | 系统保留 | 既有 Channel A 弹幕 WebSocket |
 | `GET /ws/event` | 系统保留 | 既有 Channel B 聚合事件 WebSocket |
