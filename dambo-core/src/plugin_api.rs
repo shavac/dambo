@@ -1802,7 +1802,16 @@ mod tests {
 
             let listener = TcpListener::bind(bind_addr).await.unwrap();
             let addr = listener.local_addr().unwrap();
-            let base_url = format!("http://{}", addr);
+            let connect_addr = match addr {
+                SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+                    SocketAddr::from(([127, 0, 0, 1], v4.port()))
+                }
+                SocketAddr::V6(v6) if v6.ip().is_unspecified() => {
+                    SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, v6.port()))
+                }
+                other => other,
+            };
+            let base_url = format!("http://{}", connect_addr);
             let make_svc =
                 build_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
             let srv_cancel = cancel.clone();
@@ -3077,7 +3086,7 @@ mod tests {
                 cfg.server.admin_token = Some("s3cr3t".to_string());
                 cfg.server.allowed_hosts = vec!["dambo.local".to_string()];
             },
-            "0.0.0.0:0",
+            "127.0.0.1:0",
         )
         .await;
 
