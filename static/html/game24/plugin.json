@@ -1,8 +1,52 @@
 {
-  "title": "扑克24点弹幕互动",
-  "description": "A-K扑克牌24点直播互动游戏：弹幕发送算式抢答，自动校验与计分，无解/超时自动切题 (query: ?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5)",
+  "plugin_id": "game24",
+  "version": "1.0.0",
+  "name": "扑克24点弹幕互动",
+  "description": "A-K扑克牌24点直播互动游戏：弹幕发送算式抢答，自动校验与计分，无解/超时自动切题 (支持管理页配置或 query 参数: ?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5)",
   "obs": {
     "width": 560,
     "height": 420
+  },
+  "defaults": {
+    "timeout": {
+      "type": "number",
+      "value": 300,
+      "meta": {
+        "min": 0,
+        "max": 3600,
+        "step": 10,
+        "format": "integer",
+        "label": "单局超时（秒）",
+        "description": "0 表示不限时"
+      }
+    },
+    "solvable_only": {
+      "type": "bool",
+      "value": false,
+      "meta": {
+        "label": "仅生成有解牌局",
+        "description": "开启后自动跳过无解 24 点手牌"
+      }
+    },
+    "settle_time": {
+      "type": "number",
+      "value": 3.5,
+      "meta": {
+        "min": 1,
+        "max": 30,
+        "step": 0.5,
+        "label": "结算展示时长（秒）"
+      }
+    },
+    "skip_time": {
+      "type": "number",
+      "value": 2.5,
+      "meta": {
+        "min": 1,
+        "max": 30,
+        "step": 0.5,
+        "label": "无解自动切题间隔（秒）"
+      }
+    }
   }
 }

@@ -7,18 +7,18 @@
 
 ## 1. Hard Invariants & Architectural Boundaries
 
-1. **Clickless Broadcast Overlay & URL-Driven Configuration**: Plugins are passive graphics overlays rendered inside OBS Browser Source during live streams where mouse clicks and `:hover` states are unreachable:
-   - **Zero-Click Auto-Start**: Plugins **MUST** initialize, connect, and render automatically on load. **NEVER** render settings buttons, clickable drawers, dismissible modals, `:hover`-gated controls, or blocking `alert()` dialogs.
-   - **URL Query Configuration**: Expose all user-configurable options (e.g., `theme`, `font_size`, `max_items`, `show_like`) via URL query parameters using `Dambo.utils.getQueryParam()` / `Dambo.utils.getQueryBool()`, and document supported parameters in `plugin.json`'s `description`.
+1. **Clickless Broadcast Overlay & Management Separation (`plugin.html` vs. `manage.html`)**: Plugins are split between a passive OBS overlay (`plugin.html`) and an optional custom management console (`manage.html`, with a built-in host fallback UI when omitted):
+   - **Zero-Click Auto-Start on `plugin.html`**: The display view **MUST** initialize, connect, and render automatically on load. **NEVER** render settings buttons, clickable drawers, dismissible modals, `:hover`-gated controls, or blocking `alert()` dialogs inside `plugin.html`.
+   - **Typed Configuration & URL Query Overrides**: Prefer typed `defaults` in `plugin.json` read via `Dambo.config.get()` / `Dambo.config.watch()` (alongside optional URL query parameter overrides via `Dambo.utils.getQueryParam()` / `Dambo.utils.getQueryBool()`).
    - **Unattended Self-Healing**: Keep `autoReconnect: true` enabled and silently recover from transient network drops or broken media without leaving stuck error overlays on stream.
-2. **Pure Browser, No-Build Runtime & Synchronous SDK**: Every plugin under `static/html/<plugin-id>/` runs directly in browsers/OBS with **no build step**. Rely exclusively on standard browser Web APIs and `/sdk/dambo.js`—**NEVER** use Node.js APIs, CommonJS `require()`, bare `npm` module imports, or non-standard host/desktop bridge globals. Load `/sdk/dambo.js` via a plain synchronous `<script src="/sdk/dambo.js"></script>` tag **before** your plugin script (never add `defer`, `async`, or `type="module"`).
+2. **Pure Browser, No-Build Runtime & Two-Layer SDK Discipline**: Every plugin under `static/html/<plugin-name>/` runs directly in browsers/OBS with **no build step**. Rely exclusively on standard browser Web APIs and `/sdk/dambo.js`—**NEVER** use Node.js APIs, CommonJS `require()`, bare `npm` module imports, or non-standard host/desktop bridge globals. Load `/sdk/dambo.js` via a plain synchronous `<script src="/sdk/dambo.js"></script>` tag **before** your plugin script (never add `defer`, `async`, or `type="module"`). **ALWAYS** consume `/sdk/dambo.js` (`Dambo.connect()` for danmaku/event streams and `Dambo.config` / `Dambo.storage` / `Dambo.memory` / `Dambo.topics` / `Dambo.acl` for platform capabilities)—never connect directly to raw `/ws`, `/ws/event`, or hand-craft `/api/v1/*` requests.
 3. **Zero Hardcoded Hosts or Ports**: **NEVER** hardcode hostnames, IP addresses, or port numbers in plugin HTML, CSS, or JS:
-   - Reference the SDK via `/sdk/dambo.js`, add `<base href="/{plugin-id}/">` inside `<head>`, and reference plugin assets via relative paths (`./plugin.css`, `./plugin.js`, and optional static files under `./assets/`, such as images, fonts, or audio), ensuring both `GET /{plugin}` (no trailing slash) and `GET /{plugin}/` (with trailing slash) resolve assets identically.
+   - Reference the SDK via `/sdk/dambo.js`, add `<base href="/{plugin-name}/">` inside `<head>`, and reference plugin assets via relative paths (`./plugin.css`, `./plugin.js`, and optional static files under `./assets/`, such as images, fonts, or audio).
    - When calling `Dambo.connect()`, omit `url` so the SDK automatically derives the WebSocket endpoint from `window.location` (or allow optional query override via `url: Dambo.utils.getQueryParam('ws') || undefined`).
    - All server bind address and port settings live in the host configuration file (`etc/config.toml` under `[server]` `host` and `port`).
-4. **Required `<meta name="referrer" content="no-referrer">`**: Bilibili avatar (`face`) and emote (`emoticon`, `emots`) CDNs reject requests carrying a `Referer` header. Every `index.html` **MUST** include `<meta name="referrer" content="no-referrer">` inside `<head>`.
-5. **XSS Prohibition & DOM Performance**: **NEVER** assign user-controlled fields (`uname`, `content`, `room_uname`, `room_title`, `medal_name`) to `.innerHTML`. Always use `.textContent`, `document.createTextNode`, or `Dambo.utils.renderContent(el, item, opts)`. Prefer `.textContent` over `.innerText` to avoid layout reflows in high-frequency streams.
-6. **Transparent Background Default**: For OBS and desktop floating overlays, keep `html, body { background: transparent !important; overflow: hidden; }`.
+4. **Referrer Policy (`plugin.html` vs. `manage.html`)**: Bilibili avatar (`face`) and emote (`emoticon`, `emots`) CDNs reject requests carrying a `Referer` header, so every `plugin.html` **MUST** include `<meta name="referrer" content="no-referrer">` inside `<head>`. Conversely, custom `manage.html` pages **MUST NOT** set `no-referrer` because ACL management requests require same-origin `Referer: /{plugin-name}/m`.
+5. **XSS Prohibition & DOM Performance**: **NEVER** assign user-controlled fields (`uname`, `content`, `room_uname`, `room_title`, `medal_name`) or untrusted cross-plugin data/ACL fields (`reason`, `note`, `key`, `value`) to `.innerHTML`. Always use `.textContent`, `document.createTextNode`, or `Dambo.utils.renderContent(el, item, opts)`. Prefer `.textContent` over `.innerText` to avoid layout reflows in high-frequency streams.
+6. **Transparent Background Default**: For OBS and desktop floating overlays in `plugin.html`, keep `html, body { background: transparent !important; overflow: hidden; }`.
 7. **Desktop Preview Control Bar Safe Area**: When previewed in desktop overlay mode (`plugin-overlay-*`), the host renders a floating control bar (`#dambo-overlay-host`, `z-index: 2147483647`) at `top: 8px; right: 8px` (`100px × 44px`). Keep the **top-right `100px × 44px`** corner free of critical text or badges so desktop preview windows do not clip content.
 
 ---
@@ -30,32 +30,46 @@ Dambo dynamically scans `static/html/` (configurable via `[server].html_dir` in 
 ### 2.1 Directory Layout
 
 ```text
-static/html/<plugin-id>/
-├── index.html      # [REQUIRED] Must be a regular file; triggers auto-discovery
-├── plugin.json     # [RECOMMENDED] Metadata, query param docs & OBS overlay dimensions
-├── plugin.css      # [OPTIONAL] Plugin styles
-├── plugin.js       # [OPTIONAL] Plugin logic using /sdk/dambo.js
+static/html/<plugin-name>/
+├── plugin.html     # [REQUIRED] Display entry (OBS / overlay); triggers auto-discovery (index.html is NOT supported)
+├── plugin.json     # [RECOMMENDED] plugin_id, version, name, description, obs size, and typed defaults
+├── plugin.css      # [OPTIONAL] Display styles
+├── plugin.js       # [OPTIONAL] Display logic using /sdk/dambo.js
+├── manage.html     # [OPTIONAL] Custom management UI (host serves built-in fallback page when omitted)
+├── manage.css      # [OPTIONAL] Management styles
+├── manage.js       # [OPTIONAL] Management logic using /sdk/dambo.js
 └── assets/         # [OPTIONAL] Static assets (images, fonts, audio, etc.) referenced via ./assets/<file>
 ```
 
 ### 2.2 Discovery, Routing & Manifest Rules
 
-- **Valid `<plugin-id>`**: Must match `^[A-Za-z0-9_-]+$` and must **NOT** collide (case-insensitive) with reserved top-level routes: `ws`, `api`, `sdk`, `static`, `assets`, `health`.
-- **`plugin.json` Schema**:
+- **Valid `<plugin-name>` & Reserved Words**: Directory names must match `^[A-Za-z0-9_-]{1,64}$` and must **NOT** collide (case-insensitive) with the 3 reserved top-level routes: `ws`, `api`, `sdk` (`health` lives at `/api/v1/health`).
+- **`plugin.json` Schema** (strictly read-only at runtime; do **NOT** include `permissions`):
   ```json
   {
-    "title": "Human-Friendly Name",
-    "description": "Short summary and supported URL query params (e.g. ?max_items=40&show_like=false)",
+    "plugin_id": "my-widget",
+    "version": "1.0.0",
+    "name": "Human-Friendly Name",
+    "description": "Short summary and supported config/query options",
     "obs": {
       "width": 420,
       "height": 720
+    },
+    "defaults": {
+      "max_items": {
+        "type": "number",
+        "value": 40,
+        "meta": { "min": 5, "max": 200, "format": "integer", "label": "Max Items" }
+      }
     }
   }
   ```
+  - `plugin_id` defaults to directory `<plugin-name>`; `version` defaults to `"0"`. Together `(plugin_id, major_version)` form the ownership `namedomain` (`{plugin_id}@{major}`).
+  - `name` falls back to legacy `title`, then `<plugin-name>`.
   - `obs.width` and `obs.height` take effect only if `> 0`; otherwise the desktop overlay defaults to `420 × 720`.
-  - Missing or malformed `plugin.json` never blocks plugin loading—the host logs a warning and falls back to the directory name and default dimensions.
+  - Missing or malformed `plugin.json` never blocks plugin loading—the host logs a warning and falls back to directory defaults.
 - **HTTP Server Behavior**:
-  - Routes served: `GET /{plugin}`, `GET /{plugin}/`, `GET /{plugin}/{*path}`, `GET /sdk/dambo.js`, `GET /ws`, `GET /ws/event`.
+  - Routes served: `GET /` (`302 /default/`), `GET /{plugin}` (`301 /{plugin}/` preserving query), `GET /{plugin}/` (`plugin.html`), `GET /{plugin}/m` (`manage.html` or built-in fallback with `X-Frame-Options: DENY`, `CSP: frame-ancestors 'none'`, loopback `dambo_admin` session cookie on document navigation), `GET /{plugin}/m/` (`301 /{plugin}/m` preserving query), `GET /{plugin}/{*path}`, `GET /sdk/dambo.js`, `GET /ws`, `GET /ws/event`, `GET /api/v1/health`, `/api/v1/*`.
   - All HTTP responses include `Cache-Control: no-store, no-cache, must-revalidate` and `Pragma: no-cache`.
   - Path traversal (`..`, `\`, `\0`) returns `404 Asset not found`.
 
@@ -289,37 +303,24 @@ static/html/<plugin-id>/
 ```javascript
 // Attached to window.Dambo (loaded synchronously via <script src="/sdk/dambo.js"></script>)
 {
-    VERSION: '1.1.0',
-    DamboClient: class DamboClient {
-        /** @param {ConnectOptions} [options] */
-        constructor(options);
-        /** @param {string} eventName @param {Function} handler @returns {() => void} */
-        on(eventName, handler);
-        /** @param {string} eventName @param {Function} handler @returns {() => void} */
-        once(eventName, handler);
-        /** @param {string} eventName @param {Function} [handler] @returns {void} */
-        off(eventName, handler);
-        /** @returns {void} */
-        disconnect();
-        /** @returns {void} */
-        close();
-        /** @returns {void} */
-        reconnect();
-        /** @returns {ConnectionState} */
-        getState();
-        /** @returns {RoomStateSnapshot | null} */
-        getRoomState();
-        /** @returns {SnapshotData | null} */
-        getSnapshot();
-        /** @returns {RoomInfoEvent | null} */
-        getRoomInfo();
-        /** @returns {string} */
-        getUrl();
-    },
-    /** @param {ConnectOptions} [options] @returns {DamboClient} */
+    VERSION: '2.0.0',
+    DamboClient: class DamboClient { /* ... */ },
+    DamboError: class DamboError extends Error { code; status; details; },
     connect(options),
+    plugin: {
+        name,                 // directory plugin_name parsed from location.pathname
+        mode,                 // 'view' | 'manage'
+        meta(opts),           // GET /api/v1/plugins/@self (single-flight cached)
+        unlockManage(token),  // POST /api/v1/auth/manage for remote admin_token unlock
+    },
+    plugins: { list(), get(target) },
+    config: { get(key?), set(keyOrMap, val?), reset(key?), schema(), watch(cb, opts?) },
+    storage: { namespaces(), get(ns, key), getEntry(ns, key), set(ns, key, val, schema?), delete(ns, key), list(ns, opts?), mset(ns, map), clearNamespace(ns), watch(ns, cb, opts?), of(target) },
+    memory: { namespaces(), get(ns, key), getEntry(ns, key), set(ns, key, val, schema?), delete(ns, key), list(ns, opts?), mset(ns, map), clearNamespace(ns), watch(ns, cb, opts?), of(target) },
+    topics: { publish(name, payload, opts?), configure(name, opts), remove(name), list(target?), subscribe(target, name, cb) },
+    acl: { check(target, resource), request(target, opts), list(), set(requester, opts), remove(requester, resource), onChange(cb) },
     utils: {
-        DEFAULT_AVATAR_SVG: 'data:image/svg+xml;utf8,<svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="24" height="24" viewBox="0 0 24 24" fill="%2364748b"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>',
+        DEFAULT_AVATAR_SVG: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="%2364748b"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>',
         /** @param {string | null | undefined} url @returns {string} Upgrades http:// or // URLs to https:// */
         normalizeUrl(url),
         /** @param {string | SnapshotItem | EventItem | null | undefined} itemOrKind @returns {boolean} True for 'superchat' or 'super_chat' */
@@ -373,6 +374,41 @@ static/html/<plugin-id>/
 - **Channel B (`channel: 'event'`)**: `'room_info' (RoomInfoEvent)`, `'batch' (EventBatchData)`, `'batch_item' (EventItem, EventBatchData)`, `'event' (EventItem, EventMeta)`, `<kind>` (exact `item.kind`; `'super_chat'` emits both `'super_chat'` and `'superchat'`).
 - **Errors & Reconnect**: JSON parse failures emit `'error'` without crashing. Listener exceptions are isolated per handler. Socket errors or `connectTimeoutMs` watchdog timeouts close the socket and trigger exponential backoff with `±15%` jitter: `clamp(baseDelay ± 15%, 200, maxReconnectDelayMs)`. Browser `'online'` events resume reconnecting sockets immediately, and `'pagehide'` cleanly closes the socket.
 
+### 3.5 Platform SDK (`v2.0`: Config, Persist/Memory KV, Topics & ACL)
+
+All platform capabilities run through `/sdk/dambo.js` without creating any extra WebSocket connection (watchers/subscribers share one lazy `EventSource` at `/api/v1/events`, which closes automatically when all listeners invoke `off()`):
+
+- **6 Typed Value Kinds & `meta.format`**:
+  - `number` (`meta.min`/`max`/`step`, `meta.format: "integer" | "slider"`), `string` (`meta.max_length`/`placeholder`, `meta.format: "color" | "textarea" | "url"`), `bool`, `enum` (requires `meta.options`), `list` (`meta.item`, `meta.max_items`), `struct` (`meta.fields` with `optional`/`nullable`, or free JSON object).
+  - Top-level `null` is rejected (`INVALID_DATA_TYPE`); use `delete(ns, key)` to remove keys. Nested free structs or `optional`/`nullable` fields permit JSON `null`.
+  - Schema changes are owned by the owning `namedomain`; `persist/config` schemas declared in `plugin.json` `defaults` are locked (`403 SCHEMA_LOCKED`) and `persist:config` cannot be written by other plugins.
+- **Topics & Unified ACL**:
+  - `Dambo.topics.publish(name, payload, { public, description })` persists topic metadata (`public` defaults `false`) and fans out `topic.message` to SSE subscribers (`public: true` bypasses ACL).
+  - Private data (`Dambo.storage.of(target)` / `Dambo.memory.of(target)`) and private topics require ACL approval managed on the target plugin's `/{target}/m` page (`Dambo.acl.request()` -> `Dambo.acl.list()` / `set()` / `remove()`, with live `Dambo.acl.onChange()`).
+  - **Errors (`Dambo.DamboError`)**: Only `storage.get()` (`undefined`) and `storage.getEntry()` (`null`) swallow `KEY_NOT_FOUND`; all other errors (`ACL_DENIED`, `UNAUTHORIZED`, `QUOTA_EXCEEDED`, `TOO_MANY_REQUESTS`, etc.) throw `Dambo.DamboError`.
+
+```javascript
+// Typed config hydration & live watch + public topic publish + cross-plugin read/watch
+const cfg = await Dambo.config.get();
+Dambo.config.watch(async () => applyConfig(await Dambo.config.get()));
+
+await Dambo.memory.set('scores', 'uid_42', 100);
+await Dambo.topics.publish('round', { winner: 'Alice' }, { public: true });
+
+const perm = await Dambo.acl.check('game24', 'memory:scores');
+if (perm.effective_level === 'none') {
+    await Dambo.acl.request('game24', {
+        resource: 'memory:scores',
+        level: 'read',
+        reason: 'Display live leaderboard',
+    });
+}
+const offScores = Dambo.memory.of('game24').watch('scores', (ev) => {
+    // Small mutations (<= 16 KB) include ev.values inline: ev.values['uid_42']
+    console.log(ev.op, ev.keys, ev.values);
+});
+```
+
 ---
 
 ## 4. Complete End-to-End Minimal Template (`static/html/minimal-demo/`)
@@ -383,7 +419,9 @@ Use this 3-file clickless scaffold as the baseline for any new plugin:
 
 ```json
 {
-  "title": "Minimal Demo Overlay",
+  "plugin_id": "minimal-demo",
+  "version": "1.0.0",
+  "name": "Minimal Demo Overlay",
   "description": "Clickless OBS overlay using /sdk/dambo.js (query: ?max_items=40&show_like=false)",
   "obs": {
     "width": 400,
@@ -392,7 +430,7 @@ Use this 3-file clickless scaffold as the baseline for any new plugin:
 }
 ```
 
-### 4.2 `static/html/minimal-demo/index.html`
+### 4.2 `static/html/minimal-demo/plugin.html`
 
 ```html
 <!DOCTYPE html>
@@ -633,24 +671,26 @@ When building feature-rich overlays (pinned SuperChat/Guard bars, enter docks, s
 
 ## 6. Agent Self-Verification Checklist
 
-After generating or modifying a plugin under `static/html/<plugin-id>/`, the AI Agent **MUST** run both static and dynamic verification before completing the task:
+After generating or modifying a plugin under `static/html/<plugin-name>/`, the AI Agent **MUST** run both static and dynamic verification before completing the task:
 
 ### 6.1 Static Audit
 
 1. **Clickless Compliance, HTML Head & Synchronous SDK Tag**:
-   - Confirm `static/html/<plugin-id>/index.html` contains `<meta name="referrer" content="no-referrer">` inside `<head>`.
+   - Confirm `static/html/<plugin-name>/plugin.html` exists (`index.html` is ignored) and contains `<meta name="referrer" content="no-referrer">` inside `<head>`.
+   - If optional `manage.html` exists, confirm it does **NOT** include `no-referrer` (management APIs verify same-origin `Referer: /<plugin-name>/m`).
    - Confirm `<script src="/sdk/dambo.js"></script>` appears **before** the plugin script and has **no** `defer`, `async`, or `type="module"` attributes.
-   - Confirm the plugin contains **zero** interactive form/button controls (`<button>`, `<input>`, `<select>`, `onclick`, `alert(`) or `:hover`-gated UI panels.
+   - Confirm `plugin.html` contains **zero** interactive form/button controls (`<button>`, `<input>`, `<select>`, `onclick`, `alert(`) or `:hover`-gated UI panels.
 2. **Forbidden Patterns Scan**:
-   - Scan all `.html`, `.js`, and `.css` files in `static/html/<plugin-id>/` to verify zero occurrences of:
+   - Scan all `.html`, `.js`, and `.css` files in `static/html/<plugin-name>/` to verify zero occurrences of:
      - `.innerHTML`
      - `require(` or bare `import ` statements
+     - Raw `/ws`, `/ws/event`, or hand-crafted `/api/v1/` calls (use `/sdk/dambo.js`)
      - Hardcoded hostnames, IP literals, or fixed port numbers
-   - Verify SDK uses `/sdk/dambo.js` and local plugin assets use `<base href="/<plugin-id>/">` with relative paths (`./plugin.css`, `./plugin.js`, `./assets/...`) or root-prefixed `/<plugin-id>/...`.
+   - Verify SDK uses `/sdk/dambo.js` and local plugin assets use `<base href="/<plugin-name>/">` with relative paths (`./plugin.css`, `./plugin.js`, `./assets/...`) or root-prefixed `/<plugin-name>/...`.
 3. **Manifest & JS Syntax Check**:
    ```bash
-   python3 -m json.tool static/html/<plugin-id>/plugin.json >/dev/null
-   find "static/html/<plugin-id>" -maxdepth 2 -name '*.js' -exec node --check {} +
+   python3 -m json.tool static/html/<plugin-name>/plugin.json >/dev/null
+   find "static/html/<plugin-name>" -maxdepth 2 -name '*.js' -exec node --check {} +
    ```
 
 ### 6.2 Dynamic Route Probe
@@ -666,9 +706,11 @@ if [ "$SERVER_HOST" = "0.0.0.0" ] || [ "$SERVER_HOST" = "::" ]; then
     SERVER_HOST="localhost"
 fi
 
-# 2. Verify GET /<plugin-id>/ and GET /sdk/dambo.js return 200 OK with Cache-Control: no-store
+# 2. Verify GET /<plugin-name>/, GET /<plugin-name>/m, and GET /sdk/dambo.js return 200 OK with Cache-Control: no-store
 if [ -n "$SERVER_PORT" ]; then
-    curl -sS -D - -o /dev/null "http://${SERVER_HOST}:${SERVER_PORT}/<plugin-id>/"
+    curl -sS -D - -o /dev/null "http://${SERVER_HOST}:${SERVER_PORT}/<plugin-name>/"
+    curl -sS -D - -o /dev/null "http://${SERVER_HOST}:${SERVER_PORT}/<plugin-name>/m"
     curl -sS -D - -o /dev/null "http://${SERVER_HOST}:${SERVER_PORT}/sdk/dambo.js"
+    curl -sS "http://${SERVER_HOST}:${SERVER_PORT}/api/v1/health"
 fi
 ```

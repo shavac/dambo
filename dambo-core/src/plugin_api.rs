@@ -2463,4 +2463,317 @@ mod tests {
 
         srv.shutdown().await;
     }
+
+    #[tokio::test]
+    async fn test_e2e_game24_and_scoreboard_cross_plugin_flow() {
+        let srv = TestServer::start_with_config(
+            |html_dir, _| {
+                fs::create_dir_all(html_dir.join("game24")).unwrap();
+                fs::write(
+                    html_dir.join("game24/plugin.html"),
+                    include_str!("../../static/html/game24/plugin.html"),
+                )
+                .unwrap();
+                fs::write(
+                    html_dir.join("game24/plugin.json"),
+                    include_str!("../../static/html/game24/plugin.json"),
+                )
+                .unwrap();
+
+                fs::create_dir_all(html_dir.join("scoreboard")).unwrap();
+                fs::write(html_dir.join("scoreboard/plugin.html"), "<html>board</html>").unwrap();
+                fs::write(
+                    html_dir.join("scoreboard/plugin.json"),
+                    r#"{"plugin_id":"scoreboard","version":"1.0.0","name":"24点计分板"}"#,
+                )
+                .unwrap();
+            },
+            "127.0.0.1:0",
+        )
+        .await;
+
+        // 1. Routing & built-in fallback management page headers + cookie minting
+        let redir = srv
+            .client
+            .get(format!("{}/game24?timeout=60", srv.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(redir.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            redir.headers().get(header::LOCATION).unwrap(),
+            "/game24/?timeout=60"
+        );
+
+        let view = srv
+            .client
+            .get(format!("{}/game24/", srv.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(view.status(), StatusCode::OK);
+
+        let manage = srv
+            .client
+            .get(format!("{}/game24/m", srv.base_url))
+            .header("Sec-Fetch-Dest", "document")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(manage.status(), StatusCode::OK);
+        assert_eq!(manage.headers().get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
+        assert_eq!(
+            manage.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
+            "frame-ancestors 'none'"
+        );
+        let manage_cookie = manage
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let manage_html = manage.text().await.unwrap();
+        assert!(manage_html.contains("dambo-manage-root"));
+        assert!(!manage_html.contains("innerHTML"));
+
+        // 2. Real game24 defaults merge, range validation, and reset
+        let meta: Value = srv
+            .client
+            .get(format!("{}/api/v1/plugins/@self", srv.base_url))
+            .header("X-Dambo-Plugin", "game24")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(meta["namedomain"], "game24@1");
+        assert_eq!(meta["config"]["timeout"]["value"], 300);
+        assert_eq!(meta["config"]["timeout"]["is_overridden"], false);
+        assert_eq!(meta["config"]["settle_time"]["value"], 3.5);
+
+        let upd = srv
+            .client
+            .put(format!(
+                "{}/api/v1/data/persist/@self/ns/config/keys/timeout",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({ "value": 120 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(upd.status(), StatusCode::OK);
+
+        let bad = srv
+            .client
+            .put(format!(
+                "{}/api/v1/data/persist/@self/ns/config/keys/timeout",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({ "value": 99999 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let bad_json: Value = bad.json().await.unwrap();
+        assert_eq!(bad_json["error"]["code"], "OUT_OF_RANGE");
+
+        srv.client
+            .delete(format!(
+                "{}/api/v1/data/persist/@self/ns/config/keys/timeout",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "game24")
+            .send()
+            .await
+            .unwrap();
+        let meta_reset: Value = srv
+            .client
+            .get(format!("{}/api/v1/plugins/@self", srv.base_url))
+            .header("X-Dambo-Plugin", "game24")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(meta_reset["config"]["timeout"]["value"], 300);
+        assert_eq!(meta_reset["config"]["timeout"]["is_overridden"], false);
+
+        // 3. game24 publishes public topic `round`; scoreboard subscribes via SSE without ACL
+        let pub_init = srv
+            .client
+            .post(format!("{}/api/v1/topics/round", srv.base_url))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({
+                "public": true,
+                "description": "扑克24点回合状态与结算播报",
+                "payload": { "event": "start", "round": 1 }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pub_init.status(), StatusCode::OK);
+
+        let topics_q = json!([{ "owner": "game24", "topic": "round" }]);
+        let sse_res = srv
+            .client
+            .get(format!("{}/api/v1/events", srv.base_url))
+            .query(&[
+                ("plugin", "scoreboard"),
+                ("mode", "view"),
+                ("topics", &topics_q.to_string()),
+            ])
+            .send()
+            .await
+            .unwrap();
+        let mut reader = SseReader::new(sse_res);
+        let (_, conn) = reader.next_event().await.unwrap();
+        let sb_cid = conn["client_id"].as_str().unwrap().to_string();
+        assert_eq!(conn["accepted"]["topics"].as_array().unwrap().len(), 1);
+
+        srv.client
+            .post(format!("{}/api/v1/topics/round", srv.base_url))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({ "payload": { "event": "solved", "winner": "玩家A", "expr": "4×6" } }))
+            .send()
+            .await
+            .unwrap();
+        let (t_ev, t_data) = reader.next_event().await.unwrap();
+        assert_eq!(t_ev, "topic.message");
+        assert_eq!(t_data["payload"]["winner"], "玩家A");
+
+        // 4. Cross-plugin memory:scores ACL request -> /game24/m approval -> live watch -> revoke prune
+        srv.client
+            .put(format!(
+                "{}/api/v1/data/memory/@self/ns/scores/keys/uid_42",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({ "value": { "uname": "玩家A", "score": 1 } }))
+            .send()
+            .await
+            .unwrap();
+
+        let denied_read = srv
+            .client
+            .get(format!(
+                "{}/api/v1/data/memory/game24/ns/scores/keys/uid_42",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "scoreboard")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied_read.status(), StatusCode::FORBIDDEN);
+
+        let req_acl = srv
+            .client
+            .post(format!("{}/api/v1/acl/requests", srv.base_url))
+            .header("X-Dambo-Plugin", "scoreboard")
+            .json(&json!({
+                "target": "game24",
+                "resource": "memory:scores",
+                "level": "read",
+                "reason": "展示玩家得分榜"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(req_acl.status(), StatusCode::OK);
+        assert_eq!(reader.next_event().await.unwrap().1["action"], "requested");
+
+        let approve = srv
+            .client
+            .put(format!("{}/api/v1/acl/grants/scoreboard@1", srv.base_url))
+            .header("X-Dambo-Plugin", "game24")
+            .header(header::COOKIE, &manage_cookie)
+            .header(header::REFERER, format!("{}/game24/m", srv.base_url))
+            .json(&json!({ "resource": "memory:scores", "level": "read" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(approve.status(), StatusCode::OK);
+        assert_eq!(reader.next_event().await.unwrap().1["action"], "granted");
+
+        let ok_read: Value = srv
+            .client
+            .get(format!(
+                "{}/api/v1/data/memory/game24/ns/scores/keys/uid_42",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "scoreboard")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(ok_read["value"]["score"], 1);
+
+        let sub_upd = srv
+            .client
+            .put(format!(
+                "{}/api/v1/events/{}/subscriptions",
+                srv.base_url, sb_cid
+            ))
+            .header("X-Dambo-Plugin", "scoreboard")
+            .json(&json!({
+                "watches": [{ "store": "memory", "owner": "game24", "namespace": "scores" }],
+                "topics": []
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sub_upd.status(), StatusCode::OK);
+
+        srv.client
+            .put(format!(
+                "{}/api/v1/data/memory/@self/ns/scores/keys/uid_42",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({ "value": { "uname": "玩家A", "score": 2 } }))
+            .send()
+            .await
+            .unwrap();
+        let (dc_ev, dc_val) = reader.next_event().await.unwrap();
+        assert_eq!(dc_ev, "data.changed");
+        assert_eq!(dc_val["values"]["uid_42"]["score"], 2);
+
+        let revoke = srv
+            .client
+            .delete(format!(
+                "{}/api/v1/acl/grants/scoreboard@1?resource=memory%3Ascores",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "game24")
+            .header(header::COOKIE, &manage_cookie)
+            .header(header::REFERER, format!("{}/game24/m", srv.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoke.status(), StatusCode::OK);
+        assert_eq!(reader.next_event().await.unwrap().1["action"], "revoked");
+
+        srv.client
+            .put(format!(
+                "{}/api/v1/data/memory/@self/ns/scores/keys/uid_42",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({ "value": { "uname": "玩家A", "score": 3 } }))
+            .send()
+            .await
+            .unwrap();
+        reader.assert_closed_or_idle(120).await;
+
+        srv.shutdown().await;
+    }
 }

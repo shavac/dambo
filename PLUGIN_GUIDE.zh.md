@@ -7,16 +7,16 @@
 
 ## 1. 硬性约束与架构边界
 
-1. **纯浏览器、无构建（No-Build）运行环境**：`static/html/<plugin-id>/` 下的所有插件均直接运行在标准浏览器环境中（现代浏览器、OBS 浏览器源以及 Dambo 桌面悬浮窗），**无任何构建步骤**。仅允许使用标准浏览器 Web API 与 `/sdk/dambo.js`。**严禁**使用 Node.js API、CommonJS `require()`、裸 `npm` 模块导入或任何非标准宿主全局对象。
-2. **同步加载 SDK**：`/sdk/dambo.js` **必须**在插件脚本之前通过普通同步 `<script src="/sdk/dambo.js"></script>` 标签加载。**严禁**为 `/sdk/dambo.js` 添加 `defer`、`async` 或 `type="module"` 属性。
+1. **纯浏览器、无构建（No-Build）运行环境**：`static/html/<plugin-name>/` 下的所有插件均直接运行在标准浏览器环境中（现代浏览器、OBS 浏览器源以及 Dambo 桌面悬浮窗），**无任何构建步骤**。仅允许使用标准浏览器 Web API 与 `/sdk/dambo.js`。**严禁**使用 Node.js API、CommonJS `require()`、裸 `npm` 模块导入或任何非标准宿主全局对象。
+2. **同步加载 SDK 与双层调用边界**：`/sdk/dambo.js` **必须**在插件脚本之前通过普通同步 `<script src="/sdk/dambo.js"></script>` 标签加载（严禁 `defer`/`async`/`type="module"`）。所有插件（含展示端 `plugin.html` 与管理端 `manage.html`）均应统一通过 `/sdk/dambo.js` 接入能力：直播弹幕走 `Dambo.connect()`，配置、存储、订阅源与 ACL 走 `Dambo.config` / `Dambo.storage` / `Dambo.memory` / `Dambo.topics` / `Dambo.acl`，**不直接连接裸 `/ws`、`/ws/event` 或手拼 `/api/v1/*` 请求**。
 3. **零硬编码主机名与端口**：**严禁**在插件 HTML、CSS 或 JS 中硬编码任何主机名、IP 地址或端口号：
-   - 统一使用 `/sdk/dambo.js` 引用 SDK，在 `<head>` 中加入 `<base href="/{plugin-id}/">`，并通过相对路径引用插件资源（`./plugin.css`、`./plugin.js`，以及可选放入 `./assets/` 子目录的图片、字体、音频等静态文件），确保无论访问 `GET /{plugin}`（无尾斜杠）还是 `GET /{plugin}/`（带尾斜杠）都能正确加载资源。
+   - 统一使用 `/sdk/dambo.js` 引用 SDK，在 `<head>` 中加入 `<base href="/{plugin-name}/">`，并通过相对路径引用插件资源（`./plugin.css`、`./plugin.js`，以及可选放入 `./assets/` 子目录的图片、字体、音频等静态文件）。
    - 调用 `Dambo.connect()` 时省略 `url`，由 SDK 基于 `window.location` 自动推导 WebSocket 地址（或支持通过 `url: Dambo.utils.getQueryParam('ws') || undefined` 按查询参数覆盖）。
    - 所有服务端监听地址与端口配置均统一位于宿主配置文件 `etc/config.toml` 的 `[server]` `host` 与 `port` 项。
-4. **必需 `<meta name="referrer" content="no-referrer">`**：B 站头像（`face`）与表情（`emoticon`、`emots`）CDN 会校验并拒绝携带 `Referer` 的请求。每个插件 `index.html` 的 `<head>` 中**必须**包含 `<meta name="referrer" content="no-referrer">`。
-5. **XSS 防护与 DOM 性能**：**严禁**将任何用户可控字段（`uname`、`content`、`room_uname`、`room_title`、`medal_name`）写入 `.innerHTML`。必须使用 `.textContent`、`document.createTextNode` 或 `Dambo.utils.renderContent(el, item, opts)`。高频弹幕流中优先使用 `.textContent` 而非 `.innerText`，避免触发布局重排。
+4. **Referer 策略隔离（`plugin.html` vs. `manage.html`）**：B 站头像（`face`）与表情（`emoticon`、`emots`）CDN 会拒绝携带 `Referer` 的请求，因此每个 `plugin.html` 的 `<head>` 中**必须**包含 `<meta name="referrer" content="no-referrer">`；反之，自定义 `manage.html` **严禁**添加 `no-referrer`，以确保管理接口携带同源 `Referer: /{plugin-name}/m`。
+5. **XSS 防护与 DOM 性能**：**严禁**将任何用户可控字段（`uname`、`content`、`room_uname`、`room_title`、`medal_name`）或跨插件文本（`reason`、`note`、`key`、`value`）写入 `.innerHTML`。必须使用 `.textContent`、`document.createTextNode` 或 `Dambo.utils.renderContent(el, item, opts)`。高频弹幕流中优先使用 `.textContent` 而非 `.innerText`，避免触发布局重排。
 6. **桌面悬浮窗控制栏安全区**：在桌面悬浮窗模式（`plugin-overlay-*`）下，宿主会在右上角（`top: 8px; right: 8px`）渲染悬浮控制条（`#dambo-overlay-host`，`z-index: 2147483647`），包含拖动、置顶图钉与关闭按钮（`26px` 按钮 + `4px` 间距 + `4px` 内边距）。请避免在**右上角 `100px × 44px`** 区域放置核心交互控件或不可裁切的关键文字。
-7. **默认透明背景**：用于 OBS 叠加或桌面悬浮的挂件，请保持 `html, body { background: transparent !important; overflow: hidden; }`。
+7. **默认透明背景**：用于 OBS 叠加或桌面悬浮的 `plugin.html` 挂件，请保持 `html, body { background: transparent !important; overflow: hidden; }`；展示端保持零点击自动启动（交互管理控件应放在 `manage.html` 或使用宿主自动提供的内置兜底管理页 `/{plugin-name}/m`）。
 
 ---
 
@@ -27,32 +27,45 @@ Dambo 会动态扫描 `static/html/`（可在 `etc/config.toml` 中通过 `[serv
 ### 2.1 目录结构
 
 ```text
-static/html/<plugin-id>/
-├── index.html      # [必填] 必须是常规文件；用于触发自动发现
-├── plugin.json     # [推荐] 元数据及 OBS / 桌面悬浮窗默认尺寸
-├── plugin.css      # [可选] 插件样式表
-├── plugin.js       # [可选] 基于 /sdk/dambo.js 的插件逻辑
+static/html/<plugin-name>/
+├── plugin.html     # [必填] 展示端入口，触发自动发现（不再兼容旧 index.html）
+├── plugin.json     # [推荐] plugin_id、version、name、OBS 尺寸与强类型默认配置 defaults
+├── plugin.css      # [可选] 展示端样式表
+├── plugin.js       # [可选] 基于 /sdk/dambo.js 的展示端逻辑
+├── manage.html     # [可选] 自定义管理端入口（缺失时自动由宿主渲染内置兜底管理页）
+├── manage.css      # [可选] 管理端样式表
+├── manage.js       # [可选] 基于 /sdk/dambo.js 的管理端逻辑
 └── assets/         # [可选] 静态资源目录（图片、字体、音频等），通过 ./assets/<file> 引用
 ```
 
 ### 2.2 自动发现、路由与清单规则
 
-- **合法 `<plugin-id>`**：必须匹配 `^[A-Za-z0-9_-]+$`，且**不能**与保留顶层路由冲突（不区分大小写）：`ws`、`api`、`sdk`、`static`、`assets`、`health`。
-- **`plugin.json` 结构**：
+- **合法 `<plugin-name>` 与保留词**：必须匹配 `^[A-Za-z0-9_-]{1,64}$`，且**不能**与 3 个系统保留顶层路由冲突（不区分大小写）：`ws`、`api`、`sdk`（健康检查挂载在 `/api/v1/health`）。
+- **`plugin.json` 结构**（运行期严格只读，**不包含 `permissions` 字段**）：
   ```json
   {
-    "title": "插件显示名称",
+    "plugin_id": "my-widget",
+    "version": "1.0.0",
+    "name": "插件显示名称",
     "description": "面板中展示的简短说明",
     "obs": {
       "width": 420,
       "height": 720
+    },
+    "defaults": {
+      "max_items": {
+        "type": "number",
+        "value": 40,
+        "meta": { "min": 5, "max": 200, "format": "integer", "label": "最大保留条数" }
+      }
     }
   }
   ```
+  - `plugin_id` 缺省回退目录名；`version` 缺省为 `"0"`；两者主版本组合成归属域 `namedomain = "{plugin_id}@{major}"`。`name` 兼容回退旧 `title` 字段与目录名。
   - `obs.width` 与 `obs.height` 仅在 `> 0` 时生效；否则桌面悬浮窗默认使用 `420 × 720`。
-  - 缺失或格式错误的 `plugin.json` 不会阻塞插件加载——宿主会记录警告日志并自动回退为目录名与默认尺寸。
+  - 缺失或格式错误的 `plugin.json` 不会阻塞插件加载——宿主会记录警告日志并自动回退为目录默认信息。
 - **HTTP 服务行为**：
-  - 托管路由：`GET /{plugin}`、`GET /{plugin}/`、`GET /{plugin}/{*path}`、`GET /sdk/dambo.js`、`GET /ws`、`GET /ws/event`。
+  - 托管路由：`GET /`（`302 /default/`）、`GET /{plugin}`（`301 /{plugin}/` 并保留 Query）、`GET /{plugin}/`（`plugin.html`）、`GET /{plugin}/m`（`manage.html` 或内置兜底管理页，带 `X-Frame-Options: DENY` / `CSP: frame-ancestors 'none'` / 本机文档导航签发 `dambo_admin` Cookie）、`GET /{plugin}/m/`（`301 /{plugin}/m` 并保留 Query）、`GET /{plugin}/{*path}`、`GET /sdk/dambo.js`、`GET /ws`、`GET /ws/event`、`GET /api/v1/health` 与 `/api/v1/*`。
   - 所有 HTTP 响应均附带 `Cache-Control: no-store, no-cache, must-revalidate` 与 `Pragma: no-cache`。
   - 路径穿越（`..`、`\`、`\0`）统一返回 `404 Asset not found`。
 
@@ -286,35 +299,22 @@ static/html/<plugin-id>/
 ```javascript
 // 挂载于 window.Dambo（需通过 <script src="/sdk/dambo.js"></script> 同步加载）
 {
-    VERSION: '1.1.0',
-    DamboClient: class DamboClient {
-        /** @param {ConnectOptions} [options] */
-        constructor(options);
-        /** @param {string} eventName @param {Function} handler @returns {() => void} */
-        on(eventName, handler);
-        /** @param {string} eventName @param {Function} handler @returns {() => void} */
-        once(eventName, handler);
-        /** @param {string} eventName @param {Function} [handler] @returns {void} */
-        off(eventName, handler);
-        /** @returns {void} */
-        disconnect();
-        /** @returns {void} */
-        close();
-        /** @returns {void} */
-        reconnect();
-        /** @returns {ConnectionState} */
-        getState();
-        /** @returns {RoomStateSnapshot | null} */
-        getRoomState();
-        /** @returns {SnapshotData | null} */
-        getSnapshot();
-        /** @returns {RoomInfoEvent | null} */
-        getRoomInfo();
-        /** @returns {string} */
-        getUrl();
-    },
-    /** @param {ConnectOptions} [options] @returns {DamboClient} */
+    VERSION: '2.0.0',
+    DamboClient: class DamboClient { /* ... */ },
+    DamboError: class DamboError extends Error { code; status; details; },
     connect(options),
+    plugin: {
+        name,                 // 基于 location.pathname 解析的目录 plugin_name
+        mode,                 // 'view' | 'manage'
+        meta(opts),           // GET /api/v1/plugins/@self（首屏单飞缓存）
+        unlockManage(token),  // POST /api/v1/auth/manage 远程解锁
+    },
+    plugins: { list(), get(target) },
+    config: { get(key?), set(keyOrMap, val?), reset(key?), schema(), watch(cb, opts?) },
+    storage: { namespaces(), get(ns, key), getEntry(ns, key), set(ns, key, val, schema?), delete(ns, key), list(ns, opts?), mset(ns, map), clearNamespace(ns), watch(ns, cb, opts?), of(target) },
+    memory: { namespaces(), get(ns, key), getEntry(ns, key), set(ns, key, val, schema?), delete(ns, key), list(ns, opts?), mset(ns, map), clearNamespace(ns), watch(ns, cb, opts?), of(target) },
+    topics: { publish(name, payload, opts?), configure(name, opts), remove(name), list(target?), subscribe(target, name, cb) },
+    acl: { check(target, resource), request(target, opts), list(), set(requester, opts), remove(requester, resource), onChange(cb) },
     utils: {
         DEFAULT_AVATAR_SVG: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="%2364748b"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>',
         /** @param {string | null | undefined} url @returns {string} 将 http:// 或 // 升级为 https:// */
@@ -370,6 +370,41 @@ static/html/<plugin-id>/
 - **通道 B（`channel: 'event'`）**：`'room_info' (RoomInfoEvent)`、`'batch' (EventBatchData)`、`'batch_item' (EventItem, EventBatchData)`、`'event' (EventItem, EventMeta)`、`<kind>`（精确匹配 `item.kind`；`'super_chat'` 会同时触发 `'super_chat'` 与 `'superchat'`）。
 - **错误与重连**：JSON 解析失败仅触发 `'error'` 而不崩溃；监听器异常按回调隔离互不影响；Socket 异常或 `connectTimeoutMs` 看门狗超时会关闭连接并触发带 `±15%` 随机抖动的指数退避重连：`clamp(baseDelay ± 15%, 200, maxReconnectDelayMs)`。浏览器触发 `'online'` 时会立即唤醒重连，触发 `'pagehide'` 时会干净关闭底层连接。
 
+### 3.5 平台能力 SDK（`v2.0`：配置、持久/内存存储、订阅源与 ACL）
+
+所有平台扩展能力均通过 `/sdk/dambo.js` 消费，内部复用按需懒连接的单一 `EventSource`（`/api/v1/events`）；当页面注销全部 `off()` 监听器时连接自动关闭，无需手动维护连接：
+
+- **6 种强类型数据与 `meta.format`**：
+  - `number`（`min`/`max`/`step`、`format: "integer" | "slider"`）、`string`（`max_length`/`placeholder`、`format: "color" | "textarea" | "url"`）、`bool`、`enum`（需 `meta.options`）、`list`（`meta.item`、`meta.max_items`）、`struct`（`meta.fields` 支持 `optional`/`nullable`，缺省为自由 JSON 对象）。
+  - 顶层键严禁写入 `null`（删除统一走 `delete(ns, key)`）；自由 `struct` 与标记 `optional`/`nullable` 的嵌套成员允许包含 `null`。
+  - Schema 仅属主可定义/变更；`plugin.json` `defaults` 声明的配置项 Schema 在运行期锁定（`403 SCHEMA_LOCKED`），且 `persist:config` 禁止被其他插件写入。
+- **插件归属订阅源与统一 ACL**：
+  - `Dambo.topics.publish(name, payload, { public, description })` 自动持久化订阅源元数据（默认 `public: false` 私有；`public: true` 免 ACL 审批直接订阅）。
+  - 跨插件读写 `Dambo.storage.of(target)` / `Dambo.memory.of(target)` 与订阅私有订阅源须先通过目标插件管理页 `/{target}/m` 审批（`Dambo.acl.request()` -> `Dambo.acl.list()` / `set()` / `remove()`，配合 `Dambo.acl.onChange()`）。
+  - **异常处理（`Dambo.DamboError`）**：仅 `get()`（返回 `undefined`）与 `getEntry()`（返回 `null`）吞掉 `KEY_NOT_FOUND`，其余 `ACL_DENIED`、`UNAUTHORIZED`、`QUOTA_EXCEEDED` 等错误一律抛出 `Dambo.DamboError`。
+
+```javascript
+// 读取并热监听持久化配置 + 公开话题发布 + 跨插件数据权限申请与实时监听
+const cfg = await Dambo.config.get();
+Dambo.config.watch(async () => applyConfig(await Dambo.config.get()));
+
+await Dambo.memory.set('scores', 'uid_42', 100);
+await Dambo.topics.publish('round', { winner: '观众甲' }, { public: true });
+
+const perm = await Dambo.acl.check('game24', 'memory:scores');
+if (perm.effective_level === 'none') {
+    await Dambo.acl.request('game24', {
+        resource: 'memory:scores',
+        level: 'read',
+        reason: '展示实时积分排行榜',
+    });
+}
+const offScores = Dambo.memory.of('game24').watch('scores', (ev) => {
+    // 单次 <=16KB 变更直接从 ev.values 读取最新值，免二次 GET
+    console.log(ev.op, ev.keys, ev.values);
+});
+```
+
 ---
 
 ## 4. 完整端到端最小模板（`static/html/minimal-demo/`）
@@ -380,7 +415,9 @@ static/html/<plugin-id>/
 
 ```json
 {
-  "title": "Minimal Demo Overlay",
+  "plugin_id": "minimal-demo",
+  "version": "1.0.0",
+  "name": "Minimal Demo Overlay",
   "description": "End-to-end minimal Dambo plugin using /sdk/dambo.js",
   "obs": {
     "width": 400,
@@ -389,7 +426,7 @@ static/html/<plugin-id>/
 }
 ```
 
-### 4.2 `static/html/minimal-demo/index.html`
+### 4.2 `static/html/minimal-demo/plugin.html`
 
 ```html
 <!DOCTYPE html>
@@ -629,23 +666,25 @@ static/html/<plugin-id>/
 
 ## 6. Agent 自检清单（Agent Self-Verification Checklist）
 
-在 `static/html/<plugin-id>/` 下生成或修改插件后，AI Agent **必须**在交付前完成以下静态审计与动态探活：
+在 `static/html/<plugin-name>/` 下生成或修改插件后，AI Agent **必须**在交付前完成以下静态审计与动态探活：
 
 ### 6.1 静态审计
 
 1. **HTML `<head>` 与同步 SDK 标签**：
-   - 确认 `static/html/<plugin-id>/index.html` 的 `<head>` 中包含 `<meta name="referrer" content="no-referrer">`。
+   - 确认 `static/html/<plugin-name>/plugin.html` 存在（旧 `index.html` 不再触发注册）且 `<head>` 中包含 `<meta name="referrer" content="no-referrer">`。
+   - 若存在自定义 `manage.html`，确认其中**不包含** `no-referrer`（确保管理接口附带同源 `Referer: /<plugin-name>/m`）。
    - 确认 `<script src="/sdk/dambo.js"></script>` 位于插件脚本**之前**，且**未**添加 `defer`、`async` 或 `type="module"` 属性。
 2. **禁用模式扫描**：
-   - 扫描 `static/html/<plugin-id>/` 下所有 `.html`、`.js` 和 `.css` 文件，确认不存在：
+   - 扫描 `static/html/<plugin-name>/` 下所有 `.html`、`.js` 和 `.css` 文件，确认不存在：
      - `.innerHTML`
      - `require(` 或裸 `import ` 语句
+     - 绕开 SDK 直连裸 `/ws`、`/ws/event` 或手拼 `/api/v1/` 请求
      - 硬编码的本地回环主机名、IP 字面量或固定端口号
-   - 确认 SDK 使用 `/sdk/dambo.js`，本地插件资源通过 `<base href="/<plugin-id>/">` 配合相对路径（`./plugin.css`、`./plugin.js`、`./assets/...`）或以 `/<plugin-id>/...` 引用。
+   - 确认 SDK 使用 `/sdk/dambo.js`，本地插件资源通过 `<base href="/<plugin-name>/">` 配合相对路径（`./plugin.css`、`./plugin.js`、`./assets/...`）或以 `/<plugin-name>/...` 引用。
 3. **Manifest 与 JS 语法校验**：
    ```bash
-   python3 -m json.tool static/html/<plugin-id>/plugin.json >/dev/null
-   node --check static/html/<plugin-id>/*.js
+   python3 -m json.tool static/html/<plugin-name>/plugin.json >/dev/null
+   node --check static/html/<plugin-name>/*.js
    ```
 
 ### 6.2 动态路由探活
@@ -657,7 +696,9 @@ static/html/<plugin-id>/
 SERVER_HOST="$(awk '/^\[server\]/{f=1;next} /^\[/{f=0} f && /^[[:space:]]*host[[:space:]]*=/{sub(/^[^"]*"/,"");sub(/".*$/,"");print;exit}' etc/config.toml)"
 SERVER_PORT="$(awk '/^\[server\]/{f=1;next} /^\[/{f=0} f && /^[[:space:]]*port[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/,"");sub(/[[:space:]#].*$/,"");print;exit}' etc/config.toml)"
 
-# 2. 验证 GET /<plugin-id>/ 与 GET /sdk/dambo.js 均返回 200 OK 且带有 Cache-Control: no-store
-curl -sS -D - -o /dev/null "http://${SERVER_HOST}:${SERVER_PORT}/<plugin-id>/"
+# 2. 验证 GET /<plugin-name>/、GET /<plugin-name>/m 与 GET /sdk/dambo.js 均返回 200 OK 且带有 Cache-Control: no-store
+curl -sS -D - -o /dev/null "http://${SERVER_HOST}:${SERVER_PORT}/<plugin-name>/"
+curl -sS -D - -o /dev/null "http://${SERVER_HOST}:${SERVER_PORT}/<plugin-name>/m"
 curl -sS -D - -o /dev/null "http://${SERVER_HOST}:${SERVER_PORT}/sdk/dambo.js"
+curl -sS "http://${SERVER_HOST}:${SERVER_PORT}/api/v1/health"
 ```

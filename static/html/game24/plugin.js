@@ -2,13 +2,48 @@
     'use strict';
 
     // =========================================================================
-    // 1. 配置与 URL 查询参数（严格零硬编码地址/端口，遵循 Dambo 插件规范）
+    // 1. 配置与 URL 查询参数（管理页 persisted config 与 URL query 协同，query 参数优先覆盖）
     // =========================================================================
-    const ROUND_TIMEOUT_SEC = Math.max(0, Number(Dambo.utils.getQueryParam('timeout', '300')) || 0);
-    const SOLVABLE_ONLY = Dambo.utils.getQueryBool('solvable_only', false);
-    const SETTLE_HOLD_MS = Math.max(1000, Math.round((Number(Dambo.utils.getQueryParam('settle_time', '3.5')) || 3.5) * 1000));
-    const UNSOLVABLE_HOLD_MS = Math.max(1000, Math.round((Number(Dambo.utils.getQueryParam('skip_time', '2.5')) || 2.5) * 1000));
+    const searchParams = new URLSearchParams(window.location.search);
+    const hasQueryOverride = {
+        timeout: searchParams.has('timeout'),
+        solvable_only: searchParams.has('solvable_only'),
+        settle_time: searchParams.has('settle_time'),
+        skip_time: searchParams.has('skip_time'),
+    };
+    const runtimeConfig = {
+        timeoutSec: Math.max(0, Number(Dambo.utils.getQueryParam('timeout', '300')) || 0),
+        solvableOnly: Dambo.utils.getQueryBool('solvable_only', false),
+        settleHoldMs: Math.max(1000, Math.round((Number(Dambo.utils.getQueryParam('settle_time', '3.5')) || 3.5) * 1000)),
+        skipHoldMs: Math.max(1000, Math.round((Number(Dambo.utils.getQueryParam('skip_time', '2.5')) || 2.5) * 1000)),
+    };
     const USER_COOLDOWN_MS = 400;
+
+    function applyPlatformConfig(cfg) {
+        if (!cfg || typeof cfg !== 'object') return;
+        if (!hasQueryOverride.timeout && typeof cfg.timeout === 'number' && Number.isFinite(cfg.timeout)) {
+            runtimeConfig.timeoutSec = Math.max(0, cfg.timeout);
+        }
+        if (!hasQueryOverride.solvable_only && typeof cfg.solvable_only === 'boolean') {
+            runtimeConfig.solvableOnly = cfg.solvable_only;
+        }
+        if (!hasQueryOverride.settle_time && typeof cfg.settle_time === 'number' && Number.isFinite(cfg.settle_time)) {
+            runtimeConfig.settleHoldMs = Math.max(1000, Math.round(cfg.settle_time * 1000));
+        }
+        if (!hasQueryOverride.skip_time && typeof cfg.skip_time === 'number' && Number.isFinite(cfg.skip_time)) {
+            runtimeConfig.skipHoldMs = Math.max(1000, Math.round(cfg.skip_time * 1000));
+        }
+    }
+
+    function publishRoundEvent(payload) {
+        if (!Dambo.topics || typeof Dambo.topics.publish !== 'function') return;
+        Dambo.topics
+            .publish('round', payload, {
+                public: true,
+                description: '扑克24点回合状态与结算播报',
+            })
+            .catch(() => {});
+    }
 
     const SUITS = [
         { symbol: '♠', color: 'suit-black' },
@@ -557,6 +592,12 @@
         prev.score += 1;
         gameState.scores.set(key, prev);
 
+        if (Dambo.memory && typeof Dambo.memory.set === 'function') {
+            Dambo.memory
+                .set('scores', key, { uname: prev.uname, score: prev.score })
+                .catch(() => {});
+        }
+
         const top = Array.from(gameState.scores.values())
             .sort((a, b) => b.score - a.score)
             .slice(0, 4);
@@ -634,7 +675,7 @@
         let solutions = solve24(cards.map((c) => c.rank));
 
         // 若开启 solvable_only=true，则自动跳过无解手牌直至抽中有解牌组
-        if (SOLVABLE_ONLY) {
+        if (runtimeConfig.solvableOnly) {
             let guard = 0;
             while (solutions.length === 0 && guard < 120) {
                 cards = drawFourCards();
@@ -648,10 +689,16 @@
         renderCards(cards, false);
 
         const handSummary = cards.map((c) => `${c.suit.symbol}${RANK_LABELS[c.rank]}`).join('  ');
+        const roundCards = cards.map((c) => RANK_LABELS[c.rank]);
 
         // 情况 A：当前手牌无可行四则运算解 -> 自动提示无解并跳过
         if (solutions.length === 0) {
             gameState.phase = 'UNSOLVABLE';
+            publishRoundEvent({
+                event: 'unsolvable',
+                round: gameState.round,
+                cards: roundCards,
+            });
             timerFillEl.className = 'timer-fill auto-skip';
             timerFillEl.style.width = '100%';
             setBanner(
@@ -663,7 +710,7 @@
             setToast('⚠️ 本手牌无解，即将自动发下一题', 'warn');
 
             startPhaseTimer(
-                UNSOLVABLE_HOLD_MS,
+                runtimeConfig.skipHoldMs,
                 (remMs) => {
                     const sec = (remMs / 1000).toFixed(1);
                     bannerSubEl.textContent = `本手牌无解，${sec}s 后自动切换下一题…`;
@@ -677,10 +724,18 @@
 
         // 情况 B：当前牌面有解 -> 开启弹幕抢答阶段
         gameState.phase = 'PLAYING';
+        const timeoutSec = runtimeConfig.timeoutSec;
+        publishRoundEvent({
+            event: 'start',
+            round: gameState.round,
+            cards: roundCards,
+            solution_count: solutions.length,
+            timeout_sec: timeoutSec,
+        });
         timerFillEl.className = 'timer-fill';
         timerFillEl.style.width = '100%';
 
-        const timeoutDesc = ROUND_TIMEOUT_SEC > 0 ? `限时 ${ROUND_TIMEOUT_SEC}s` : '不限时';
+        const timeoutDesc = timeoutSec > 0 ? `限时 ${timeoutSec}s` : '不限时';
         setBanner(
             'state-playing',
             `当前牌面：${handSummary}（共 ${solutions.length} 种解法）`,
@@ -689,9 +744,9 @@
         );
         setToast('💡 弹幕发送如 (3+3)×(8-4) 即可作答，首位算对自动切下一题', '');
 
-        if (ROUND_TIMEOUT_SEC > 0) {
+        if (timeoutSec > 0) {
             startPhaseTimer(
-                ROUND_TIMEOUT_SEC * 1000,
+                timeoutSec * 1000,
                 (remMs) => {
                     const sec = Math.ceil(remMs / 1000);
                     bannerSubEl.textContent = `剩余 ${sec}s · 弹幕发送算式抢答！`;
@@ -714,19 +769,27 @@
 
         renderCards(gameState.cards, true);
         updateLeaderboard(player);
+        publishRoundEvent({
+            event: 'solved',
+            round: gameState.round,
+            winner: { uid: player.uid || 0, uname: player.uname || '观众' },
+            expr: prettyExpr,
+            cards: gameState.cards.map((c) => RANK_LABELS[c.rank]),
+        });
 
+        const holdMs = runtimeConfig.settleHoldMs;
         timerFillEl.className = 'timer-fill';
         timerFillEl.style.width = '100%';
         setBanner(
             'state-solved',
             `🎉 ${player.uname} 抢答成功：${prettyExpr} = 24`,
-            '3.5s 后自动切换下一题…',
+            `${(holdMs / 1000).toFixed(1)}s 后自动切换下一题…`,
             player
         );
         setToast(`✅ ${player.uname} 解出 ${prettyExpr} = 24（+1分）`, 'success');
 
         startPhaseTimer(
-            SETTLE_HOLD_MS,
+            holdMs,
             (remMs) => {
                 const sec = (remMs / 1000).toFixed(1);
                 bannerSubEl.textContent = `${sec}s 后自动切换下一题…`;
@@ -742,18 +805,25 @@
         gameState.phase = 'TIMEOUT';
 
         const sample = gameState.solutions[0] || '无';
+        publishRoundEvent({
+            event: 'timeout',
+            round: gameState.round,
+            sample: sample,
+            cards: gameState.cards.map((c) => RANK_LABELS[c.rank]),
+        });
+        const holdMs = runtimeConfig.settleHoldMs;
         timerFillEl.className = 'timer-fill warning';
         timerFillEl.style.width = '100%';
         setBanner(
             'state-timeout',
             `⏰ 时间到！参考解法：${sample} = 24`,
-            '3.5s 后自动切换下一题…',
+            `${(holdMs / 1000).toFixed(1)}s 后自动切换下一题…`,
             null
         );
         setToast(`📖 本轮无人解出，参考解：${sample} = 24`, 'warn');
 
         startPhaseTimer(
-            SETTLE_HOLD_MS,
+            holdMs,
             (remMs) => {
                 const sec = (remMs / 1000).toFixed(1);
                 bannerSubEl.textContent = `${sec}s 后自动切换下一题…`;
@@ -829,6 +899,22 @@
             item.content
         );
     });
+
+    // 启动时合并持久化的插件默认配置并监听实时变更（URL query 参数优先级最高）
+    if (Dambo.config && typeof Dambo.config.get === 'function') {
+        Dambo.config
+            .get()
+            .then(applyPlatformConfig)
+            .catch(() => {});
+    }
+    if (Dambo.config && typeof Dambo.config.watch === 'function') {
+        Dambo.config.watch(() => {
+            Dambo.config
+                .get()
+                .then(applyPlatformConfig)
+                .catch(() => {});
+        });
+    }
 
     // 启动首局游戏
     startNextRound();
