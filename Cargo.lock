@@ -298,7 +298,9 @@ dependencies = [
 
 [[package]]
 name = "blive-proto"
-version = "0.1.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6e8324699607c1dc250c0525f2677859111304a8343ad43cd2711941cb4d968"
 dependencies = [
  "base64 0.22.1",
  "brotlic",
