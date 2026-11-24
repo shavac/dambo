@@ -105,5 +105,9 @@
   "danmaku.err_too_long": "弹幕不能超过 {max} 个字",
   "danmaku.err_rate_limited": "发送过于频繁，请稍后再试",
   "danmaku.err_auth_expired": "登录状态已失效，请重新扫码登录",
-  "danmaku.err_rejected": "发送失败：{reason}"
+  "danmaku.err_rejected": "发送失败：{reason}",
+
+  "startup.error_title": "Dambo 启动失败",
+  "startup.port_in_use": "端口 {addr} 已被占用（可能后台仍在运行其他 Dambo / dambo-cli 进程）。\n\n请先彻底退出已有实例，或在配置 [server].port 中更换端口后再启动。",
+  "startup.server_failed": "本地服务启动失败：{error}"
 }

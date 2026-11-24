@@ -193,6 +193,16 @@ impl DamboRuntime {
         self.loopback_accessible.load(Ordering::Acquire)
     }
 
+    /// Inspect an error chain to extract the occupied address when binding failed with `AddrInUse`.
+    pub fn is_port_in_use_error(err: &anyhow::Error) -> Option<SocketAddr> {
+        err.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<server::ServerBindError>()
+                .filter(|bind_err| bind_err.kind == std::io::ErrorKind::AddrInUse)
+                .map(|bind_err| bind_err.addr)
+        })
+    }
+
     /// Returns whether sidecar `*_raw.jsonl` packet capture is currently enabled.
     pub fn is_record_raw_enabled(&self) -> bool {
         self.recorder.is_record_raw_enabled()
@@ -218,6 +228,16 @@ impl DamboRuntime {
 
     /// Start runtime services with an optional CLI room override taking precedence over persisted state.
     pub async fn start_with_room_override(&self, room_override: Option<&str>) -> Result<()> {
+        // Bind HTTP/WS listeners synchronously first so port conflicts fail fast before spawning
+        // background tasks, watchers, or connecting to Bilibili.
+        let addr = resolve_bind_addr(&self.config.server.host, self.config.server.port);
+        let bound_server = server::bind_server(
+            &self.config.server.host,
+            addr,
+            Some(&self.loopback_accessible),
+        )
+        .await?;
+
         // 1. Isomorphic dispatcher: Collector -> Recorder + StateHub (/ws) + EventEngine (/ws/event)
         let mut raw_rx = self.collector.subscribe();
         let recorder = self.recorder.clone();
@@ -302,7 +322,6 @@ impl DamboRuntime {
         self.plugin_hub
             .spawn_registry_watcher(self.plugins.clone(), self.cancel.child_token());
 
-        let addr = resolve_bind_addr(&self.config.server.host, self.config.server.port);
         let app_state = Arc::new(AppState {
             config: self.config.clone(),
             plugins: self.plugins.clone(),
@@ -315,12 +334,8 @@ impl DamboRuntime {
             cancel: self.cancel.child_token(),
         });
         let srv_cancel = self.cancel.child_token();
-        let loopback_flag = self.loopback_accessible.clone();
         let server_handle = tokio::spawn(async move {
-            if let Err(e) =
-                server::serve_with_loopback_flag(app_state, addr, srv_cancel, Some(loopback_flag))
-                    .await
-            {
+            if let Err(e) = server::serve_bound(app_state, bound_server, srv_cancel).await {
                 log::error!("Server stopped with error: {}", e);
             }
         });
@@ -1010,6 +1025,46 @@ mod tests {
 
         rt_reopened.shutdown_and_wait().await;
         drop(rt_reopened);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_start_fails_fast_on_port_in_use() {
+        let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_dir =
+            std::env::temp_dir().join(format!("dambo_rt_port_busy_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("etc")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/default")).unwrap();
+        fs::write(
+            temp_dir.join("static/html/default/plugin.html"),
+            "<html>d</html>",
+        )
+        .unwrap();
+
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        let raw_toml = format!(
+            "[bilibili]\nroom_id = 0\n[server]\nhost = \"127.0.0.1\"\nport = {}\nhtml_dir = \"static/html\"\n",
+            occupied_port
+        );
+        let cfg_path = temp_dir.join("etc/config.toml");
+        fs::write(&cfg_path, raw_toml).unwrap();
+
+        let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        let err = rt.start().await.unwrap_err();
+        let detected = DamboRuntime::is_port_in_use_error(&err);
+        assert_eq!(
+            detected,
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                occupied_port
+            ))
+        );
+
+        drop(occupied);
+        rt.shutdown_and_wait().await;
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

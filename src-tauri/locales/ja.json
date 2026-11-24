@@ -105,5 +105,9 @@
   "danmaku.err_too_long": "弾幕は {max} 文字以内にしてください",
   "danmaku.err_rate_limited": "送信間隔が短すぎます。少し待ってから再試行してください",
   "danmaku.err_auth_expired": "ログイン有効期限が切れました。再ログインしてください",
-  "danmaku.err_rejected": "送信に失敗しました: {reason}"
+  "danmaku.err_rejected": "送信に失敗しました: {reason}",
+
+  "startup.error_title": "Dambo の起動に失敗しました",
+  "startup.port_in_use": "ポート {addr} は既に使用中です（別の Dambo または dambo-cli が起動中の可能性があります）。\n\n既存プロセスを終了するか、設定の [server].port を変更してから再起動してください。",
+  "startup.server_failed": "ローカルサーバーの起動に失敗しました: {error}"
 }

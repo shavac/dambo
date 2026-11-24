@@ -284,7 +284,23 @@ async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Resul
         }
         res = runtime.start_with_room_override(args.room.as_deref()) => res,
     };
-    start_res?;
+    if let Err(err) = start_res {
+        if let Some(addr) = DamboRuntime::is_port_in_use_error(&err) {
+            log::error!(
+                "❌ 端口 {} 已被占用（可能已有 dambo / dambo-ui 正在运行），dambo-cli 退出。",
+                addr
+            );
+            eprintln!(
+                "❌ 无法启动 dambo-cli：端口 {} 已被占用（可能已有旧版 Dambo 或 dambo-ui 正在运行），请关闭占用进程或修改配置中的 [server].port。",
+                addr
+            );
+        } else {
+            log::error!("❌ 启动 dambo-cli 失败: {:#}", err);
+            eprintln!("❌ 启动 dambo-cli 失败: {:#}", err);
+        }
+        runtime.shutdown();
+        return Err(err);
+    }
 
     let use_tui =
         !args.headless && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();

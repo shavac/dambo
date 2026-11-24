@@ -1,4 +1,4 @@
-# dambo — Danmaku Platform for the AI Era
+# dambo — AI-Powered Livestream Plugin Platform
 
 [简体中文](README.md) | [English](README.en.md)
 

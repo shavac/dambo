@@ -1768,6 +1768,68 @@ fn build_tray_menu_excluding(
         .build()
 }
 
+#[cfg(target_os = "windows")]
+fn show_fatal_startup_dialog(title: &str, message: &str) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(
+            hwnd: *mut std::ffi::c_void,
+            lp_text: *const u16,
+            lp_caption: *const u16,
+            u_type: u32,
+        ) -> i32;
+    }
+
+    const MB_OK: u32 = 0x0000_0000;
+    const MB_ICONERROR: u32 = 0x0000_0010;
+    const MB_SYSTEMMODAL: u32 = 0x0000_1000;
+    const MB_SETFOREGROUND: u32 = 0x0001_0000;
+
+    let wide_text: Vec<u16> = OsStr::new(message).encode_wide().chain(Some(0)).collect();
+    let wide_caption: Vec<u16> = OsStr::new(title).encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let _ = MessageBoxW(
+            std::ptr::null_mut(),
+            wide_text.as_ptr(),
+            wide_caption.as_ptr(),
+            MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_fatal_startup_dialog(title: &str, message: &str) {
+    let _ = Command::new("osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display alert (item 1 of argv) message (item 2 of argv) as critical",
+            "-e",
+            "end run",
+            title,
+            message,
+        ])
+        .status();
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn show_fatal_startup_dialog(title: &str, message: &str) {
+    if Command::new("zenity")
+        .args(["--error", "--title", title, "--text", message])
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        return;
+    }
+    let _ = Command::new("kdialog")
+        .args(["--error", message, "--title", title])
+        .status();
+}
+
 pub fn run(config_path: &str) {
     let runtime = Arc::new(
         DamboRuntime::from_config_path(config_path)
@@ -1834,28 +1896,48 @@ pub fn run(config_path: &str) {
         .setup(move |app| {
             let app_handle = app.handle().clone();
 
-            // 1. Start dambo-core pipeline, plugin watcher & Axum dual-channel server
+            // 1. Start dambo-core pipeline, plugin watcher & Axum dual-channel server;
+            //    abort with an explicit error dialog and exit if binding the HTTP port fails.
             let rt_start = runtime.clone();
+            let app_start = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = rt_start.start().await {
-                    log::error!("Failed to start DamboRuntime: {}", e);
+                    log::error!("Failed to start DamboRuntime: {:#}", e);
+                    if let Some(main_win) = app_start.get_webview_window("main") {
+                        let _ = main_win.hide();
+                    }
+                    let locale = active_locale(&rt_start);
+                    let title = i18n::t(locale, "startup.error_title");
+                    let message = if let Some(addr) = DamboRuntime::is_port_in_use_error(&e) {
+                        let addr_str = addr.to_string();
+                        i18n::t_fmt(locale, "startup.port_in_use", &[("addr", &addr_str)])
+                    } else {
+                        let err_str = e.to_string();
+                        i18n::t_fmt(locale, "startup.server_failed", &[("error", &err_str)])
+                    };
+                    eprintln!("❌ {}: {}", title, message);
+                    let dlg_title = title.clone();
+                    let dlg_message = message.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        show_fatal_startup_dialog(&dlg_title, &dlg_message);
+                    })
+                    .await;
+                    rt_start.shutdown();
+                    app_start.exit(1);
+                    return;
                 }
-            });
 
-            // 2. Startup silent Bilibili cookie check with retries; pop up QR window if missing or expired
-            let rt_auth_init = runtime.clone();
-            let app_auth_init = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if rt_auth_init.auth.current_session().is_none() {
-                    let _ = ensure_qr_window(&app_auth_init, active_locale(&rt_auth_init));
+                // 2. Startup silent Bilibili cookie check with retries; pop up QR window if missing or expired
+                if rt_start.auth.current_session().is_none() {
+                    let _ = ensure_qr_window(&app_start, active_locale(&rt_start));
                     return;
                 }
                 let retry_delays_secs = [2u64, 5, 10];
                 for attempt in 0..=retry_delays_secs.len() {
-                    match rt_auth_init.auth.validate_session().await {
+                    match rt_start.auth.validate_session().await {
                         Ok(state) => {
                             if !state.is_login {
-                                let _ = ensure_qr_window(&app_auth_init, active_locale(&rt_auth_init));
+                                let _ = ensure_qr_window(&app_start, active_locale(&rt_start));
                             }
                             return;
                         }

@@ -105,5 +105,9 @@
   "danmaku.err_too_long": "Danmaku exceeds {max} characters",
   "danmaku.err_rate_limited": "Sending too fast, please wait a moment",
   "danmaku.err_auth_expired": "Session expired, please sign in again",
-  "danmaku.err_rejected": "Send failed: {reason}"
+  "danmaku.err_rejected": "Send failed: {reason}",
+
+  "startup.error_title": "Dambo Failed to Start",
+  "startup.port_in_use": "Port {addr} is already in use (another Dambo or dambo-cli instance may still be running).\n\nClose the existing instance or change [server].port in config before restarting.",
+  "startup.server_failed": "Failed to start local server: {error}"
 }

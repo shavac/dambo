@@ -366,6 +366,185 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Structured listener bind error surfaced before spawning background server loops.
+#[derive(Debug)]
+pub struct ServerBindError {
+    pub addr: SocketAddr,
+    pub kind: std::io::ErrorKind,
+    pub source: std::io::Error,
+}
+
+impl ServerBindError {
+    pub fn new(addr: SocketAddr, source: std::io::Error) -> Self {
+        Self {
+            addr,
+            kind: source.kind(),
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for ServerBindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.kind == std::io::ErrorKind::AddrInUse {
+            write!(
+                f,
+                "Port {} is already in use (another Dambo instance or service may be running): {}",
+                self.addr, self.source
+            )
+        } else {
+            write!(
+                f,
+                "Failed to bind dambo server to {}: {}",
+                self.addr, self.source
+            )
+        }
+    }
+}
+
+impl std::error::Error for ServerBindError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Already-bound HTTP/WS listeners ready to hand off to [`serve_bound`].
+pub struct BoundServer {
+    primary: TcpListener,
+    companion: Option<TcpListener>,
+    bound_addr: SocketAddr,
+}
+
+impl BoundServer {
+    pub fn bound_addr(&self) -> SocketAddr {
+        self.bound_addr
+    }
+}
+
+/// Bind primary HTTP/WS listener (and companion loopback listener when applicable) before spawning serve loops.
+pub async fn bind_server(
+    config_host: &str,
+    addr: SocketAddr,
+    loopback_accessible: Option<&AtomicBool>,
+) -> std::result::Result<BoundServer, ServerBindError> {
+    let primary = TcpListener::bind(addr)
+        .await
+        .map_err(|e| ServerBindError::new(addr, e))?;
+    let bound_addr = primary.local_addr().unwrap_or(addr);
+    log::info!(
+        "🌐 Dambo HTTP & WS server listening on http://{}",
+        bound_addr
+    );
+
+    let trimmed_host = config_host.trim();
+    let host_is_localhost =
+        trimmed_host.is_empty() || trimmed_host.eq_ignore_ascii_case("localhost");
+    let primary_is_local = bound_addr.ip().is_loopback() || bound_addr.ip().is_unspecified();
+
+    let companion = if host_is_localhost && bound_addr.ip().is_loopback() {
+        let companion_ip = match bound_addr {
+            SocketAddr::V4(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            SocketAddr::V6(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+        let companion_addr = SocketAddr::new(companion_ip, bound_addr.port());
+        match TcpListener::bind(companion_addr).await {
+            Ok(l) => {
+                log::info!(
+                    "🔁 Dual-stack localhost listener bound on http://{}",
+                    companion_addr
+                );
+                Some(l)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && addr.port() != 0 => {
+                return Err(ServerBindError::new(companion_addr, e));
+            }
+            Err(e) => {
+                log::debug!(
+                    "Skipping dual-stack localhost listener on {} ({})",
+                    companion_addr,
+                    e
+                );
+                None
+            }
+        }
+    } else if !primary_is_local {
+        let companion_ip = match bound_addr {
+            SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        };
+        let companion_addr = SocketAddr::new(companion_ip, bound_addr.port());
+        match TcpListener::bind(companion_addr).await {
+            Ok(l) => {
+                log::info!(
+                    "🔁 Companion loopback listener bound on http://{} for local desktop overlay & management access",
+                    companion_addr
+                );
+                Some(l)
+            }
+            Err(e) => {
+                log::warn!(
+                    "⚠️ Could not bind companion loopback listener on {} ({}); local overlays will fall back to {}",
+                    companion_addr,
+                    e,
+                    bound_addr
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let Some(flag) = loopback_accessible {
+        flag.store(primary_is_local || companion.is_some(), Ordering::Release);
+    }
+
+    Ok(BoundServer {
+        primary,
+        companion,
+        bound_addr,
+    })
+}
+
+/// Serve already-bound HTTP & dual WebSocket listeners until cancelled.
+pub async fn serve_bound(
+    state: Arc<AppState>,
+    bound: BoundServer,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let router = build_router(state);
+    if let Some(companion) = bound.companion {
+        let primary_cancel = cancel.child_token();
+        let companion_cancel = cancel.child_token();
+        let (res_primary, res_companion) = tokio::join!(
+            axum::serve(
+                bound.primary,
+                router
+                    .clone()
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(primary_cancel.cancelled_owned()),
+            axum::serve(
+                companion,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(companion_cancel.cancelled_owned()),
+        );
+        res_primary.context("Axum primary server error")?;
+        res_companion.context("Axum companion loopback server error")?;
+    } else {
+        axum::serve(
+            bound.primary,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(cancel.cancelled_owned())
+        .await
+        .context("Axum server error")?;
+    }
+
+    Ok(())
+}
+
 /// Bind and serve HTTP + dual WebSocket endpoints until cancelled.
 pub async fn serve(
     state: Arc<AppState>,
@@ -384,85 +563,9 @@ pub async fn serve_with_loopback_flag(
     cancel: CancellationToken,
     loopback_accessible: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("Failed to bind dambo server to {}", addr))?;
-    let bound_addr = listener.local_addr().unwrap_or(addr);
-    log::info!(
-        "🌐 Dambo HTTP & WS server listening on http://{}",
-        bound_addr
-    );
-
-    let router = build_router(state);
-    let primary_is_local = bound_addr.ip().is_loopback() || bound_addr.ip().is_unspecified();
-
-    let companion_listener = if primary_is_local {
-        if let Some(ref flag) = loopback_accessible {
-            flag.store(true, Ordering::Release);
-        }
-        None
-    } else {
-        let companion_ip = match bound_addr {
-            SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
-            SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        };
-        let companion_addr = SocketAddr::new(companion_ip, bound_addr.port());
-        match TcpListener::bind(companion_addr).await {
-            Ok(l) => {
-                if let Some(ref flag) = loopback_accessible {
-                    flag.store(true, Ordering::Release);
-                }
-                log::info!(
-                    "🔁 Companion loopback listener bound on http://{} for local desktop overlay & management access",
-                    companion_addr
-                );
-                Some(l)
-            }
-            Err(e) => {
-                if let Some(ref flag) = loopback_accessible {
-                    flag.store(false, Ordering::Release);
-                }
-                log::warn!(
-                    "⚠️ Could not bind companion loopback listener on {} ({}); local overlays will fall back to {}",
-                    companion_addr,
-                    e,
-                    bound_addr
-                );
-                None
-            }
-        }
-    };
-
-    if let Some(companion) = companion_listener {
-        let primary_cancel = cancel.child_token();
-        let companion_cancel = cancel.child_token();
-        let (res_primary, res_companion) = tokio::join!(
-            axum::serve(
-                listener,
-                router
-                    .clone()
-                    .into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(primary_cancel.cancelled_owned()),
-            axum::serve(
-                companion,
-                router.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(companion_cancel.cancelled_owned()),
-        );
-        res_primary.context("Axum primary server error")?;
-        res_companion.context("Axum companion loopback server error")?;
-    } else {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(cancel.cancelled_owned())
-        .await
-        .context("Axum server error")?;
-    }
-
-    Ok(())
+    let host = state.config.server.host.clone();
+    let bound = bind_server(&host, addr, loopback_accessible.as_deref()).await?;
+    serve_bound(state, bound, cancel).await
 }
 
 #[cfg(test)]

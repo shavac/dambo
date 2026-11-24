@@ -1,4 +1,4 @@
-# dambo（弹宝） — AI 时代的弹幕平台
+# dambo（弹宝） — AI 动力的直播插件平台
 
 [简体中文](README.md) | [English](README.en.md)
 
