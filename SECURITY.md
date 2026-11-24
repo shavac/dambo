@@ -14,5 +14,5 @@ Please include:
 
 ## Sensitive Data Reminder
 
-- Never attach `var/session.json`, `SESSDATA`, `bili_jct`, or `*_raw.jsonl` files containing personal cookies or private session tokens to public issues or pull requests.
+- Never attach `var/dambo.redb` (or legacy `var/session.json`), `SESSDATA`, `bili_jct`, or `*_raw.jsonl` files containing personal cookies or private session tokens to public issues or pull requests.
 

@@ -7,7 +7,7 @@ Thumbs.db
 .idea/
 *.swp
 
-# --- 运行时数据（state.json, session.json, logs, records）---
+# --- 运行时数据（dambo.redb, logs, records）---
 var/
 logs
 logs/

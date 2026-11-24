@@ -385,7 +385,7 @@ async fn fetch_active_super_chats(
 pub struct CollectorContext {
     pub auth: Arc<AuthManager>,
     pub hub: Arc<StateHub>,
-    pub recorder: Arc<std::sync::Mutex<Recorder>>,
+    pub recorder: Arc<Recorder>,
     pub event_engine: Arc<EventEngine>,
     pub avatar_cache_size: usize,
 }
@@ -393,6 +393,7 @@ pub struct CollectorContext {
 struct ActiveCollector {
     room_id: u64,
     cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 struct CollectorSessionState {
@@ -406,6 +407,7 @@ struct CollectorSessionState {
 pub struct CollectorManager {
     raw_tx: broadcast::Sender<RawBiliEvent>,
     active: Mutex<Option<ActiveCollector>>,
+    retired_handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     http: reqwest::Client,
     root_cancel: CancellationToken,
 }
@@ -431,6 +433,7 @@ impl CollectorManager {
         Self {
             raw_tx,
             active: Mutex::new(None),
+            retired_handles: Mutex::new(Vec::new()),
             http,
             root_cancel,
         }
@@ -439,6 +442,25 @@ impl CollectorManager {
     /// Synchronously signal all active and future collector loops to stop.
     pub fn shutdown(&self) {
         self.root_cancel.cancel();
+    }
+
+    /// Signal all active collector tasks to stop and wait briefly for spawned tasks to exit
+    /// so shared handles (such as `AuthManager`'s `redb::Database`) are released cleanly.
+    pub async fn shutdown_and_wait(&self) {
+        self.shutdown();
+        let mut handles = Vec::new();
+        {
+            let mut guard = self.active.lock().await;
+            if let Some(prev) = guard.take() {
+                prev.cancel.cancel();
+                handles.push(prev.handle);
+            }
+            let mut retired = self.retired_handles.lock().await;
+            handles.append(&mut *retired);
+        }
+        for handle in handles {
+            let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<RawBiliEvent> {
@@ -464,10 +486,16 @@ impl CollectorManager {
         let mut guard = self.active.lock().await;
         if let Some(prev) = guard.take() {
             prev.cancel.cancel();
+            let mut retired = self.retired_handles.lock().await;
+            retired.retain(|h| !h.is_finished());
+            retired.push(prev.handle);
         }
 
-        if let Ok(mut rec) = ctx.recorder.lock() {
-            let _ = rec.finish_session();
+        if let Err(e) = ctx.recorder.finish_session() {
+            log::warn!(
+                "Failed to finish recorder session before room switch: {}",
+                e
+            );
         }
 
         if input_room_id == 0 {
@@ -488,7 +516,7 @@ impl CollectorManager {
         ctx.hub
             .reset_room(input_room_id, String::new(), String::new(), false, false);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut attempt: u32 = 0;
             let mut initialized_room = false;
             let mut cached_buvid3 = String::new();
@@ -542,9 +570,7 @@ impl CollectorManager {
                 if !initialized_room {
                     initialized_room = true;
                     let now_ms = now_unix_ms();
-                    if let Ok(mut rec) = ctx.recorder.lock()
-                        && let Err(e) = rec.open_or_continue_session(&meta, now_ms)
-                    {
+                    if let Err(e) = ctx.recorder.open_or_continue_session(&meta, now_ms) {
                         log::error!("Failed to open recorder for room {}: {}", meta.room_id, e);
                     }
                     ctx.event_engine.set_room(meta.room_id, meta.uname.clone());
@@ -702,6 +728,7 @@ impl CollectorManager {
         *guard = Some(ActiveCollector {
             room_id: input_room_id,
             cancel,
+            handle,
         });
     }
 
@@ -710,6 +737,9 @@ impl CollectorManager {
         let mut guard = self.active.lock().await;
         if let Some(prev) = guard.take() {
             prev.cancel.cancel();
+            let mut retired = self.retired_handles.lock().await;
+            retired.retain(|h| !h.is_finished());
+            retired.push(prev.handle);
         }
         hub.reset_room(0, String::new(), String::new(), false, false);
     }
@@ -721,7 +751,7 @@ fn run_blocking_blivedm_session(
     buvid3: &str,
     cancel: CancellationToken,
     hub: Arc<StateHub>,
-    recorder: Arc<std::sync::Mutex<Recorder>>,
+    recorder: Arc<Recorder>,
     raw_tx: broadcast::Sender<RawBiliEvent>,
 ) -> (
     std::result::Result<bool, (String, bool)>,
@@ -845,17 +875,12 @@ fn run_blocking_blivedm_session(
                     last_heartbeat = TokioInstant::now();
                 }
 
-                let record_raw_enabled = recorder
-                    .lock()
-                    .map(|r| r.is_record_raw_enabled())
-                    .unwrap_or(false);
+                let record_raw_enabled = recorder.is_record_raw_enabled();
 
                 for val in &jsons {
                     if record_raw_enabled {
                         let enriched = enrich_raw_json_with_pb_decoded(val);
-                        if let Ok(mut rec) = recorder.lock()
-                            && let Err(e) = rec.record_raw_json(&enriched)
-                        {
+                        if let Err(e) = recorder.record_raw_value(enriched) {
                             log::error!("Raw packet capture write failed: {}", e);
                         }
                     }

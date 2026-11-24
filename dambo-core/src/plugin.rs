@@ -141,7 +141,10 @@ fn parse_version_str(raw: &str) -> Option<Vec<u64>> {
 
 /// Normalize a JSON `version` field into `(canonical_version, major_version)`.
 /// Missing/empty/invalid values degrade safely to `("0", 0)`.
-pub fn normalize_version_value(raw: Option<&serde_json::Value>, plugin_name: &str) -> (String, u64) {
+pub fn normalize_version_value(
+    raw: Option<&serde_json::Value>,
+    plugin_name: &str,
+) -> (String, u64) {
     let segs = match raw {
         None | Some(serde_json::Value::Null) => vec![0],
         Some(serde_json::Value::Number(n)) => {
@@ -421,8 +424,7 @@ impl PluginRegistry {
                 .iter()
                 .filter(|p| p.namedomain == target)
                 .max_by(|a, b| {
-                    compare_version_strs(&a.version, &b.version)
-                        .then_with(|| b.name.cmp(&a.name))
+                    compare_version_strs(&a.version, &b.version).then_with(|| b.name.cmp(&a.name))
                 })
                 .cloned();
         }
@@ -635,7 +637,10 @@ mod tests {
         assert_eq!(list[0].display_title(), "OBS 弹幕");
         assert_eq!(list[0].obs_width, Some(420));
         assert_eq!(list[0].obs_height, Some(720));
-        assert_eq!(list[0].defaults.get("timeout"), Some(&serde_json::json!(300)));
+        assert_eq!(
+            list[0].defaults.get("timeout"),
+            Some(&serde_json::json!(300))
+        );
 
         assert!(list[1].is_builtin);
         assert!(!list[1].has_custom_manage);

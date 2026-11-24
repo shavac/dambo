@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod collector;
 pub mod config;
+pub mod db;
 pub mod event_engine;
 pub mod hub;
 pub mod model;
@@ -81,19 +82,22 @@ pub struct DamboRuntime {
     pub html_dir: PathBuf,
     pub rec_dir: PathBuf,
     pub log_dir: PathBuf,
-    pub plugin_db_path: PathBuf,
+    pub db_path: PathBuf,
     pub config: Arc<Config>,
     pub state_store: Arc<StateStore>,
+    pub plugin_store: Arc<PluginStore>,
     pub plugins: Arc<PluginRegistry>,
     pub plugin_hub: Arc<PluginEventHub>,
     pub admin_sessions: Arc<AdminSessionStore>,
     pub auth: Arc<AuthManager>,
     pub collector: Arc<CollectorManager>,
-    pub recorder: Arc<Mutex<Recorder>>,
+    pub recorder: Arc<Recorder>,
     pub hub: Arc<StateHub>,
     pub event_engine: Arc<EventEngine>,
     startup_auto_connect: Arc<AtomicBool>,
+    loopback_accessible: Arc<AtomicBool>,
     last_danmaku_sent_at: Mutex<Option<Instant>>,
+    service_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
 }
 
@@ -110,47 +114,64 @@ impl DamboRuntime {
 
         let base_dir = resolve_base_dir(&cfg_path);
 
-        Ok(Self::from_parts(manager, base_dir, cfg))
+        Self::from_parts(manager, base_dir, cfg)
     }
 
-    pub fn from_parts(config_manager: ConfigManager, base_dir: PathBuf, cfg: Config) -> Self {
-        let session_path = resolve_path(&base_dir, &cfg.bilibili.session_file);
-        let state_path = resolve_path(&base_dir, &cfg.server.state_file);
-        let plugin_db_path = resolve_path(&base_dir, &cfg.server.plugin_db_file);
+    pub fn from_parts(
+        config_manager: ConfigManager,
+        base_dir: PathBuf,
+        cfg: Config,
+    ) -> Result<Self> {
+        let legacy_session_path = resolve_path(&base_dir, &cfg.bilibili.session_file);
+        let legacy_state_path = resolve_path(&base_dir, &cfg.server.state_file);
+        let db_path = resolve_path(&base_dir, &cfg.server.db_file);
+        let legacy_plugin_db = (cfg.server.db_file == crate::config::DEFAULT_DB_FILE)
+            .then(|| resolve_path(&base_dir, crate::config::LEGACY_PLUGIN_DB_FILE));
         let html_dir = resolve_path(&base_dir, &cfg.server.html_dir);
         let rec_dir = resolve_path(&base_dir, &cfg.record.dir);
         let log_dir = resolve_path(&base_dir, &cfg.log.path);
 
-        let state_store = Arc::new(StateStore::load_or_default(state_path));
+        let db = db::open_runtime_database(&db_path, legacy_plugin_db.as_deref())?;
+        let state_store = Arc::new(StateStore::from_db(
+            db.clone(),
+            db_path.clone(),
+            Some(&legacy_state_path),
+        ));
         let startup_auto_connect = Arc::new(AtomicBool::new(
             state_store.current_room_id().is_some_and(|id| id > 0) || cfg.bilibili.room_id > 0,
         ));
         let effective_record_raw = state_store.record_raw().unwrap_or(cfg.record.record_raw);
+        let plugin_store = Arc::new(PluginStore::from_database(db.clone())?);
         let plugins = Arc::new(PluginRegistry::new(html_dir.clone()));
         let plugin_hub = Arc::new(PluginEventHub::new());
         let admin_sessions = Arc::new(AdminSessionStore::new());
 
         let cancel = CancellationToken::new();
-        let auth = Arc::new(AuthManager::new(session_path));
+        let auth = Arc::new(AuthManager::from_db(db, Some(&legacy_session_path)));
         let collector = Arc::new(CollectorManager::with_cancel(cancel.child_token()));
-        let recorder = Arc::new(Mutex::new(Recorder::new(
+        let recorder = Arc::new(Recorder::new(
             cfg.record.enabled,
             effective_record_raw,
             rec_dir.clone(),
             cfg.record.filename_pattern.clone(),
-        )));
+        ));
         let hub = Arc::new(StateHub::new(&cfg.feed));
         let event_engine = Arc::new(EventEngine::new(&cfg.event));
+        let initial_bind_addr = resolve_bind_addr(&cfg.server.host, cfg.server.port);
+        let loopback_accessible = Arc::new(AtomicBool::new(
+            initial_bind_addr.ip().is_loopback() || initial_bind_addr.ip().is_unspecified(),
+        ));
 
-        Self {
+        Ok(Self {
             config_manager,
             base_dir,
             html_dir,
             rec_dir,
             log_dir,
-            plugin_db_path,
+            db_path,
             config: Arc::new(cfg),
             state_store,
+            plugin_store,
             plugins,
             plugin_hub,
             admin_sessions,
@@ -160,37 +181,33 @@ impl DamboRuntime {
             hub,
             event_engine,
             startup_auto_connect,
+            loopback_accessible,
             last_danmaku_sent_at: Mutex::new(None),
+            service_tasks: Mutex::new(Vec::new()),
             cancel,
-        }
+        })
+    }
+
+    /// Returns whether local loopback access (`localhost` / `127.0.0.1` / `[::1]`) is bound for HTTP/WS services.
+    pub fn is_loopback_accessible(&self) -> bool {
+        self.loopback_accessible.load(Ordering::Acquire)
     }
 
     /// Returns whether sidecar `*_raw.jsonl` packet capture is currently enabled.
     pub fn is_record_raw_enabled(&self) -> bool {
-        self.recorder
-            .lock()
-            .map(|r| r.is_record_raw_enabled())
-            .unwrap_or_else(|_| {
-                self.state_store
-                    .record_raw()
-                    .unwrap_or(self.config.record.record_raw)
-            })
+        self.recorder.is_record_raw_enabled()
     }
 
-    /// Update and atomically persist the runtime `record_raw` toggle into `var/state.json`.
+    /// Update and atomically persist the runtime `record_raw` toggle into `redb`.
     pub fn set_record_raw(&self, enabled: bool) -> Result<()> {
-        if let Ok(mut rec) = self.recorder.lock() {
-            rec.set_record_raw(enabled);
-        }
+        self.recorder.set_record_raw(enabled);
         self.state_store.set_record_raw(Some(enabled))?;
         Ok(())
     }
 
     /// Per-process in-memory override for `[record].record_raw` (e.g. CLI `--record-raw`).
     pub fn set_record_raw_override(&self, enabled: bool) {
-        if let Ok(mut rec) = self.recorder.lock() {
-            rec.set_record_raw(enabled);
-        }
+        self.recorder.set_record_raw(enabled);
     }
 
     /// Start isomorphic dispatcher, `EventEngine` loop, Axum HTTP/WS server,
@@ -199,7 +216,7 @@ impl DamboRuntime {
         self.start_with_room_override(None).await
     }
 
-    /// Start runtime services with an optional CLI room override taking precedence over `state.json`.
+    /// Start runtime services with an optional CLI room override taking precedence over persisted state.
     pub async fn start_with_room_override(&self, room_override: Option<&str>) -> Result<()> {
         // 1. Isomorphic dispatcher: Collector -> Recorder + StateHub (/ws) + EventEngine (/ws/event)
         let mut raw_rx = self.collector.subscribe();
@@ -209,7 +226,7 @@ impl DamboRuntime {
         let state_store = self.state_store.clone();
         let tap_cancel = self.cancel.child_token();
 
-        tokio::spawn(async move {
+        let dispatch_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = tap_cancel.cancelled() => break,
@@ -223,9 +240,7 @@ impl DamboRuntime {
 
                                 let standard_ev = ev.sanitized_for_standard_stream();
 
-                                if let Ok(mut rec) = recorder.lock()
-                                    && let Err(e) = rec.record_event(&standard_ev)
-                                {
+                                if let Err(e) = recorder.record_sanitized_event(standard_ev.clone()) {
                                     log::error!("Recorder write failed: {}", e);
                                 }
 
@@ -276,12 +291,11 @@ impl DamboRuntime {
         // 2. Event Engine loop
         let event_runner = self.event_engine.clone();
         let event_cancel = self.cancel.child_token();
-        tokio::spawn(async move {
+        let engine_handle = tokio::spawn(async move {
             event_runner.run(event_cancel).await;
         });
 
         // 3. Plugin hot watcher, storage DB, SSE hub & Axum HTTP/WS server
-        let plugin_store = Arc::new(PluginStore::open(self.plugin_db_path.clone())?);
         if let Err(e) = self.plugins.start_watching(self.cancel.child_token()) {
             log::warn!("Plugin directory watcher disabled: {}", e);
         }
@@ -292,7 +306,7 @@ impl DamboRuntime {
         let app_state = Arc::new(AppState {
             config: self.config.clone(),
             plugins: self.plugins.clone(),
-            plugin_store,
+            plugin_store: self.plugin_store.clone(),
             plugin_hub: self.plugin_hub.clone(),
             admin_sessions: self.admin_sessions.clone(),
             hub: self.hub.clone(),
@@ -301,13 +315,23 @@ impl DamboRuntime {
             cancel: self.cancel.child_token(),
         });
         let srv_cancel = self.cancel.child_token();
-        tokio::spawn(async move {
-            if let Err(e) = server::serve(app_state, addr, srv_cancel).await {
+        let loopback_flag = self.loopback_accessible.clone();
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) =
+                server::serve_with_loopback_flag(app_state, addr, srv_cancel, Some(loopback_flag))
+                    .await
+            {
                 log::error!("Server stopped with error: {}", e);
             }
         });
 
-        // 4. Auto-connect: CLI override > persisted state.json current_room_id > static config.bilibili.room_id
+        if let Ok(mut tasks) = self.service_tasks.lock() {
+            tasks.push(dispatch_handle);
+            tasks.push(engine_handle);
+            tasks.push(server_handle);
+        }
+
+        // 4. Auto-connect: CLI override > persisted current_room_id > static config.bilibili.room_id
         let connect_result = if let Some(raw) = room_override {
             match self.switch_room(raw).await {
                 Ok(room_id) => {
@@ -344,8 +368,8 @@ impl DamboRuntime {
                 .context("Failed to persist room switch")?;
         }
 
-        if let Ok(mut rec) = self.recorder.lock() {
-            let _ = rec.finish_session();
+        if let Err(e) = self.recorder.finish_session() {
+            log::warn!("Failed to finish recorder session before connect: {}", e);
         }
 
         self.event_engine.set_room(room_id, String::new());
@@ -364,9 +388,7 @@ impl DamboRuntime {
         self.startup_auto_connect.store(false, Ordering::Release);
         self.collector.disconnect(self.hub.clone()).await;
         self.event_engine.set_room(0, String::new());
-        if let Ok(mut rec) = self.recorder.lock() {
-            rec.finish_session()?;
-        }
+        self.recorder.finish_session()?;
 
         self.state_store.set_current_room(None)?;
         Ok(())
@@ -479,9 +501,23 @@ impl DamboRuntime {
     pub fn shutdown(&self) {
         self.cancel.cancel();
         self.collector.shutdown();
-        if let Ok(mut rec) = self.recorder.lock() {
-            let _ = rec.finish_session();
+        if let Err(e) = self.recorder.finish_session() {
+            log::warn!("Failed to finish recorder session during shutdown: {}", e);
         }
+    }
+
+    /// Cancel all runtime tasks and wait briefly for background loops to exit cleanly.
+    pub async fn shutdown_and_wait(&self) {
+        self.shutdown();
+        let tasks = if let Ok(mut guard) = self.service_tasks.lock() {
+            std::mem::take(&mut *guard)
+        } else {
+            Vec::new()
+        };
+        for handle in tasks {
+            let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        }
+        self.collector.shutdown_and_wait().await;
     }
 }
 
@@ -539,7 +575,7 @@ mod tests {
 
         // Cancel live collector network loop so tests never depend on external network
         rt.collector.disconnect(rt.hub.clone()).await;
-        rt.recorder.lock().unwrap().close().unwrap();
+        rt.recorder.close().unwrap();
         if rt.rec_dir.exists() {
             let _ = fs::remove_dir_all(&rt.rec_dir);
         }
@@ -654,16 +690,24 @@ mod tests {
         // Ensure etc/config.toml stays strictly read-only on disk
         assert_eq!(fs::read_to_string(&cfg_path).unwrap(), raw_toml);
 
-        // Reloading a fresh runtime recovers locale, current_room_id, history, and record_raw from var/state.json
+        let rec_dir = rt.rec_dir.clone();
+        rt.shutdown_and_wait().await;
+        drop(rt);
+
+        // Runtime persisted state is stored in var/dambo.redb, not var/state.json
+        assert!(temp_dir.join("var/dambo.redb").exists());
+        assert!(!temp_dir.join("var/state.json").exists());
+
+        // Reloading a fresh runtime recovers locale, current_room_id, history, and record_raw from redb
         let rt_reloaded = DamboRuntime::from_config_path(&cfg_path).unwrap();
         assert_eq!(rt_reloaded.state_store.locale().as_deref(), Some("ja"));
         assert_eq!(rt_reloaded.state_store.current_room_id(), Some(21452505));
         assert!(rt_reloaded.is_record_raw_enabled());
-
-        rt.shutdown();
+        rt_reloaded.shutdown_and_wait().await;
+        drop(rt_reloaded);
 
         // Recorder captured room_info + like + superchat + session_end
-        let rec_files: Vec<_> = fs::read_dir(&rt.rec_dir)
+        let rec_files: Vec<_> = fs::read_dir(&rec_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
@@ -767,8 +811,10 @@ mod tests {
         let snap = rt.hub.snapshot();
         assert_eq!(snap.items.len(), 2);
 
-        rt.shutdown();
-        let rec_files: Vec<_> = fs::read_dir(&rt.rec_dir)
+        rt.shutdown_and_wait().await;
+        let rec_dir = rt.rec_dir.clone();
+        drop(rt);
+        let rec_files: Vec<_> = fs::read_dir(&rec_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
@@ -795,17 +841,24 @@ mod tests {
         assert!(!rt.initial_ui_state().connecting);
 
         rt.state_store.set_current_room(Some(21465419)).unwrap();
+        rt.shutdown_and_wait().await;
+        drop(rt);
+
         let rt_resumed = DamboRuntime::from_config_path(&cfg_path).unwrap();
         assert!(rt_resumed.initial_ui_state().connecting);
 
         rt_resumed.disconnect_room().await.unwrap();
         assert!(!rt_resumed.initial_ui_state().connecting);
+        rt_resumed.shutdown_and_wait().await;
+        drop(rt_resumed);
 
         fs::write(&cfg_path, "[bilibili]\nroom_id = 777\n").unwrap();
         let rt_static = DamboRuntime::from_config_path(&cfg_path).unwrap();
         assert!(rt_static.initial_ui_state().connecting);
         rt_static.disconnect_room().await.unwrap();
         assert!(!rt_static.initial_ui_state().connecting);
+        rt_static.shutdown_and_wait().await;
+        drop(rt_static);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -824,13 +877,139 @@ mod tests {
 
         let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
         assert!(!rt.cancel.is_cancelled());
-        rt.shutdown();
+        rt.shutdown_and_wait().await;
         assert!(rt.cancel.is_cancelled());
 
         // Calling switch_room after shutdown must not spawn a new active collector loop.
         rt.switch_room("21452505").await.unwrap();
         assert_eq!(rt.collector.active_room_id().await, 0);
+        drop(rt);
 
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_migrates_legacy_json_and_plugins_redb() {
+        use crate::plugin_store::StoreKind;
+        use crate::plugin_types::WriteEntryInput;
+        use std::collections::BTreeMap;
+
+        let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_dir =
+            std::env::temp_dir().join(format!("dambo_rt_migrate_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("etc")).unwrap();
+        fs::create_dir_all(temp_dir.join("var")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/default")).unwrap();
+
+        // Seed legacy var/plugins.redb with one persisted KV entry
+        let legacy_plugin_db = temp_dir.join("var/plugins.redb");
+        {
+            let store = PluginStore::open(legacy_plugin_db.clone()).unwrap();
+            store
+                .put_entry(
+                    "game24@1",
+                    "game24@1",
+                    StoreKind::Persist,
+                    "scores",
+                    "player1",
+                    WriteEntryInput {
+                        data_type: None,
+                        value: serde_json::json!(42),
+                        meta: None,
+                    },
+                    &BTreeMap::new(),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(legacy_plugin_db.exists());
+
+        // Seed legacy var/session.json and var/state.json
+        let legacy_session = temp_dir.join("var/session.json");
+        fs::write(
+            &legacy_session,
+            r#"{"SESSDATA":"sess_mig","bili_jct":"jct_mig","DedeUserID":"123456","uname":"MigratedUser","face":""}"#,
+        )
+        .unwrap();
+
+        let legacy_state = temp_dir.join("var/state.json");
+        fs::write(
+            &legacy_state,
+            r#"{
+                "current_room_id": 21452505,
+                "locale": "ja_JP",
+                "record_raw": true,
+                "room_history": [
+                    {"room_id": 21452505, "uname": "LegacyStreamer", "title": "LegacyStream", "last_used_at": 1700000000}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let cfg_path = temp_dir.join("etc/config.toml");
+        fs::write(
+            &cfg_path,
+            "[bilibili]\nroom_id = 0\nsession_file = \"var/session.json\"\n[server]\nstate_file = \"var/state.json\"\n",
+        )
+        .unwrap();
+
+        let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        assert!(temp_dir.join("var/dambo.redb").exists());
+        assert!(!legacy_plugin_db.exists());
+        assert!(!legacy_session.exists());
+        assert!(!legacy_state.exists());
+
+        assert!(rt.auth.current_state().is_login);
+        assert_eq!(rt.auth.current_state().mid, 123456);
+        assert_eq!(rt.auth.current_state().uname, "MigratedUser");
+
+        let snap = rt.state_store.snapshot();
+        assert_eq!(snap.current_room_id, Some(21452505));
+        assert_eq!(snap.locale.as_deref(), Some("ja"));
+        assert_eq!(snap.record_raw, Some(true));
+        assert_eq!(snap.room_history.len(), 1);
+        assert_eq!(snap.room_history[0].uname, "LegacyStreamer");
+
+        let kv = rt
+            .plugin_store
+            .get_entry(
+                "game24@1",
+                "game24@1",
+                StoreKind::Persist,
+                "scores",
+                "player1",
+                &BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(kv.value, serde_json::json!(42));
+
+        // Logout must persist across restart and not resurrect from legacy session.json
+        rt.auth.logout().unwrap();
+        rt.shutdown_and_wait().await;
+        drop(rt);
+
+        let rt_reopened = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        assert!(!rt_reopened.auth.current_state().is_login);
+        assert_eq!(rt_reopened.state_store.current_room_id(), Some(21452505));
+        assert_eq!(rt_reopened.state_store.locale().as_deref(), Some("ja"));
+        let kv_after = rt_reopened
+            .plugin_store
+            .get_entry(
+                "game24@1",
+                "game24@1",
+                StoreKind::Persist,
+                "scores",
+                "player1",
+                &BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(kv_after.value, serde_json::json!(42));
+
+        rt_reopened.shutdown_and_wait().await;
+        drop(rt_reopened);
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

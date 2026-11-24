@@ -4,35 +4,64 @@ use crate::plugin_hub::{
     AcceptedTopic, AcceptedWatch, PluginEventHub, RejectedSub, RequesterDisplay, SseOutbound,
     TopicSubInput, WatchSubInput, evaluate_subscriptions, resolve_requester_display,
 };
-use crate::plugin_store::{AclLevel, AclRecord, ConfigEntryView, StoreKind, TopicMeta, parse_defaults_map};
+use crate::plugin_store::{
+    AclLevel, AclRecord, ConfigEntryView, StoreKind, TopicMeta, parse_defaults_map,
+};
 use crate::plugin_types::{
     PluginApiError, TypedEntry, WriteEntryInput, is_valid_key, parse_acl_resource,
 };
 use crate::server::AppState;
+use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, OriginalUri, Path as AxumPath, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, OriginalUri, Path as AxumPath, Query, State};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use axum::Json;
 use futures_util::stream::{self, Stream};
 use http::{HeaderMap, HeaderValue, Method, Request, header};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const ADMIN_COOKIE_NAME: &str = "dambo_admin";
 
-/// In-memory store holding process-scoped random `dambo_admin` session tokens.
+/// Maximum concurrent process-scoped `dambo_admin` cookies retained in memory.
+pub const MAX_ADMIN_SESSIONS: usize = 64;
+
+/// Maximum lifetime of a process-scoped `dambo_admin` session token (24 hours).
+pub const ADMIN_SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Maximum failed `admin_token` attempts allowed per source IP within [`AUTH_FAILURE_WINDOW`].
+pub const AUTH_MAX_FAILURES: usize = 5;
+
+/// Sliding window for `admin_token` authentication throttling.
+pub const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Cap on distinct client IPs tracked by the auth failure limiter to bound memory.
+const MAX_TRACKED_AUTH_IPS: usize = 1024;
+
+/// Maximum number of entries allowed in a single `POST .../mset` batch.
+pub const MAX_MSET_ENTRIES: usize = 256;
+
+/// HTTP body size cap applied across `/api/v1/*` routes (`2 MB`).
+pub const API_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// In-memory store holding bounded, TTL-expiring `dambo_admin` session tokens
+/// and per-IP failed `admin_token` authentication rate-limit state.
 pub struct AdminSessionStore {
-    sessions: RwLock<HashSet<String>>,
+    sessions: RwLock<HashMap<String, (Instant, u64)>>,
+    max_sessions: usize,
+    ttl: Duration,
+    auth_failures: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
+    auth_max_failures: usize,
+    auth_failure_window: Duration,
     counter: AtomicU64,
 }
 
@@ -44,16 +73,50 @@ impl Default for AdminSessionStore {
 
 impl AdminSessionStore {
     pub fn new() -> Self {
+        Self::with_limits(
+            MAX_ADMIN_SESSIONS,
+            ADMIN_SESSION_TTL,
+            AUTH_MAX_FAILURES,
+            AUTH_FAILURE_WINDOW,
+        )
+    }
+
+    pub fn with_limits(
+        max_sessions: usize,
+        ttl: Duration,
+        auth_max_failures: usize,
+        auth_failure_window: Duration,
+    ) -> Self {
         Self {
-            sessions: RwLock::new(HashSet::new()),
+            sessions: RwLock::new(HashMap::new()),
+            max_sessions: max_sessions.max(1),
+            ttl,
+            auth_failures: Mutex::new(HashMap::new()),
+            auth_max_failures: auth_max_failures.max(1),
+            auth_failure_window,
             counter: AtomicU64::new(1),
         }
     }
 
     pub fn mint(&self) -> String {
         let token = generate_random_hex_token(&self.counter);
+        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
+        let now = Instant::now();
         if let Ok(mut guard) = self.sessions.write() {
-            guard.insert(token.clone());
+            guard
+                .retain(|_, (created_at, _)| now.saturating_duration_since(*created_at) < self.ttl);
+            while guard.len() >= self.max_sessions {
+                let oldest_key = guard
+                    .iter()
+                    .min_by_key(|(_, (created_at, order))| (*created_at, *order))
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = oldest_key {
+                    guard.remove(&k);
+                } else {
+                    break;
+                }
+            }
+            guard.insert(token.clone(), (now, seq));
         }
         token
     }
@@ -62,10 +125,96 @@ impl AdminSessionStore {
         if token.is_empty() {
             return false;
         }
+        let now = Instant::now();
         self.sessions
             .read()
-            .map(|guard| guard.contains(token))
+            .map(|guard| {
+                guard.get(token).is_some_and(|(created_at, _)| {
+                    now.saturating_duration_since(*created_at) < self.ttl
+                })
+            })
             .unwrap_or(false)
+    }
+
+    /// Check whether `peer_ip` has exceeded recent `admin_token` failure limits, returning
+    /// `Err(retry_after_secs)` when throttled.
+    pub fn check_auth_rate_limit(&self, peer_ip: Option<IpAddr>) -> Result<(), u64> {
+        let ip = peer_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let now = Instant::now();
+        let Ok(mut guard) = self.auth_failures.lock() else {
+            return Ok(());
+        };
+        let Some(queue) = guard.get_mut(&ip) else {
+            return Ok(());
+        };
+        while let Some(&front) = queue.front() {
+            if now.saturating_duration_since(front) >= self.auth_failure_window {
+                queue.pop_front();
+            } else {
+                break;
+            }
+        }
+        if queue.is_empty() {
+            guard.remove(&ip);
+            return Ok(());
+        }
+        if queue.len() >= self.auth_max_failures
+            && let Some(&oldest) = queue.front()
+        {
+            let remaining = self
+                .auth_failure_window
+                .saturating_sub(now.saturating_duration_since(oldest));
+            return Err(remaining.as_secs().max(1));
+        }
+        Ok(())
+    }
+
+    /// Record a failed `admin_token` attempt for `peer_ip`.
+    pub fn record_auth_failure(&self, peer_ip: Option<IpAddr>) {
+        let ip = peer_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let now = Instant::now();
+        let Ok(mut guard) = self.auth_failures.lock() else {
+            return;
+        };
+        if !guard.contains_key(&ip) && guard.len() >= MAX_TRACKED_AUTH_IPS {
+            guard.retain(|_, q| {
+                while let Some(&front) = q.front() {
+                    if now.saturating_duration_since(front) >= self.auth_failure_window {
+                        q.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                !q.is_empty()
+            });
+            if guard.len() >= MAX_TRACKED_AUTH_IPS {
+                let oldest_ip = guard
+                    .iter()
+                    .min_by_key(|(_, q)| q.back().copied().unwrap_or(now))
+                    .map(|(k, _)| *k);
+                if let Some(victim) = oldest_ip {
+                    guard.remove(&victim);
+                }
+            }
+        }
+
+        let queue = guard.entry(ip).or_default();
+        while let Some(&front) = queue.front() {
+            if now.saturating_duration_since(front) >= self.auth_failure_window {
+                queue.pop_front();
+            } else {
+                break;
+            }
+        }
+        queue.push_back(now);
+    }
+
+    /// Clear recorded failure history for `peer_ip` upon successful unlock.
+    pub fn clear_auth_failures(&self, peer_ip: Option<IpAddr>) {
+        let ip = peer_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        if let Ok(mut guard) = self.auth_failures.lock() {
+            guard.remove(&ip);
+        }
     }
 }
 
@@ -156,9 +305,7 @@ pub fn configured_admin_token(cfg: &ServerConfig) -> Option<&str> {
 
 fn is_loopback_host_label(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 fn is_non_public_lan_or_tailnet_ip(ip: IpAddr) -> bool {
@@ -337,7 +484,9 @@ fn validate_same_origin_write(headers: &HeaderMap) -> Result<(), PluginApiError>
             .to_str()
             .map_err(|_| PluginApiError::forbidden_origin("Invalid Origin header"))?;
         if raw_origin == "null" {
-            return Err(PluginApiError::forbidden_origin("Opaque 'null' Origin rejected"));
+            return Err(PluginApiError::forbidden_origin(
+                "Opaque 'null' Origin rejected",
+            ));
         }
         let Some((origin_auth, _)) = parse_url_authority_and_path(raw_origin) else {
             return Err(PluginApiError::forbidden_origin(format!(
@@ -537,7 +686,11 @@ fn optional_caller_plugin(
     };
     let raw = hdr
         .to_str()
-        .map_err(|_| ApiError(PluginApiError::invalid_argument("Invalid 'X-Dambo-Plugin' header")))?
+        .map_err(|_| {
+            ApiError(PluginApiError::invalid_argument(
+                "Invalid 'X-Dambo-Plugin' header",
+            ))
+        })?
         .trim();
     if raw.is_empty() {
         return Ok(None);
@@ -566,10 +719,7 @@ fn resolve_target_plugin(
         })
 }
 
-fn resolve_requester_domain(
-    plugins: &PluginRegistry,
-    requester: &str,
-) -> Result<String, ApiError> {
+fn resolve_requester_domain(plugins: &PluginRegistry, requester: &str) -> Result<String, ApiError> {
     let trimmed = requester.trim();
     if trimmed.contains('@') {
         let Some((id, major_str)) = trimmed.split_once('@') else {
@@ -818,7 +968,10 @@ async fn get_plugin(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = optional_caller_plugin(&headers, &state.plugins)?;
     let target_info = resolve_target_plugin(&state.plugins, caller.as_ref(), &target)?;
-    let topics = state.plugin_store.list_topics(&target_info.namedomain).await?;
+    let topics = state
+        .plugin_store
+        .list_topics(&target_info.namedomain)
+        .await?;
 
     let mut config = None;
     if let Some(ref c) = caller {
@@ -836,7 +989,11 @@ async fn get_plugin(
             config = Some(
                 state
                     .plugin_store
-                    .get_merged_config(&c.namedomain, &target_info.namedomain, &target_info.defaults)
+                    .get_merged_config(
+                        &c.namedomain,
+                        &target_info.namedomain,
+                        &target_info.defaults,
+                    )
                     .await?,
             );
         }
@@ -913,7 +1070,9 @@ async fn data_clear_namespace(
         .clear_namespace(&caller.namedomain, &target_info.namedomain, store, &ns)
         .await?;
     if let Some(m) = mutation {
-        state.plugin_hub.publish_data_changed(&m, &caller.namedomain);
+        state
+            .plugin_hub
+            .publish_data_changed(&m, &caller.namedomain);
     }
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
@@ -980,10 +1139,18 @@ async fn data_delete_key(
 
     let (existed, mutation) = state
         .plugin_store
-        .delete_entry(&caller.namedomain, &target_info.namedomain, store, &ns, &key)
+        .delete_entry(
+            &caller.namedomain,
+            &target_info.namedomain,
+            store,
+            &ns,
+            &key,
+        )
         .await?;
     if let Some(m) = mutation {
-        state.plugin_hub.publish_data_changed(&m, &caller.namedomain);
+        state
+            .plugin_hub
+            .publish_data_changed(&m, &caller.namedomain);
     }
     Ok(Json(serde_json::json!({ "deleted": existed })))
 }
@@ -997,6 +1164,14 @@ async fn data_mset(
     let caller = require_caller_plugin(&headers, &state.plugins)?;
     let store = StoreKind::parse(&store_raw)?;
     let target_info = resolve_target_plugin(&state.plugins, Some(&caller), &owner)?;
+
+    if body.entries.len() > MAX_MSET_ENTRIES {
+        return Err(ApiError(PluginApiError::invalid_argument(format!(
+            "mset batch exceeds maximum {} entries per request (got {})",
+            MAX_MSET_ENTRIES,
+            body.entries.len()
+        ))));
+    }
 
     for k in body.entries.keys() {
         if !is_valid_key(k) {
@@ -1019,7 +1194,9 @@ async fn data_mset(
         )
         .await?;
     if let Some(m) = mutation {
-        state.plugin_hub.publish_data_changed(&m, &caller.namedomain);
+        state
+            .plugin_hub
+            .publish_data_changed(&m, &caller.namedomain);
     }
     Ok(Json(serde_json::json!({ "entries": committed })))
 }
@@ -1067,6 +1244,20 @@ async fn publish_topic(
     Json(body): Json<TopicPublishBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = require_caller_plugin(&headers, &state.plugins)?;
+    let payload_bytes = serde_json::to_vec(&body.payload).map_err(|e| {
+        ApiError(PluginApiError::invalid_argument(format!(
+            "Invalid topic payload JSON: {}",
+            e
+        )))
+    })?;
+    if payload_bytes.len() > crate::plugin_types::MAX_VALUE_BYTES {
+        return Err(ApiError(PluginApiError::quota_exceeded(format!(
+            "Topic payload size {} bytes exceeds maximum {} bytes",
+            payload_bytes.len(),
+            crate::plugin_types::MAX_VALUE_BYTES
+        ))));
+    }
+
     let (meta, demoted) = state
         .plugin_store
         .ensure_topic_for_publish(&caller.namedomain, &name, body.public, body.description)
@@ -1101,7 +1292,11 @@ async fn get_acl(
         let target_info = resolve_target_plugin(&state.plugins, Some(&caller), target)?;
         let chk = state
             .plugin_store
-            .check_effective_acl(&caller.namedomain, &target_info.namedomain, &parsed.canonical())
+            .check_effective_acl(
+                &caller.namedomain,
+                &target_info.namedomain,
+                &parsed.canonical(),
+            )
             .await?;
         return Ok(Json(serde_json::json!({
             "is_self": chk.is_self,
@@ -1272,15 +1467,27 @@ async fn auth_manage(
     let loopback = is_peer_loopback(peer_ip);
     check_remote_manage_allowed(&state.config.server, loopback)?;
 
-    if !loopback {
-        if let Some(expected) = configured_admin_token(&state.config.server) {
-            let provided = body.token.as_deref().map(str::trim).unwrap_or("");
-            if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-                return Err(ApiError(PluginApiError::unauthorized(
-                    "Invalid admin_token",
-                )));
+    if !loopback && let Some(expected) = configured_admin_token(&state.config.server) {
+        if let Err(retry_after) = state.admin_sessions.check_auth_rate_limit(peer_ip) {
+            let err = PluginApiError::too_many_requests(format!(
+                "Too many failed admin_token attempts; retry after {}s",
+                retry_after
+            ))
+            .with_details(serde_json::json!({ "retry_after_secs": retry_after }));
+            let mut res = ApiError(err).into_response();
+            if let Ok(hdr) = HeaderValue::from_str(&retry_after.to_string()) {
+                res.headers_mut().insert(header::RETRY_AFTER, hdr);
             }
+            return Ok(res);
         }
+        let provided = body.token.as_deref().map(str::trim).unwrap_or("");
+        if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            state.admin_sessions.record_auth_failure(peer_ip);
+            return Err(ApiError(PluginApiError::unauthorized(
+                "Invalid admin_token",
+            )));
+        }
+        state.admin_sessions.clear_auth_failures(peer_ip);
     }
 
     let cookie_val = if let Some(existing) = extract_admin_cookie(&headers)
@@ -1393,8 +1600,12 @@ async fn sse_events(
         },
         rejected: sync_res.rejected,
     };
-    let initial_data = serde_json::to_string(&connected_dto)
-        .map_err(|e| ApiError(PluginApiError::internal(format!("JSON encode failed: {}", e))))?;
+    let initial_data = serde_json::to_string(&connected_dto).map_err(|e| {
+        ApiError(PluginApiError::internal(format!(
+            "JSON encode failed: {}",
+            e
+        )))
+    })?;
 
     let initial_event = SseOutbound {
         event: "connected",
@@ -1484,21 +1695,24 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/health", get(health))
         .route("/plugins", get(list_plugins))
         .route("/plugins/{target}", get(get_plugin))
-        .route("/data/{store}/{owner}/namespaces", get(data_list_namespaces))
+        .route(
+            "/data/{store}/{owner}/namespaces",
+            get(data_list_namespaces),
+        )
         .route(
             "/data/{store}/{owner}/ns/{ns}",
             get(data_list_entries).delete(data_clear_namespace),
         )
         .route(
             "/data/{store}/{owner}/ns/{ns}/keys/{key}",
-            get(data_get_key)
-                .put(data_put_key)
-                .delete(data_delete_key),
+            get(data_get_key).put(data_put_key).delete(data_delete_key),
         )
         .route("/data/{store}/{owner}/ns/{ns}/mset", post(data_mset))
         .route(
             "/topics/{name}",
-            put(configure_topic).delete(delete_topic).post(publish_topic),
+            put(configure_topic)
+                .delete(delete_topic)
+                .post(publish_topic),
         )
         .route("/acl", get(get_acl))
         .route("/acl/requests", post(request_acl))
@@ -1508,8 +1722,15 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/auth/manage", post(auth_manage))
         .route("/events", get(sse_events))
-        .route("/events/{client_id}/subscriptions", put(update_sse_subscriptions))
-        .layer(middleware::from_fn_with_state(state, api_security_middleware))
+        .route(
+            "/events/{client_id}/subscriptions",
+            put(update_sse_subscriptions),
+        )
+        .layer(DefaultBodyLimit::max(API_MAX_BODY_BYTES))
+        .layer(middleware::from_fn_with_state(
+            state,
+            api_security_middleware,
+        ))
 }
 
 #[cfg(test)]
@@ -1582,7 +1803,8 @@ mod tests {
             let listener = TcpListener::bind(bind_addr).await.unwrap();
             let addr = listener.local_addr().unwrap();
             let base_url = format!("http://{}", addr);
-            let make_svc = build_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+            let make_svc =
+                build_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
             let srv_cancel = cancel.clone();
             let handle = tokio::spawn(async move {
                 axum::serve(listener, make_svc)
@@ -1718,12 +1940,7 @@ mod tests {
 
         async fn wait_closed(&mut self) {
             tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    match self.res.chunk().await {
-                        Ok(Some(_)) => {}
-                        Ok(None) | Err(_) => break,
-                    }
-                }
+                while let Ok(Some(_)) = self.res.chunk().await {}
             })
             .await
             .expect("SSE stream was not closed in time");
@@ -1991,7 +2208,10 @@ mod tests {
         assert_eq!(ev_name, "connected");
         let client_id = connected["client_id"].as_str().unwrap().to_string();
         assert_eq!(connected["namedomain"], "scoreboard@1");
-        assert_eq!(connected["accepted"]["watches"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            connected["accepted"]["watches"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(connected["accepted"]["topics"].as_array().unwrap().len(), 1);
         assert_eq!(connected["rejected"].as_array().unwrap().len(), 1);
         assert_eq!(connected["rejected"][0]["code"], "ACL_DENIED");
@@ -2106,7 +2326,10 @@ mod tests {
         // Open SSE connections for both owner (game24) and requester (scoreboard)
         let owner_sse = srv
             .client
-            .get(format!("{}/api/v1/events?plugin=game24&mode=manage", srv.base_url))
+            .get(format!(
+                "{}/api/v1/events?plugin=game24&mode=manage",
+                srv.base_url
+            ))
             .send()
             .await
             .unwrap();
@@ -2221,8 +2444,14 @@ mod tests {
             .unwrap();
         assert_eq!(ok_grant.status(), StatusCode::OK);
 
-        assert_eq!(owner_reader.next_event().await.unwrap().1["action"], "granted");
-        assert_eq!(req_reader.next_event().await.unwrap().1["action"], "granted");
+        assert_eq!(
+            owner_reader.next_event().await.unwrap().1["action"],
+            "granted"
+        );
+        assert_eq!(
+            req_reader.next_event().await.unwrap().1["action"],
+            "granted"
+        );
 
         // 7. Scoreboard adds watch on game24 persist:scores via PUT subscriptions & sees live update
         let sub_res = srv
@@ -2269,7 +2498,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_grant.status(), StatusCode::OK);
-        assert_eq!(req_reader.next_event().await.unwrap().1["action"], "revoked");
+        assert_eq!(
+            req_reader.next_event().await.unwrap().1["action"],
+            "revoked"
+        );
 
         srv.client
             .put(format!(
@@ -2298,7 +2530,11 @@ mod tests {
         .await;
         assert!(bad_host_res.contains("403 Forbidden"));
         assert!(bad_host_res.contains("FORBIDDEN_ORIGIN"));
-        assert!(!bad_host_res.to_lowercase().contains("access-control-allow-"));
+        assert!(
+            !bad_host_res
+                .to_lowercase()
+                .contains("access-control-allow-")
+        );
 
         // Cross-origin Origin / Sec-Fetch-Site rejection on write
         let bad_origin = srv
@@ -2338,10 +2574,12 @@ mod tests {
         srv.shutdown().await;
 
         // Non-loopback remote access gate with admin_token & allowed_hosts unit checks
-        let mut remote_cfg = ServerConfig::default();
-        remote_cfg.host = "0.0.0.0".to_string();
-        remote_cfg.admin_token = Some("s3cr3t".to_string());
-        remote_cfg.allowed_hosts = vec!["dambo.local".to_string()];
+        let remote_cfg = ServerConfig {
+            host: "0.0.0.0".to_string(),
+            admin_token: Some("s3cr3t".to_string()),
+            allowed_hosts: vec!["dambo.local".to_string()],
+            ..Default::default()
+        };
 
         let mut lan_headers = HeaderMap::new();
         lan_headers.insert(header::HOST, HeaderValue::from_static("192.168.1.55:3838"));
@@ -2352,8 +2590,10 @@ mod tests {
         assert!(validate_host_header(&lan_headers, &remote_cfg).is_err());
 
         // Remote peer blocked when allow_remote_manage=false & admin_token=None
-        let mut locked_cfg = ServerConfig::default();
-        locked_cfg.host = "0.0.0.0".to_string();
+        let locked_cfg = ServerConfig {
+            host: "0.0.0.0".to_string(),
+            ..Default::default()
+        };
         assert_eq!(
             check_remote_manage_allowed(&locked_cfg, false)
                 .unwrap_err()
@@ -2367,9 +2607,14 @@ mod tests {
         doc_headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
         let remote_ip: IpAddr = "192.168.1.99".parse().unwrap();
         assert!(
-            authorize_and_maybe_mint_manage_cookie(&doc_headers, Some(remote_ip), &remote_cfg, &sessions)
-                .unwrap()
-                .is_none()
+            authorize_and_maybe_mint_manage_cookie(
+                &doc_headers,
+                Some(remote_ip),
+                &remote_cfg,
+                &sessions
+            )
+            .unwrap()
+            .is_none()
         );
 
         // Remote POST /api/v1/auth/manage verifies admin_token (401 on wrong token, 200 + Set-Cookie on match)
@@ -2426,7 +2671,10 @@ mod tests {
 
         let sse_res = srv
             .client
-            .get(format!("{}/api/v1/events?plugin=game24&mode=view", srv.base_url))
+            .get(format!(
+                "{}/api/v1/events?plugin=game24&mode=view",
+                srv.base_url
+            ))
             .send()
             .await
             .unwrap();
@@ -2449,7 +2697,10 @@ mod tests {
         // Reconnect under new namedomain, then delete plugin directory
         let sse_res2 = srv
             .client
-            .get(format!("{}/api/v1/events?plugin=game24&mode=view", srv.base_url))
+            .get(format!(
+                "{}/api/v1/events?plugin=game24&mode=view",
+                srv.base_url
+            ))
             .send()
             .await
             .unwrap();
@@ -2481,7 +2732,11 @@ mod tests {
                 .unwrap();
 
                 fs::create_dir_all(html_dir.join("scoreboard")).unwrap();
-                fs::write(html_dir.join("scoreboard/plugin.html"), "<html>board</html>").unwrap();
+                fs::write(
+                    html_dir.join("scoreboard/plugin.html"),
+                    "<html>board</html>",
+                )
+                .unwrap();
                 fs::write(
                     html_dir.join("scoreboard/plugin.json"),
                     r#"{"plugin_id":"scoreboard","version":"1.0.0","name":"24点计分板"}"#,
@@ -2521,9 +2776,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(manage.status(), StatusCode::OK);
-        assert_eq!(manage.headers().get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
         assert_eq!(
-            manage.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
+            manage.headers().get(header::X_FRAME_OPTIONS).unwrap(),
+            "DENY"
+        );
+        assert_eq!(
+            manage
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .unwrap(),
             "frame-ancestors 'none'"
         );
         let manage_cookie = manage
@@ -2773,6 +3034,112 @@ mod tests {
             .await
             .unwrap();
         reader.assert_closed_or_idle(120).await;
+
+        srv.shutdown().await;
+    }
+
+    #[test]
+    fn test_admin_session_store_capacity_and_ttl() {
+        let store = AdminSessionStore::with_limits(
+            3,
+            Duration::from_millis(60),
+            5,
+            Duration::from_secs(60),
+        );
+        let t1 = store.mint();
+        let t2 = store.mint();
+        let t3 = store.mint();
+        assert!(store.is_valid(&t1));
+        assert!(store.is_valid(&t2));
+        assert!(store.is_valid(&t3));
+
+        // 4th mint evicts oldest (t1)
+        let t4 = store.mint();
+        assert!(!store.is_valid(&t1));
+        assert!(store.is_valid(&t2));
+        assert!(store.is_valid(&t3));
+        assert!(store.is_valid(&t4));
+
+        // Wait past 60ms TTL -> remaining tokens expire
+        std::thread::sleep(Duration::from_millis(75));
+        assert!(!store.is_valid(&t2));
+        assert!(!store.is_valid(&t3));
+        assert!(!store.is_valid(&t4));
+    }
+
+    #[tokio::test]
+    async fn test_auth_manage_rate_limit_mset_cap_and_topic_payload_cap() {
+        let srv = TestServer::start_with_config(
+            |html_dir, cfg| {
+                fs::create_dir_all(html_dir.join("game24")).unwrap();
+                fs::write(html_dir.join("game24/plugin.html"), "<html>game24</html>").unwrap();
+                cfg.server.host = "0.0.0.0".to_string();
+                cfg.server.admin_token = Some("s3cr3t".to_string());
+                cfg.server.allowed_hosts = vec!["dambo.local".to_string()];
+            },
+            "0.0.0.0:0",
+        )
+        .await;
+
+        // mset exceeding MAX_MSET_ENTRIES (256) fails with 400 INVALID_ARGUMENT
+        let mut big_map = serde_json::Map::new();
+        for i in 0..=MAX_MSET_ENTRIES {
+            big_map.insert(format!("k{}", i), json!({ "value": i }));
+        }
+        let mset_res = srv
+            .client
+            .post(format!(
+                "{}/api/v1/data/memory/@self/ns/bulk/mset",
+                srv.base_url
+            ))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({ "entries": big_map }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(mset_res.status(), StatusCode::BAD_REQUEST);
+
+        // Topic payload exceeding MAX_VALUE_BYTES fails with 413 QUOTA_EXCEEDED
+        let giant_str = "x".repeat(crate::plugin_types::MAX_VALUE_BYTES + 128);
+        let topic_res = srv
+            .client
+            .post(format!("{}/api/v1/topics/huge", srv.base_url))
+            .header("X-Dambo-Plugin", "game24")
+            .json(&json!({ "public": true, "payload": { "blob": giant_str } }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(topic_res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // Simulate non-loopback peer IP calls directly through auth_manage handler
+        let call_auth = |ip: [u8; 4], token: &str| {
+            let state = srv.state.clone();
+            let tok = token.to_string();
+            async move {
+                auth_manage(
+                    OptionalPeerIp(Some(IpAddr::V4(ip.into()))),
+                    HeaderMap::new(),
+                    State(state),
+                    Json(AuthManageBody { token: Some(tok) }),
+                )
+                .await
+            }
+        };
+
+        // 5 failed attempts return 401
+        for _ in 0..AUTH_MAX_FAILURES {
+            let err = call_auth([192, 168, 1, 50], "wrong").await.unwrap_err();
+            assert_eq!(err.0.status, StatusCode::UNAUTHORIZED);
+        }
+
+        // 6th attempt from same IP is throttled with 429 + Retry-After
+        let blocked = call_auth([192, 168, 1, 50], "s3cr3t").await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(blocked.headers().contains_key(header::RETRY_AFTER));
+
+        // Different IP is unaffected and succeeds with valid token
+        let other_ip_ok = call_auth([192, 168, 1, 51], "s3cr3t").await.unwrap();
+        assert_eq!(other_ip_ok.status(), StatusCode::OK);
 
         srv.shutdown().await;
     }

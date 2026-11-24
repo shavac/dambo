@@ -403,11 +403,7 @@ impl PluginEventHub {
 
     /// Re-verify all cross-plugin SSE watches and topic subscriptions targeting `owner_namedomain`,
     /// immediately removing any subscription whose ACL was revoked or topic was made private.
-    pub async fn prune_unauthorized_for_owner(
-        &self,
-        store: &PluginStore,
-        owner_namedomain: &str,
-    ) {
+    pub async fn prune_unauthorized_for_owner(&self, store: &PluginStore, owner_namedomain: &str) {
         let candidates: Vec<(String, String, Vec<AcceptedWatch>, Vec<AcceptedTopic>)> = {
             let Ok(map) = self.clients.read() else {
                 return;
@@ -487,7 +483,9 @@ impl PluginEventHub {
                 if let Some(rec) = map.get_mut(&cid) {
                     rec.watches.retain(|w| {
                         !(w.owner == owner_namedomain
-                            && pairs.iter().any(|(s, ns)| *s == w.store && ns == &w.namespace))
+                            && pairs
+                                .iter()
+                                .any(|(s, ns)| *s == w.store && ns == &w.namespace))
                     });
                 }
             }
@@ -637,13 +635,16 @@ pub async fn evaluate_subscriptions(
         };
 
         let allowed = match store
-            .check_effective_acl(caller_namedomain, &target_info.namedomain, &parsed.canonical())
+            .check_effective_acl(
+                caller_namedomain,
+                &target_info.namedomain,
+                &parsed.canonical(),
+            )
             .await
         {
             Ok(chk) => {
                 chk.is_self
-                    || parse_acl_level(&chk.effective_level)
-                        .satisfies(AclLevel::Read, &parsed.kind)
+                    || parse_acl_level(&chk.effective_level).satisfies(AclLevel::Read, &parsed.kind)
             }
             Err(err) => {
                 result.rejected.push(RejectedSub {
@@ -727,7 +728,11 @@ pub async fn evaluate_subscriptions(
         };
 
         let allowed = match store
-            .check_effective_acl(caller_namedomain, &target_info.namedomain, &parsed.canonical())
+            .check_effective_acl(
+                caller_namedomain,
+                &target_info.namedomain,
+                &parsed.canonical(),
+            )
             .await
         {
             Ok(chk) => {

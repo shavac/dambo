@@ -438,6 +438,13 @@ body {
     gap: 4px;
     flex-shrink: 0;
 }
+.plugin-card-actions-row {
+    display: flex;
+    gap: 4px;
+}
+.plugin-card-actions-row .plugin-btn {
+    flex: 1 1 auto;
+}
 
 .plugin-btn {
     height: 22px;

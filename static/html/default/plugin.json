@@ -1,8 +1,74 @@
 {
-  "title": "OBS Danmaku Overlay",
+  "plugin_id": "default",
+  "version": "1.0.0",
+  "name": "OBS 透明弹幕挂件",
   "description": "Default transparent OBS overlay with pinned SuperChat/Guard bar, danmaku stream, and enter dock.",
   "obs": {
     "width": 420,
     "height": 720
+  },
+  "defaults": {
+    "max_items": {
+      "type": "number",
+      "value": 60,
+      "meta": {
+        "min": 10,
+        "max": 200,
+        "step": 5,
+        "format": "integer",
+        "label": "最大保留弹幕条数"
+      }
+    },
+    "max_pin_cards": {
+      "type": "number",
+      "value": 4,
+      "meta": {
+        "min": 0,
+        "max": 10,
+        "step": 1,
+        "format": "integer",
+        "label": "顶部置顶 SC/上舰卡片数",
+        "description": "0 表示隐藏顶部置顶条"
+      }
+    },
+    "show_like": {
+      "type": "bool",
+      "value": false,
+      "meta": {
+        "label": "显示观众点赞提醒"
+      }
+    },
+    "show_enter": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示底部进房停靠栏"
+      }
+    },
+    "enter_ttl_ms": {
+      "type": "number",
+      "value": 3000,
+      "meta": {
+        "min": 1000,
+        "max": 15000,
+        "step": 500,
+        "format": "integer",
+        "label": "进房提示停留时长（毫秒）"
+      }
+    },
+    "show_avatar": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示观众头像"
+      }
+    },
+    "show_medal": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示粉丝牌"
+      }
+    }
   }
 }

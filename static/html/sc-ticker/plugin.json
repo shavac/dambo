@@ -1,8 +1,59 @@
 {
-  "title": "SC & Guard Ticker",
+  "plugin_id": "sc-ticker",
+  "version": "1.0.0",
+  "name": "SC 与大航海卡片",
   "description": "Minimal OBS overlay displaying timed countdown cards exclusively for SuperChat and Guard events.",
   "obs": {
     "width": 420,
     "height": 320
+  },
+  "defaults": {
+    "max_cards": {
+      "type": "number",
+      "value": 8,
+      "meta": {
+        "min": 1,
+        "max": 20,
+        "step": 1,
+        "format": "integer",
+        "label": "同时展示最大卡片数"
+      }
+    },
+    "min_duration_sec": {
+      "type": "number",
+      "value": 5,
+      "meta": {
+        "min": 1,
+        "max": 60,
+        "step": 1,
+        "format": "integer",
+        "label": "最短展示时长（秒）"
+      }
+    },
+    "high_tier_cny": {
+      "type": "number",
+      "value": 100,
+      "meta": {
+        "min": 10,
+        "max": 5000,
+        "step": 10,
+        "format": "integer",
+        "label": "高亮档位阈值（元）"
+      }
+    },
+    "show_guard": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示大航海（舰长/提督/总督）"
+      }
+    },
+    "show_medal": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示粉丝牌"
+      }
+    }
   }
 }

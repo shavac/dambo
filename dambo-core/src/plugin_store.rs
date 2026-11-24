@@ -4,12 +4,11 @@ use crate::plugin_types::{
     is_valid_topic_name, parse_acl_resource, parse_default_entry, serialize_and_check_entry_size,
     validate_schema_definition, validate_value_against,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -22,12 +21,10 @@ pub const ACL_DENY_COOLDOWN_MS: i64 = 5_000;
 /// Reserved namespace under `persist` merged with `plugin.json` `defaults` at read time.
 pub const CONFIG_NAMESPACE: &str = "config";
 
-const KV_DATA_TABLE: TableDefinition<(&str, &str, &str), &[u8]> =
-    TableDefinition::new("kv_data");
+const KV_DATA_TABLE: TableDefinition<(&str, &str, &str), &[u8]> = TableDefinition::new("kv_data");
 const ACL_RECORDS_TABLE: TableDefinition<(&str, &str, &str), &[u8]> =
     TableDefinition::new("acl_records");
-const TOPIC_META_TABLE: TableDefinition<(&str, &str), &[u8]> =
-    TableDefinition::new("topic_meta");
+const TOPIC_META_TABLE: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("topic_meta");
 
 /// Storage class selector (`persist` backed by `redb`, `memory` volatile in-process).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -450,7 +447,10 @@ fn resolve_config_override(
     }
 }
 
-fn check_acl_in_read_txn<R: ReadableTable<(&'static str, &'static str, &'static str), &'static [u8]>, T: ReadableTable<(&'static str, &'static str), &'static [u8]>>(
+fn check_acl_in_read_txn<
+    R: ReadableTable<(&'static str, &'static str, &'static str), &'static [u8]>,
+    T: ReadableTable<(&'static str, &'static str), &'static [u8]>,
+>(
     acl_table: &R,
     topic_table: &T,
     caller_namedomain: &str,
@@ -526,18 +526,14 @@ fn check_acl_in_read_txn<R: ReadableTable<(&'static str, &'static str, &'static 
 }
 
 impl PluginStore {
-    /// Open or create `var/plugins.redb`, initialize all three tables, and build initial O(1) quota counters.
+    /// Open or create a `redb` database at `db_path` and initialize plugin tables and O(1) quota counters.
     pub fn open(db_path: PathBuf) -> Result<Self> {
-        if let Some(parent) = db_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create parent directory {:?}", parent)
-            })?;
-        }
-        let db = Database::create(&db_path)
-            .with_context(|| format!("Failed to open plugin redb database at {:?}", db_path))?;
+        let db = crate::db::open_database(&db_path)?;
+        Self::from_database(db)
+    }
 
+    /// Wrap an existing shared `redb::Database`, initialize plugin tables, and build initial O(1) quota counters.
+    pub fn from_database(db: Arc<Database>) -> Result<Self> {
         let write_txn = db.begin_write()?;
         {
             let _ = write_txn.open_table(KV_DATA_TABLE)?;
@@ -560,7 +556,7 @@ impl PluginStore {
         }
 
         Ok(Self {
-            db: Arc::new(db),
+            db,
             persist_quotas: Arc::new(Mutex::new(initial_quotas)),
             memory: Arc::new(RwLock::new(MemoryState::default())),
         })
@@ -619,9 +615,9 @@ impl PluginStore {
             .db
             .begin_read()
             .map_err(|e| PluginApiError::internal(format!("redb begin_read failed: {}", e)))?;
-        let acl_table = read_txn
-            .open_table(ACL_RECORDS_TABLE)
-            .map_err(|e| PluginApiError::internal(format!("redb open acl_records failed: {}", e)))?;
+        let acl_table = read_txn.open_table(ACL_RECORDS_TABLE).map_err(|e| {
+            PluginApiError::internal(format!("redb open acl_records failed: {}", e))
+        })?;
         let topic_table = read_txn
             .open_table(TOPIC_META_TABLE)
             .map_err(|e| PluginApiError::internal(format!("redb open topic_meta failed: {}", e)))?;
@@ -708,11 +704,10 @@ impl PluginStore {
                     .read()
                     .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
                 let owner_end = exclusive_prefix_end(owner_namedomain);
-                for ((_, ns, _), _) in
-                    mem.entries
-                        .range((owner_namedomain.to_string(), String::new(), String::new())
-                            ..(owner_end, String::new(), String::new()))
-                {
+                for ((_, ns, _), _) in mem.entries.range(
+                    (owner_namedomain.to_string(), String::new(), String::new())
+                        ..(owner_end, String::new(), String::new()),
+                ) {
                     candidates.insert(ns.clone());
                 }
             }
@@ -730,12 +725,12 @@ impl PluginStore {
             let read_txn = db
                 .begin_read()
                 .map_err(|e| PluginApiError::internal(format!("redb begin_read failed: {}", e)))?;
-            let acl_table = read_txn
-                .open_table(ACL_RECORDS_TABLE)
-                .map_err(|e| PluginApiError::internal(format!("redb open acl_records failed: {}", e)))?;
-            let topic_table = read_txn
-                .open_table(TOPIC_META_TABLE)
-                .map_err(|e| PluginApiError::internal(format!("redb open topic_meta failed: {}", e)))?;
+            let acl_table = read_txn.open_table(ACL_RECORDS_TABLE).map_err(|e| {
+                PluginApiError::internal(format!("redb open acl_records failed: {}", e))
+            })?;
+            let topic_table = read_txn.open_table(TOPIC_META_TABLE).map_err(|e| {
+                PluginApiError::internal(format!("redb open topic_meta failed: {}", e))
+            })?;
             let mut visible = Vec::new();
             for ns in list {
                 let parsed = parse_acl_resource(&format!("{}:{}", store.as_str(), ns))?;
@@ -763,7 +758,13 @@ impl PluginStore {
         let raw_defaults = owner_defaults.clone();
         let this = self.clone_handles();
         self.run_blocking(move || {
-            this.require_data_access_sync(&caller, &owner, StoreKind::Persist, CONFIG_NAMESPACE, AclLevel::Read)?;
+            this.require_data_access_sync(
+                &caller,
+                &owner,
+                StoreKind::Persist,
+                CONFIG_NAMESPACE,
+                AclLevel::Read,
+            )?;
             let parsed_defaults = parse_defaults_map(&raw_defaults, &owner);
             let stored = this.read_namespace_persist_sync(&db, &owner, CONFIG_NAMESPACE, None)?;
 
@@ -782,17 +783,12 @@ impl PluginStore {
                 );
             }
             for (k, st_entry) in stored {
-                if !result.contains_key(&k) {
-                    result.insert(
-                        k,
-                        ConfigEntryView {
-                            data_type: st_entry.data_type,
-                            value: st_entry.value,
-                            meta: st_entry.meta,
-                            is_overridden: true,
-                        },
-                    );
-                }
+                result.entry(k).or_insert_with(|| ConfigEntryView {
+                    data_type: st_entry.data_type,
+                    value: st_entry.value,
+                    meta: st_entry.meta,
+                    is_overridden: true,
+                });
             }
             Ok(result)
         })
@@ -841,8 +837,12 @@ impl PluginStore {
                     if let Some(ref raw_defs) = raw_defaults {
                         let parsed_defs = parse_defaults_map(raw_defs, &owner);
                         if let Some(def_entry) = parsed_defs.get(&key_str) {
-                            let (resolved, _) =
-                                resolve_config_override(&key_str, def_entry, stored.as_ref(), &owner);
+                            let (resolved, _) = resolve_config_override(
+                                &key_str,
+                                def_entry,
+                                stored.as_ref(),
+                                &owner,
+                            );
                             return Ok(resolved);
                         }
                     }
@@ -940,7 +940,11 @@ impl PluginStore {
                         &this.db,
                         &owner,
                         &ns_str,
-                        if is_config { None } else { prefix_owned.as_deref() },
+                        if is_config {
+                            None
+                        } else {
+                            prefix_owned.as_deref()
+                        },
                     )?;
 
                     if let Some(ref raw_defs) = raw_defaults {
@@ -1146,13 +1150,8 @@ impl PluginStore {
                     let old_bytes = existing.map(|(_, len)| len);
                     let schema_basis = existing.map(|(e, _)| e);
 
-                    let (entry, serialized) = build_updated_entry(
-                        is_owner,
-                        false,
-                        schema_basis,
-                        input,
-                        &key_str,
-                    )?;
+                    let (entry, serialized) =
+                        build_updated_entry(is_owner, false, schema_basis, input, &key_str)?;
                     let current_quota = mem.quotas.get(&owner).copied().unwrap_or_default();
                     let next_quota = adjust_quota_check(
                         current_quota,
@@ -1162,7 +1161,8 @@ impl PluginStore {
                         StoreKind::Memory,
                     )?;
                     mem.quotas.insert(owner.clone(), next_quota);
-                    mem.entries.insert(map_key, (entry.clone(), serialized.len()));
+                    mem.entries
+                        .insert(map_key, (entry.clone(), serialized.len()));
 
                     let mut val_map = BTreeMap::new();
                     val_map.insert(key_str.clone(), entry.clone());
@@ -1344,7 +1344,8 @@ impl PluginStore {
                     let mut committed = BTreeMap::new();
                     for (k, entry, serialized) in staged {
                         let map_key = (owner.clone(), ns_str.clone(), k.clone());
-                        mem.entries.insert(map_key, (entry.clone(), serialized.len()));
+                        mem.entries
+                            .insert(map_key, (entry.clone(), serialized.len()));
                         committed.insert(k, entry);
                     }
 
@@ -1524,13 +1525,13 @@ impl PluginStore {
 
                     let count = removed_keys.len();
                     if count > 0 {
-                        if let Ok(mut quotas) = this.persist_quotas.lock() {
-                            if let Some(q) = quotas.get_mut(&owner) {
-                                q.keys = q.keys.saturating_sub(count);
-                                q.bytes = q.bytes.saturating_sub(removed_bytes);
-                                if q.keys == 0 {
-                                    quotas.remove(&owner);
-                                }
+                        if let Ok(mut quotas) = this.persist_quotas.lock()
+                            && let Some(q) = quotas.get_mut(&owner)
+                        {
+                            q.keys = q.keys.saturating_sub(count);
+                            q.bytes = q.bytes.saturating_sub(removed_bytes);
+                            if q.keys == 0 {
+                                quotas.remove(&owner);
                             }
                         }
                         Ok((
@@ -1610,12 +1611,12 @@ impl PluginStore {
             let read_txn = db
                 .begin_read()
                 .map_err(|e| PluginApiError::internal(format!("redb begin_read failed: {}", e)))?;
-            let acl_table = read_txn
-                .open_table(ACL_RECORDS_TABLE)
-                .map_err(|e| PluginApiError::internal(format!("redb open acl_records failed: {}", e)))?;
-            let topic_table = read_txn
-                .open_table(TOPIC_META_TABLE)
-                .map_err(|e| PluginApiError::internal(format!("redb open topic_meta failed: {}", e)))?;
+            let acl_table = read_txn.open_table(ACL_RECORDS_TABLE).map_err(|e| {
+                PluginApiError::internal(format!("redb open acl_records failed: {}", e))
+            })?;
+            let topic_table = read_txn.open_table(TOPIC_META_TABLE).map_err(|e| {
+                PluginApiError::internal(format!("redb open topic_meta failed: {}", e))
+            })?;
             let eff = check_acl_in_read_txn(&acl_table, &topic_table, &caller, &owner, &parsed)?;
             Ok(AclCheckResult {
                 is_self: false,
@@ -1917,9 +1918,8 @@ impl PluginStore {
                 if owner != caller && requester != caller {
                     continue;
                 }
-                let val: AclRecordValue = serde_json::from_slice(v_guard.value()).map_err(|e| {
-                    PluginApiError::internal(format!("Corrupt acl record: {}", e))
-                })?;
+                let val: AclRecordValue = serde_json::from_slice(v_guard.value())
+                    .map_err(|e| PluginApiError::internal(format!("Corrupt acl record: {}", e)))?;
                 let rec = AclRecord::from_parts(owner, requester, resource, val);
                 if owner == caller {
                     incoming.push(rec.clone());
@@ -2068,7 +2068,10 @@ impl PluginStore {
     }
 
     /// List all persisted topics declared by `owner_namedomain`.
-    pub async fn list_topics(&self, owner_namedomain: &str) -> Result<Vec<TopicMeta>, PluginApiError> {
+    pub async fn list_topics(
+        &self,
+        owner_namedomain: &str,
+    ) -> Result<Vec<TopicMeta>, PluginApiError> {
         let db = self.db.clone();
         let owner = owner_namedomain.to_string();
         self.run_blocking(move || {
@@ -2195,8 +2198,8 @@ impl PluginStore {
             .range((owner, ns, start_key)..(owner, ns_end.as_str(), ""))
             .map_err(|e| PluginApiError::internal(format!("redb range failed: {}", e)))?
         {
-            let (k_guard, v_guard) = item
-                .map_err(|e| PluginApiError::internal(format!("redb entry failed: {}", e)))?;
+            let (k_guard, v_guard) =
+                item.map_err(|e| PluginApiError::internal(format!("redb entry failed: {}", e)))?;
             let (_, _, k) = k_guard.value();
             if let Some(pfx) = prefix
                 && !k.starts_with(pfx)
@@ -2239,6 +2242,7 @@ mod tests {
     use super::*;
     use crate::plugin_types::MAX_VALUE_BYTES;
     use serde_json::json;
+    use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static STORE_TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -2253,7 +2257,7 @@ mod tests {
         ))
     }
 
-    fn cleanup_db(path: &PathBuf) {
+    fn cleanup_db(path: &std::path::Path) {
         if let Some(dir) = path.parent() {
             let _ = fs::remove_dir_all(dir);
         }
@@ -2423,7 +2427,13 @@ mod tests {
         assert_eq!(reopened.quota_stats("game24@1", StoreKind::Memory).keys, 0);
 
         let (deleted, mut_del) = reopened
-            .delete_entry("game24@1", "game24@1", StoreKind::Persist, "scores", "uid_42")
+            .delete_entry(
+                "game24@1",
+                "game24@1",
+                StoreKind::Persist,
+                "scores",
+                "uid_42",
+            )
             .await
             .unwrap();
         assert!(deleted);
@@ -2662,7 +2672,13 @@ mod tests {
 
         // Explicit deny on persist:scores blocks wildcard even across re-requests
         store
-            .set_acl_grant("points@1", "board@1", "persist:scores", AclLevel::None, None)
+            .set_acl_grant(
+                "points@1",
+                "board@1",
+                "persist:scores",
+                AclLevel::None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -2681,7 +2697,13 @@ mod tests {
 
         // 5. External schema modification locked even with `write`
         store
-            .set_acl_grant("points@1", "board@1", "persist:scores", AclLevel::Write, None)
+            .set_acl_grant(
+                "points@1",
+                "board@1",
+                "persist:scores",
+                AclLevel::Write,
+                None,
+            )
             .await
             .unwrap();
         store
@@ -2829,5 +2851,58 @@ mod tests {
         assert_eq!(store.quota_stats("p@0", StoreKind::Memory).bytes, 0);
 
         cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn test_builtin_plugin_manifests_and_defaults_are_valid() {
+        let html_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html");
+        let plugins = crate::plugin::scan_plugins(&html_dir);
+        let names: BTreeSet<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
+        for required in ["default", "list", "sc-ticker", "game24"] {
+            assert!(
+                names.contains(required),
+                "Expected built-in plugin '{}' in {:?}, got {:?}",
+                required,
+                html_dir,
+                names
+            );
+        }
+
+        for p in &plugins {
+            assert!(matches!(
+                p.name.as_str(),
+                "default" | "list" | "sc-ticker" | "game24"
+            ));
+            assert!(
+                !p.plugin_id.is_empty(),
+                "Plugin '{}' should declare plugin_id",
+                p.name
+            );
+            assert_ne!(
+                p.version, "0",
+                "Built-in plugin '{}' should declare non-zero version",
+                p.name
+            );
+            assert!(
+                p.title.is_some(),
+                "Built-in plugin '{}' should declare name/title",
+                p.name
+            );
+            assert!(
+                !p.defaults.is_empty(),
+                "Built-in plugin '{}' should expose v2 defaults",
+                p.name
+            );
+            for (k, raw_v) in &p.defaults {
+                let parsed = parse_default_entry(raw_v).unwrap_or_else(|e| {
+                    panic!(
+                        "Built-in plugin '{}' default '{}' failed validation: {}",
+                        p.name, k, e
+                    )
+                });
+                assert!(is_valid_key(k), "Invalid key '{}' in '{}'", k, p.name);
+                assert_ne!(parsed.value, serde_json::Value::Null);
+            }
+        }
     }
 }

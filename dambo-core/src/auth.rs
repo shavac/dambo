@@ -1,3 +1,4 @@
+use crate::db;
 use crate::model::{AuthState, RoomQuickItem};
 use anyhow::{Context, Result, anyhow};
 use blive_proto::auth::form_urlencode;
@@ -8,11 +9,12 @@ pub use blive_proto::auth::{
 use blive_proto::commands::value_as_u64;
 use qrcode::QrCode;
 use qrcode::render::{svg, unicode};
+use redb::Database;
 use reqwest::header::{CONTENT_TYPE, COOKIE, ORIGIN, REFERER, SET_COOKIE};
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::path::Path;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
@@ -36,34 +38,34 @@ pub fn render_qr(url: &str) -> Result<(String, String)> {
     Ok((svg_xml, terminal_qr))
 }
 
-fn load_session_file(path: &Path) -> Result<Option<SessionData>> {
+fn load_legacy_session_file(path: &Path) -> Result<Option<SessionData>> {
     if !path.exists() {
         return Ok(None);
     }
     let raw = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read session file {:?}", path))?;
+        .with_context(|| format!("Failed to read legacy session file {:?}", path))?;
     let parsed: SessionData = serde_json::from_str(&raw)
-        .with_context(|| format!("Failed to parse session JSON at {:?}", path))?;
+        .with_context(|| format!("Failed to parse legacy session JSON at {:?}", path))?;
     Ok(Some(parsed))
 }
 
-fn save_session_file(session: &SessionData, path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create parent dir for {:?}", path))?;
-    }
-    let json = serde_json::to_string_pretty(session)?;
-    fs::write(path, json).with_context(|| format!("Failed to write session to {:?}", path))
+fn load_session_from_db(db: &Database) -> Result<Option<SessionData>> {
+    let Some(bytes) = db::read_meta(db, db::KEY_AUTH_SESSION)? else {
+        return Ok(None);
+    };
+    let parsed: SessionData = serde_json::from_slice(&bytes)
+        .context("Failed to deserialize auth_session JSON from redb")?;
+    Ok(Some(parsed))
 }
 
-fn remove_session_file(path: &Path) -> Result<()> {
-    if path.exists() {
-        fs::remove_file(path)
-            .with_context(|| format!("Failed to delete session file {:?}", path))?;
-    }
-    Ok(())
+fn save_session_to_db(db: &Database, session: &SessionData) -> Result<()> {
+    let bytes = serde_json::to_vec(session).context("Failed to serialize SessionData")?;
+    db::write_meta(db, db::KEY_AUTH_SESSION, &bytes)
+        .context("Failed to persist auth_session to redb")
+}
+
+fn remove_session_from_db(db: &Database) -> Result<()> {
+    db::delete_meta(db, db::KEY_AUTH_SESSION).context("Failed to remove auth_session from redb")
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -76,21 +78,102 @@ pub struct QrGenerateResult {
 
 /// Manages Bilibili authentication state, session persistence, and QR login lifecycle.
 pub struct AuthManager {
-    session_path: PathBuf,
+    db: Arc<Database>,
+    write_lock: Mutex<()>,
     session: RwLock<Option<SessionData>>,
     state_tx: watch::Sender<AuthState>,
     http: reqwest::Client,
 }
 
 impl AuthManager {
-    pub fn new<P: AsRef<Path>>(session_path: P) -> Self {
-        let path = session_path.as_ref().to_path_buf();
-        let loaded = match load_session_file(&path) {
+    /// Open a dedicated `redb` database at `db_path` (with optional legacy `session.json` migration).
+    pub fn open<P: AsRef<Path>>(db_path: P, legacy_session_path: Option<&Path>) -> Result<Self> {
+        let db = db::open_database(db_path.as_ref())?;
+        Ok(Self::from_db(db, legacy_session_path))
+    }
+
+    /// Initialize [`AuthManager`] backed by a shared `redb::Database`, performing a one-time
+    /// migration from `legacy_session_path` if `redb` has no session yet and has not migrated before.
+    pub fn from_db(db: Arc<Database>, legacy_session_path: Option<&Path>) -> Self {
+        let loaded = match load_session_from_db(&db) {
             Ok(Some(s)) if s.is_valid_format() => Some(s),
-            Ok(_) => None,
-            Err(e) => {
-                log::warn!("Failed to load existing session {:?}: {}", path, e);
+            Ok(Some(_)) => {
+                log::warn!("Stored auth_session in redb has invalid format; ignoring");
                 None
+            }
+            Err(e) => {
+                log::warn!("Failed to load auth_session from redb: {}", e);
+                None
+            }
+            Ok(None) => {
+                let already_migrated = db::read_meta(&db, db::KEY_AUTH_SESSION_MIGRATED)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !already_migrated
+                    && let Some(legacy_path) = legacy_session_path
+                    && legacy_path.exists()
+                {
+                    match load_legacy_session_file(legacy_path) {
+                        Ok(Some(s)) if s.is_valid_format() => match serde_json::to_vec(&s) {
+                            Ok(bytes) => {
+                                if let Err(e) = db::write_meta_batch(
+                                    &db,
+                                    &[
+                                        (db::KEY_AUTH_SESSION, bytes.as_slice()),
+                                        (db::KEY_AUTH_SESSION_MIGRATED, b"1"),
+                                    ],
+                                ) {
+                                    log::warn!(
+                                        "Failed to migrate legacy session {:?} into redb: {}",
+                                        legacy_path,
+                                        e
+                                    );
+                                } else {
+                                    if let Err(e) = fs::remove_file(legacy_path) {
+                                        log::warn!(
+                                            "Migrated legacy session {:?} into redb, but failed to remove legacy file: {}",
+                                            legacy_path,
+                                            e
+                                        );
+                                    } else {
+                                        log::info!(
+                                            "Migrated legacy session {:?} into redb and removed plaintext file",
+                                            legacy_path
+                                        );
+                                    }
+                                }
+                                Some(s)
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to serialize legacy session {:?} during migration: {}",
+                                    legacy_path,
+                                    e
+                                );
+                                Some(s)
+                            }
+                        },
+                        Ok(Some(_)) => {
+                            log::warn!(
+                                "Legacy session {:?} has invalid format; skipping migration",
+                                legacy_path
+                            );
+                            None
+                        }
+                        Ok(None) => None,
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to load legacy session {:?}; leaving file untouched: {}",
+                                legacy_path,
+                                e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
             }
         };
 
@@ -116,7 +199,8 @@ impl AuthManager {
 
         let (state_tx, _) = watch::channel(initial_state);
         Self {
-            session_path: path,
+            db,
+            write_lock: Mutex::new(()),
             session: RwLock::new(loaded),
             state_tx,
             http,
@@ -152,7 +236,11 @@ impl AuthManager {
         if !trimmed_face.is_empty() {
             session.face = trimmed_face.to_string();
         }
-        save_session_file(&session, &self.session_path)?;
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("AuthManager write_lock poisoned");
+        save_session_to_db(&self.db, &session)?;
         let mid = session.dede_user_id.parse().unwrap_or(0);
         *self.session.write().expect("AuthManager RwLock poisoned") = Some(session);
         self.state_tx.send_replace(AuthState {
@@ -170,31 +258,34 @@ impl AuthManager {
         if trimmed_uname.is_empty() || trimmed_uname.starts_with("UID:") {
             return;
         }
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("AuthManager write_lock poisoned");
         let snapshot_to_save = {
-            let mut guard = self.session.write().expect("AuthManager RwLock poisoned");
-            if let Some(ref mut sess) = *guard {
+            let guard = self.session.read().expect("AuthManager RwLock poisoned");
+            if let Some(ref sess) = *guard {
                 if sess.uname == trimmed_uname
                     && (trimmed_face.is_empty() || sess.face == trimmed_face)
                 {
                     return;
                 }
-                sess.uname = trimmed_uname.to_string();
+                let mut updated = sess.clone();
+                updated.uname = trimmed_uname.to_string();
                 if !trimmed_face.is_empty() {
-                    sess.face = trimmed_face.to_string();
+                    updated.face = trimmed_face.to_string();
                 }
-                Some(sess.clone())
+                Some(updated)
             } else {
                 None
             }
         };
-        if let Some(sess) = snapshot_to_save
-            && let Err(e) = save_session_file(&sess, &self.session_path)
-        {
-            log::warn!(
-                "Failed to persist cached profile name to {:?}: {:#}",
-                self.session_path,
-                e
-            );
+        if let Some(updated) = snapshot_to_save {
+            if let Err(e) = save_session_to_db(&self.db, &updated) {
+                log::warn!("Failed to persist cached profile name to redb: {:#}", e);
+                return;
+            }
+            *self.session.write().expect("AuthManager RwLock poisoned") = Some(updated);
         }
     }
 
@@ -216,7 +307,11 @@ impl AuthManager {
     }
 
     pub fn logout(&self) -> Result<()> {
-        remove_session_file(&self.session_path)?;
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("AuthManager write_lock poisoned");
+        remove_session_from_db(&self.db)?;
         *self.session.write().expect("AuthManager RwLock poisoned") = None;
         self.state_tx.send_replace(AuthState::default());
         log::info!("🔓 Bilibili session cleared");
@@ -225,12 +320,12 @@ impl AuthManager {
 
     /// Clear in-memory and on-disk session credentials when an authenticated API reports expiry.
     pub fn invalidate_session(&self) {
-        if let Err(e) = remove_session_file(&self.session_path) {
-            log::warn!(
-                "Failed to remove expired session file {:?}: {}",
-                self.session_path,
-                e
-            );
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("AuthManager write_lock poisoned");
+        if let Err(e) = remove_session_from_db(&self.db) {
+            log::warn!("Failed to remove expired auth_session from redb: {}", e);
         }
         *self.session.write().expect("AuthManager RwLock poisoned") = None;
         self.state_tx.send_replace(AuthState::default());
@@ -604,9 +699,10 @@ mod tests {
     #[test]
     fn test_session_save_load_and_cookie_header() {
         let id = AUTH_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("dambo_sess_{}_{}.json", std::process::id(), id));
-        let _ = fs::remove_file(&path);
+        let dir = std::env::temp_dir().join(format!("dambo_sess_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&dir);
+        let db_path = dir.join("dambo.redb");
+        let legacy_path = dir.join("session.json");
 
         let session = SessionData {
             sessdata: "abc%2Cdef".to_string(),
@@ -621,33 +717,73 @@ mod tests {
             "SESSDATA=abc%2Cdef; bili_jct=csrf123; DedeUserID=3829104"
         );
 
-        save_session_file(&session, &path).unwrap();
-        let loaded = load_session_file(&path).unwrap().unwrap();
-        assert_eq!(loaded, session);
+        let mgr = AuthManager::open(&db_path, None).unwrap();
+        assert!(!mgr.current_state().is_login);
+        mgr.save_session(session.clone(), String::new(), String::new())
+            .unwrap();
+        assert!(mgr.current_state().is_login);
+        assert_eq!(mgr.current_state().mid, 3829104);
+        drop(mgr);
 
-        let mgr = AuthManager::new(&path);
+        // Reopening with empty stored `uname` falls back to "UID:<mid>"
+        let mgr = AuthManager::open(&db_path, None).unwrap();
         assert!(mgr.current_state().is_login);
         assert_eq!(mgr.current_state().mid, 3829104);
         assert_eq!(mgr.current_state().uname, "UID:3829104");
 
-        // Legacy JSON without `uname`/`face` deserializes cleanly; cached uname restores directly
-        let legacy_json = r#"{"SESSDATA":"s_legacy","bili_jct":"j_legacy","DedeUserID":"778899"}"#;
-        fs::write(&path, legacy_json).unwrap();
-        let legacy_mgr = AuthManager::new(&path);
-        assert_eq!(legacy_mgr.current_state().uname, "UID:778899");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&db_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
 
-        legacy_mgr.persist_profile_cache("测试主播", "https://example.com/face.jpg");
-        let cached_mgr = AuthManager::new(&path);
-        assert!(cached_mgr.current_state().is_login);
-        assert_eq!(cached_mgr.current_state().uname, "测试主播");
+        mgr.persist_profile_cache("测试主播", "https://example.com/face.jpg");
+        drop(mgr);
+
+        let reopened = AuthManager::open(&db_path, None).unwrap();
+        assert!(reopened.current_state().is_login);
+        assert_eq!(reopened.current_state().uname, "测试主播");
         assert_eq!(
-            cached_mgr.current_state().face,
+            reopened.current_state().face,
             "https://example.com/face.jpg"
         );
+        assert_eq!(reopened.current_session().unwrap().sessdata, "abc%2Cdef");
 
-        cached_mgr.logout().unwrap();
-        assert!(!cached_mgr.current_state().is_login);
-        assert!(!path.exists());
+        reopened.logout().unwrap();
+        assert!(!reopened.current_state().is_login);
+        drop(reopened);
+
+        let after_logout = AuthManager::open(&db_path, None).unwrap();
+        assert!(!after_logout.current_state().is_login);
+        assert!(after_logout.current_session().is_none());
+        drop(after_logout);
+
+        // Legacy session.json without `uname`/`face` migrates into redb once and removes plaintext file
+        let legacy_db_path = dir.join("legacy_dambo.redb");
+        let legacy_json = r#"{"SESSDATA":"s_legacy","bili_jct":"j_legacy","DedeUserID":"778899"}"#;
+        fs::write(&legacy_path, legacy_json).unwrap();
+        let legacy_mgr = AuthManager::open(&legacy_db_path, Some(&legacy_path)).unwrap();
+        assert!(legacy_mgr.current_state().is_login);
+        assert_eq!(legacy_mgr.current_state().uname, "UID:778899");
+        assert!(!legacy_path.exists());
+        legacy_mgr.logout().unwrap();
+        drop(legacy_mgr);
+
+        let after_legacy_logout = AuthManager::open(&legacy_db_path, Some(&legacy_path)).unwrap();
+        assert!(!after_legacy_logout.current_state().is_login);
+        drop(after_legacy_logout);
+
+        // Corrupt legacy session.json falls back cleanly without deleting the corrupt file
+        let corrupt_db_path = dir.join("corrupt_dambo.redb");
+        let corrupt_path = dir.join("corrupt_session.json");
+        fs::write(&corrupt_path, "{ not valid session json").unwrap();
+        let corrupt_mgr = AuthManager::open(&corrupt_db_path, Some(&corrupt_path)).unwrap();
+        assert!(!corrupt_mgr.current_state().is_login);
+        assert!(corrupt_path.exists());
+        drop(corrupt_mgr);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -3,7 +3,6 @@
 
 [bilibili]
 room_id = 1994820762                    # Optional fallback room ID (0 = disconnected until set in UI/CLI)
-session_file = "var/session.json"
 avatar_cache_size = 2000       # In-memory LRU cache capacity for uid -> face_url
 
 # Channel A: Real-time visual feed (/ws, OBS overlays & web plugins)
@@ -24,8 +23,7 @@ max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic gift combo 
 host = "localhost"                 # Use "0.0.0.0" to allow LAN access (e.g., tablet/phone /list/)
 port = 3838                        # HTTP & WebSocket server port
 html_dir = "static/html"           # Plugin root directory watched for hot reload
-state_file = "var/state.json"      # Runtime persisted state (current_room_id, locale, room_history, record_raw)
-plugin_db_file = "var/plugins.redb" # Embedded redb database for plugin persistence, ACLs, and topic metadata
+db_file = "var/dambo.redb"         # Unified embedded redb database for login session, runtime state, plugin storage, ACLs, and topics
 allow_remote_manage = false        # Allow non-loopback LAN clients to access /{plugin}/m management pages
 # admin_token = ""                 # Optional remote management password when allow_remote_manage = true or binding 0.0.0.0
 # allowed_hosts = []               # Optional extra allowed Host headers (e.g., Tailscale/LAN hostnames)

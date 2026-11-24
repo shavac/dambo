@@ -1,8 +1,50 @@
 {
-  "title": "Danmaku Monitor",
+  "plugin_id": "list",
+  "version": "1.0.0",
+  "name": "弹幕监看列表",
   "description": "Interactive web danmaku monitor with smart scroll lock, sticky SuperChat/Guard header, and filters.",
   "obs": {
     "width": 480,
     "height": 800
+  },
+  "defaults": {
+    "max_history": {
+      "type": "number",
+      "value": 500,
+      "meta": {
+        "min": 50,
+        "max": 2000,
+        "step": 50,
+        "format": "integer",
+        "label": "历史记录保留上限"
+      }
+    },
+    "default_filter": {
+      "type": "enum",
+      "value": "all",
+      "meta": {
+        "options": [
+          { "value": "all", "label": "全部" },
+          { "value": "chat", "label": "仅弹幕" },
+          { "value": "gift_sc", "label": "礼物与 SC" },
+          { "value": "medal", "label": "粉丝牌" }
+        ],
+        "label": "默认筛选标签"
+      }
+    },
+    "show_like": {
+      "type": "bool",
+      "value": false,
+      "meta": {
+        "label": "显示观众点赞记录"
+      }
+    },
+    "show_sticky_sc": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "顶部吸顶显示活跃 SC/上舰"
+      }
+    }
   }
 }

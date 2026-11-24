@@ -14,9 +14,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use http::{HeaderMap, HeaderValue, Request, StatusCode, Uri, header};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -159,7 +160,11 @@ async fn redirect_plugin_root(
     if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
         return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
     }
-    redirect_with_query(StatusCode::MOVED_PERMANENTLY, &format!("/{}/", plugin), &uri)
+    redirect_with_query(
+        StatusCode::MOVED_PERMANENTLY,
+        &format!("/{}/", plugin),
+        &uri,
+    )
 }
 
 async fn serve_plugin_view(
@@ -367,18 +372,95 @@ pub async fn serve(
     addr: SocketAddr,
     cancel: CancellationToken,
 ) -> Result<()> {
+    serve_with_loopback_flag(state, addr, cancel, None).await
+}
+
+/// Bind and serve HTTP + dual WebSocket endpoints until cancelled, optionally attaching a companion
+/// loopback listener when `addr` targets a specific non-loopback interface so local desktop overlays
+/// and local browser management remain accessible via localhost/127.0.0.1.
+pub async fn serve_with_loopback_flag(
+    state: Arc<AppState>,
+    addr: SocketAddr,
+    cancel: CancellationToken,
+    loopback_accessible: Option<Arc<AtomicBool>>,
+) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("Failed to bind dambo server to {}", addr))?;
-    log::info!("🌐 Dambo HTTP & WS server listening on http://{}", addr);
+    let bound_addr = listener.local_addr().unwrap_or(addr);
+    log::info!(
+        "🌐 Dambo HTTP & WS server listening on http://{}",
+        bound_addr
+    );
 
-    axum::serve(
-        listener,
-        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(cancel.cancelled_owned())
-    .await
-    .context("Axum server error")?;
+    let router = build_router(state);
+    let primary_is_local = bound_addr.ip().is_loopback() || bound_addr.ip().is_unspecified();
+
+    let companion_listener = if primary_is_local {
+        if let Some(ref flag) = loopback_accessible {
+            flag.store(true, Ordering::Release);
+        }
+        None
+    } else {
+        let companion_ip = match bound_addr {
+            SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        };
+        let companion_addr = SocketAddr::new(companion_ip, bound_addr.port());
+        match TcpListener::bind(companion_addr).await {
+            Ok(l) => {
+                if let Some(ref flag) = loopback_accessible {
+                    flag.store(true, Ordering::Release);
+                }
+                log::info!(
+                    "🔁 Companion loopback listener bound on http://{} for local desktop overlay & management access",
+                    companion_addr
+                );
+                Some(l)
+            }
+            Err(e) => {
+                if let Some(ref flag) = loopback_accessible {
+                    flag.store(false, Ordering::Release);
+                }
+                log::warn!(
+                    "⚠️ Could not bind companion loopback listener on {} ({}); local overlays will fall back to {}",
+                    companion_addr,
+                    e,
+                    bound_addr
+                );
+                None
+            }
+        }
+    };
+
+    if let Some(companion) = companion_listener {
+        let primary_cancel = cancel.child_token();
+        let companion_cancel = cancel.child_token();
+        let (res_primary, res_companion) = tokio::join!(
+            axum::serve(
+                listener,
+                router
+                    .clone()
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(primary_cancel.cancelled_owned()),
+            axum::serve(
+                companion,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(companion_cancel.cancelled_owned()),
+        );
+        res_primary.context("Axum primary server error")?;
+        res_companion.context("Axum companion loopback server error")?;
+    } else {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(cancel.cancelled_owned())
+        .await
+        .context("Axum server error")?;
+    }
 
     Ok(())
 }
@@ -494,7 +576,11 @@ mod tests {
         // 1. Verify GET / -> 302 /default/ (preserving query)
         let root_res = http_get_raw(addr, "/?debug=1").await;
         assert!(root_res.contains("302 Found"));
-        assert!(root_res.to_lowercase().contains("location: /default/?debug=1"));
+        assert!(
+            root_res
+                .to_lowercase()
+                .contains("location: /default/?debug=1")
+        );
 
         // 2. Verify GET /{plugin} -> 301 /{plugin}/ preserving Query String
         let list_redir = http_get_raw(addr, "/list?timeout=60&solvable=true").await;
@@ -523,7 +609,11 @@ mod tests {
         let custom_manage = http_get_raw(addr, "/custom/m").await;
         assert!(custom_manage.contains("200 OK"));
         assert!(custom_manage.contains("Custom Manage"));
-        assert!(custom_manage.to_lowercase().contains("x-frame-options: deny"));
+        assert!(
+            custom_manage
+                .to_lowercase()
+                .contains("x-frame-options: deny")
+        );
         assert!(
             custom_manage
                 .to_lowercase()
@@ -533,7 +623,11 @@ mod tests {
         let fallback_manage = http_get_raw(addr, "/list/m").await;
         assert!(fallback_manage.contains("200 OK"));
         assert!(fallback_manage.contains("dambo-manage-root"));
-        assert!(fallback_manage.to_lowercase().contains("x-frame-options: deny"));
+        assert!(
+            fallback_manage
+                .to_lowercase()
+                .contains("x-frame-options: deny")
+        );
 
         let manage_redir = http_get_raw(addr, "/custom/m/?tab=acl").await;
         assert!(manage_redir.contains("301 Moved Permanently"));

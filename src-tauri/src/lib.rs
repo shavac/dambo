@@ -160,6 +160,8 @@ struct PluginDto {
     name: String,
     route: String,
     url: String,
+    manage_route: String,
+    manage_url: String,
     is_builtin: bool,
     is_desktop_open: bool,
     title: Option<String>,
@@ -205,10 +207,67 @@ fn connect_host(host: &str) -> &str {
     }
 }
 
+fn format_url_host(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.contains(':') && !trimmed.starts_with('[') && !trimmed.ends_with(']') {
+        format!("[{}]", trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn local_loopback_host(runtime: &DamboRuntime) -> Option<&'static str> {
+    let trimmed = runtime.config.server.host.trim();
+    if trimmed.eq_ignore_ascii_case("::")
+        || trimmed.eq_ignore_ascii_case("::1")
+        || trimmed.eq_ignore_ascii_case("[::1]")
+    {
+        return Some("[::1]");
+    }
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("localhost") || trimmed == "0.0.0.0" {
+        return Some("localhost");
+    }
+    if trimmed == "127.0.0.1" {
+        return Some("127.0.0.1");
+    }
+    if runtime.is_loopback_accessible() {
+        let is_v6 = trimmed
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_ipv6());
+        return Some(if is_v6 { "[::1]" } else { "127.0.0.1" });
+    }
+    None
+}
+
 fn plugin_url(runtime: &DamboRuntime, name: &str) -> String {
-    let host = connect_host(&runtime.config.server.host);
+    let host = format_url_host(connect_host(&runtime.config.server.host));
     let port = runtime.config.server.port;
     format!("http://{}:{}/{}/", host, port, name)
+}
+
+fn desktop_overlay_url(runtime: &DamboRuntime, name: &str) -> String {
+    if let Some(loopback) = local_loopback_host(runtime) {
+        let port = runtime.config.server.port;
+        format!("http://{}:{}/{}/", loopback, port, name)
+    } else {
+        let fallback = plugin_url(runtime, name);
+        log::warn!(
+            "Companion loopback listener unavailable for '{}'; opening overlay via {} (window controls require localhost/127.0.0.1 capability)",
+            name,
+            fallback
+        );
+        fallback
+    }
+}
+
+fn plugin_manage_url(runtime: &DamboRuntime, name: &str) -> String {
+    let host = local_loopback_host(runtime)
+        .map(str::to_string)
+        .unwrap_or_else(|| format_url_host(connect_host(&runtime.config.server.host)));
+    let port = runtime.config.server.port;
+    format!("http://{}:{}/{}/m", host, port, name)
 }
 
 fn build_plugin_dtos(
@@ -222,6 +281,8 @@ fn build_plugin_dtos(
             name: p.name.clone(),
             route: p.route.clone(),
             url: plugin_url(runtime, &p.name),
+            manage_route: p.manage_route.clone(),
+            manage_url: plugin_manage_url(runtime, &p.name),
             is_builtin: p.is_builtin,
             is_desktop_open: is_plugin_desktop_open(app, &p.name, excluding_label),
             title: p.title.clone(),
@@ -763,7 +824,7 @@ fn open_plugin_desktop_window(
         return Ok(());
     }
 
-    let raw_url = plugin_url(runtime, &plugin.name);
+    let raw_url = desktop_overlay_url(runtime, &plugin.name);
     let parsed_url: tauri::Url = raw_url
         .parse()
         .map_err(|e| format!("Invalid plugin URL '{}': {}", raw_url, e))?;
@@ -800,6 +861,16 @@ fn close_plugin_desktop_window(
     }
     sync_plugin_ui_state(app, runtime, Some(&label));
     Ok(())
+}
+
+fn open_plugin_manage_page(runtime: &DamboRuntime, plugin_name: &str) -> Result<String, String> {
+    let plugin = runtime
+        .plugins
+        .get(plugin_name)
+        .ok_or_else(|| format!("Plugin '{}' not found", plugin_name))?;
+    let url = plugin_manage_url(runtime, &plugin.name);
+    open_in_os(&url);
+    Ok(url)
 }
 
 fn open_plugins_directory(runtime: &DamboRuntime) {
@@ -893,16 +964,27 @@ fn copy_to_clipboard(text: &str) {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Ok(mut child) = Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(Stdio::piped())
-            .spawn()
-        {
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
+        use std::io::Write;
+        let candidates: [(&str, &[&str]); 3] = [
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ];
+        for (cmd, args) in candidates {
+            if let Ok(mut child) = Command::new(cmd)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                if child.wait().is_ok_and(|s| s.success()) {
+                    break;
+                }
             }
-            let _ = child.wait();
         }
     }
 }
@@ -1196,6 +1278,14 @@ async fn close_plugin_desktop(
     ctx: State<'_, AppContext>,
 ) -> Result<(), String> {
     close_plugin_desktop_window(&app, &ctx.runtime, &plugin_name)
+}
+
+#[tauri::command]
+async fn open_plugin_manage(
+    plugin_name: String,
+    ctx: State<'_, AppContext>,
+) -> Result<String, String> {
+    open_plugin_manage_page(&ctx.runtime, &plugin_name)
 }
 
 #[tauri::command]
@@ -1584,6 +1674,10 @@ fn append_plugin_submenus<'a>(
         let item_sub = SubmenuBuilder::new(app, sub_label)
             .text(toggle_id, toggle_label)
             .text(
+                format!("plugin:open_manage:{}", p.name),
+                i18n::t(locale, "tray.plugin_open_manage"),
+            )
+            .text(
                 format!("plugin:copy_url:{}", p.name),
                 i18n::t(locale, "tray.plugin_copy_url"),
             );
@@ -1711,6 +1805,7 @@ pub fn run(config_path: &str) {
             get_plugins,
             open_plugin_desktop,
             close_plugin_desktop,
+            open_plugin_manage,
             open_plugins_dir,
             get_i18n,
             set_locale,
@@ -1873,6 +1968,12 @@ pub fn run(config_path: &str) {
                         copy_to_clipboard(&plugin_url(&rt_menu, plugin_name));
                         return;
                     }
+                    if let Some(plugin_name) = menu_id.strip_prefix("plugin:open_manage:") {
+                        if let Err(e) = open_plugin_manage_page(&rt_menu, plugin_name) {
+                            log::warn!("Tray open_plugin_manage('{}') failed: {}", plugin_name, e);
+                        }
+                        return;
+                    }
                     if let Some(locale_code) = menu_id.strip_prefix("i18n:set_locale:") {
                         if let Err(e) = apply_locale_change(app, &rt_menu, locale_code) {
                             log::warn!("Tray set_locale('{}') failed: {}", locale_code, e);
@@ -1922,7 +2023,7 @@ pub fn run(config_path: &str) {
             }
             tray_builder.build(app)?;
 
-            // 6. Refresh tray menu and notify UI capsule whenever var/state.json changes
+            // 6. Refresh tray menu and notify UI capsule whenever persisted runtime state changes
             let mut state_rx = runtime.state_rx();
             let app_state_sync = app_handle.clone();
             let rt_state_sync = runtime.clone();
@@ -2031,5 +2132,13 @@ mod tests {
             normalize_os_path_str(Path::new(r"\\?\UNC\server\share\var/records"), true),
             r"\\server\share\var\records"
         );
+    }
+
+    #[test]
+    fn test_format_url_host_wraps_bare_ipv6() {
+        assert_eq!(format_url_host("localhost"), "localhost");
+        assert_eq!(format_url_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(format_url_host("::1"), "[::1]");
+        assert_eq!(format_url_host("[::1]"), "[::1]");
     }
 }

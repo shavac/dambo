@@ -6,6 +6,9 @@ on:
       - main
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
@@ -16,6 +19,74 @@ permissions:
   contents: write
 
 jobs:
+  lint:
+    name: Lint & Frontend Checks
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libxdo-dev \
+            pkg-config \
+            cmake \
+            build-essential
+
+      - name: Check formatting (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy on core & CLI (-D warnings)
+        run: cargo clippy -p dambo-core -p dambo-cli --all-targets -- -D warnings
+
+      - name: Run Clippy on desktop UI crate
+        run: cargo clippy -p dambo-ui --all-targets
+
+      - name: Check JavaScript syntax & frontend hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in dambo-core/assets/dambo.js static/html/*/*.js ui/*.js; do
+            node --check "$f"
+          done
+          python3 - <<'PY'
+          import glob
+          import json
+
+          json.load(open("src-tauri/tauri.conf.json", encoding="utf-8"))
+          for p in glob.glob("src-tauri/capabilities/*.json") + glob.glob("static/html/*/plugin.json"):
+              json.load(open(p, encoding="utf-8"))
+
+          locales = {
+              name: json.load(open(f"src-tauri/locales/{name}.json", encoding="utf-8"))
+              for name in ("zh-CN", "ja", "en")
+          }
+          assert set(locales["zh-CN"]) == set(locales["ja"]) == set(locales["en"]), "Locale key mismatch"
+          assert all(isinstance(v, str) and v.strip() for d in locales.values() for v in d.values()), "Empty translation value"
+
+          for path in glob.glob("ui/*.html") + glob.glob("ui/*.js") + glob.glob("static/html/*/*.js"):
+              text = open(path, encoding="utf-8").read()
+              assert "innerHTML" not in text, f"Unexpected innerHTML in {path}"
+          print("Frontend JSON, i18n, and DOM hygiene checks passed.")
+          PY
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -98,7 +169,12 @@ jobs:
             cmake \
             build-essential
 
+      - name: Run workspace tests (debug)
+        if: "!startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch'"
+        run: cargo test --workspace
+
       - name: Run workspace tests (release)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: cargo test --release --workspace
 
       - name: Build release binaries
@@ -168,7 +244,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [lint, build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

@@ -126,7 +126,13 @@ impl PluginApiError {
 
 impl fmt::Display for PluginApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({}): {}", self.code, self.status.as_u16(), self.message)
+        write!(
+            f,
+            "{} ({}): {}",
+            self.code,
+            self.status.as_u16(),
+            self.message
+        )
     }
 }
 
@@ -454,11 +460,9 @@ pub fn validate_schema_definition(
         }
         DataType::Bool => {}
         DataType::Enum => {
-            let opts = meta
-                .and_then(|m| m.options.as_ref())
-                .ok_or_else(|| {
-                    PluginApiError::invalid_enum_value("Enum type requires non-empty meta.options")
-                })?;
+            let opts = meta.and_then(|m| m.options.as_ref()).ok_or_else(|| {
+                PluginApiError::invalid_enum_value("Enum type requires non-empty meta.options")
+            })?;
             if opts.is_empty() {
                 return Err(PluginApiError::invalid_enum_value(
                     "Enum meta.options must contain at least one choice",
@@ -519,9 +523,7 @@ fn validate_url_string(s: &str) -> bool {
 }
 
 fn is_integral_number(n: &serde_json::Number, as_f64: f64) -> bool {
-    n.as_i64().is_some()
-        || n.as_u64().is_some()
-        || (as_f64.is_finite() && as_f64.fract() == 0.0)
+    n.as_i64().is_some() || n.as_u64().is_some() || (as_f64.is_finite() && as_f64.fract() == 0.0)
 }
 
 /// Validate a JSON value against a declared `(data_type, meta)` schema.
@@ -789,13 +791,7 @@ pub fn parse_default_entry(raw: &serde_json::Value) -> Result<TypedEntry, Plugin
                 PluginApiError::invalid_argument(format!("Invalid default typed entry: {}", e))
             })?;
             validate_schema_definition(entry.data_type, entry.meta.as_ref(), 0)?;
-            validate_value_against(
-                entry.data_type,
-                entry.meta.as_ref(),
-                &entry.value,
-                0,
-                "$",
-            )?;
+            validate_value_against(entry.data_type, entry.meta.as_ref(), &entry.value, 0, "$")?;
             serialize_and_check_entry_size(&entry)?;
             return Ok(entry);
         }
@@ -1030,7 +1026,8 @@ mod tests {
         assert_eq!(shorthand_num.value, json!(300));
 
         // Plain struct shorthand that happens to contain extra keys must stay Struct
-        let shorthand_struct = parse_default_entry(&json!({ "columns": 2, "compact": true })).unwrap();
+        let shorthand_struct =
+            parse_default_entry(&json!({ "columns": 2, "compact": true })).unwrap();
         assert_eq!(shorthand_struct.data_type, DataType::Struct);
     }
 }

@@ -15,7 +15,7 @@
 4. **统一权限控制（ACL）**：所有跨插件的数据访问、数据变更订阅与私有事件主题订阅统一纳入持久化 ACL 管理，由目标插件自主审批与后续变更。
 
 ### 1.2 核心架构不变量
-- **配置只读与运行态隔离**：`etc/config.toml` 与各插件 `plugin.json` 在运行期严格只读；运行态持久化数据库文件统一存放在 `var/` 下（默认 `var/plugins.redb`）。
+- **配置只读与运行态隔离**：`etc/config.toml` 与各插件 `plugin.json` 在运行期严格只读；运行态持久化数据库文件统一存放在 `var/` 下（统一默认 `var/dambo.redb`，兼容旧配置 `plugin_db_file`，内含宿主 `app_meta` 与插件 `kv_data` / `acl_records` / `topic_meta` 表）。
 - **静态页面零改写与纵深安全分层**：展示端（`/{plugin_name}/`）保持静态 HTML 原样返回、无需业务 Token；管理端（`/{plugin_name}/m`）及 ACL 审批操作叠加零侵入 HTTP 响应头防护（`X-Frame-Options`、`CSP`、真实导航签发 `HttpOnly` 管理态 Cookie 与非本机访问门禁），全局挂载同源与 `Host` 防护中间件。
 - **纯 Web 零构建插件形态**：插件位于 `static/html/{plugin_name}/`，保持纯 HTML/CSS/JS，无 Node/npm 构建步骤、不暴露 `window.__TAURI__`、不在用户可控内容上使用 `.innerHTML`。
 - **现有弹幕通道 100% 向后兼容**：既有 Channel A（`/ws`）、Channel B（`/ws/event`）、`Dambo.connect()` 与 `Dambo.utils` 语义保持不变。
@@ -57,7 +57,7 @@
 | `obs` | `object` | `null` | 可选 `{ "width": number, "height": number }`，建议画布宽高 |
 | `defaults` | `object` | `{}` | 可选默认配置键值对（支持完整 Typed Entry 声明或裸值简写，详见第 5 章） |
 
-> 明确约束：`plugin.json` 中**不包含** `permissions` 字段；所有权限关系均在运行期通过 SDK 发起申请并在目标插件管理端审批，持久化于 `var/plugins.redb`。
+> 明确约束：`plugin.json` 中**不包含** `permissions` 字段；所有权限关系均在运行期通过 SDK 发起申请并在目标插件管理端审批，持久化于 `redb`（默认 `var/dambo.redb`）。
 
 示例 `plugin.json`：
 
@@ -185,7 +185,7 @@ flowchart TB
         REST["HTTP REST: /api/v1/*"]
         SSE["HTTP SSE: /api/v1/events"]
         Mem["MemoryStore + 运行时订阅映射（内存态）"]
-        Disk["var/plugins.redb（持久 KV + 统一 ACL + topic_meta）"]
+        Disk["var/dambo.redb（app_meta + 持久 KV + 统一 ACL + topic_meta）"]
     end
 
     View --> L2Danmaku
@@ -220,7 +220,7 @@ flowchart TB
 
 | 存储类别 | API 前缀 / SDK 模块 | 物理载体与生命周期 | 典型用途 |
 |---|---|---|---|
-| **持久化数据（`persist`）** | `/api/v1/data/persist/...`<br>`Dambo.storage` / `Dambo.config` | `var/plugins.redb`，服务重启永久保留 | 插件设置（`config`）、观众积分、历史记录、持久状态 |
+| **持久化数据（`persist`）** | `/api/v1/data/persist/...`<br>`Dambo.storage` / `Dambo.config` | `var/dambo.redb`，服务重启永久保留 | 插件设置（`config`）、观众积分、历史记录、持久状态 |
 | **内存数据（`memory`）** | `/api/v1/data/memory/...`<br>`Dambo.memory` | `dambo-core` 并发内存表，进程重启自动清空 | 本场直播计分、游戏实时状态、定向动作指令槽（`cmd`） |
 
 两类数据共同提供**精简 KV 操作集**：
@@ -230,7 +230,7 @@ flowchart TB
 - **明确不引入的特性**：不拆出独立的 `define` / `mdefine` / `mget` 方法名，不做 `version` / CAS 乐观锁、原子 `incr` 与键级 TTL 过期。
 
 ### 5.2 默认配置（`plugin.json` `defaults`）与 `persist("config")` 协作
-- **只读基准 + 读时合并**：`plugin.json` 中的 `defaults` 仅作只读基准定义，**不在启动或扫描阶段预写入 `var/plugins.redb`**，从而确保更新插件文件时新增默认配置项立即生效且不污染持久层。
+- **只读基准 + 读时合并**：`plugin.json` 中的 `defaults` 仅作只读基准定义，**不在启动或扫描阶段预写入 `redb`**，从而确保更新插件文件时新增默认配置项立即生效且不污染持久层。
 - **一致的合并读取与热更新冲突降级**：
   - 修改配置项实际写入 `persist` 下的保留命名空间 `"config"`（即 `(namedomain, "config", key)`）；
   - `persist/config` 下的 `get` 与 `list`（含指定 `keys`）均严格执行一致的 **`defaults` 为基、持久化 `"config"` 覆盖** 读时合并；
@@ -279,12 +279,13 @@ flowchart TB
    - 仅数据所属插件自身（`caller_namedomain == owner_namedomain`）可携带 `type` / `meta` 定义或变更键的 Schema；外部插件即使获得 ACL `write` 权限也只能更新 `value`，若携带 `type` 或 `meta` 尝试修改对方 Schema 则返回 `403 SCHEMA_LOCKED`；
    - 在 `persist/config` 命名空间下，凡已在 `plugin.json` `defaults` 中声明的键，其 `type` 与 `meta` 由 `defaults` 锁定，运行时即便本插件自身也禁止篡改其 Schema（返回 `403 SCHEMA_LOCKED`），仅允许更新符合约束的 `value`。
 
-### 5.5 持久层 `var/plugins.redb` 三表结构与容量上限
-- **配置项扩展建议**：在 `dambo-core/src/config.rs` 的 `ServerConfig` 中新增 `plugin_db_file: String`，默认 `"var/plugins.redb"`，遵循与 `state_file`（`"var/state.json"`）一致的配置风格。
-- **`redb` 三表定义**（将权限规则与申请状态合为单表 `acl_records`，消除双表同步并天然支持“保持现有 `read` 权限不断流的同时申请升级 `write`”）：
+### 5.5 持久层 `redb` 表结构与容量上限
+- **配置项说明**：在 `dambo-core/src/config.rs` 的 `ServerConfig` 中使用 `db_file: String`（默认 `"var/dambo.redb"`，同时以 `#[serde(alias = "plugin_db_file")]` 向后兼容旧配置），统一存储宿主 `app_meta`（登录会话、运行态房间/语言偏好）及插件持久层。
+- **表结构定义**（将权限规则与申请状态合为单表 `acl_records`，消除双表同步并天然支持“保持现有 `read` 权限不断流的同时申请升级 `write`”）：
 
 | Table 名称 | Key 类型 | Value（UTF-8 JSON） | 说明 |
 |---|---|---|---|
+| `app_meta` | `&str` | 序列化状态 / 会话 JSON | 宿主运行态持久化（`auth_session`、`app_state` 及一次性迁移标记） |
 | `kv_data` | `(&str, &str, &str)`<br>`(owner_namedomain, namespace, key)` | `{ type, value, meta? }` | 持久化 Typed KV 数据 |
 | `acl_records` | `(&str, &str, &str)`<br>`(owner_namedomain, requester_namedomain, resource)` | `{ level, status, requested_level?, reason?, note?, updated_at }` | 统一 ACL 记录（`level`: 当前生效等级 `"none"\|"read"\|"write"\|"subscribe"`；`status`: `"pending"\|"granted"\|"denied"`） |
 | `topic_meta` | `(&str, &str)`<br>`(owner_namedomain, topic_name)` | `{ public, description?, updated_at }` | 插件归属订阅源元信息与可见性，防止 OBS 冷启动竞态 |
@@ -293,7 +294,7 @@ flowchart TB
   - 字符集：`namespace` 与 `topic` 遵循 `[A-Za-z0-9_.-]`（`1..=128B`，禁止 `*`、`:`、`/`）；`key` 非空且 `1..=128B`（禁止控制字符、空字节与 `/`）；
   - 单条记录序列化 JSON 体积：`≤ 256 KB`；
   - 单个 `namedomain` 在单类存储下总键数 `≤ 10,000`、总数据体量 `≤ 16 MB`（超限返回 `413 QUOTA_EXCEEDED`）；
-  - **配额 `O(1)` 增量计数**：`dambo-core` 启动打开 `var/plugins.redb` 时做一次初始化扫描汇总，运行期在内存中维护 `HashMap<Namedomain, QuotaStats { keys, bytes }>`，每次写入/覆盖/删除按新旧字节差做 **`O(1)` 增量更新**，避免每次写事务做磁盘范围扫描；
+  - **配额 `O(1)` 增量计数**：`dambo-core` 启动打开 `var/dambo.redb` 时做一次初始化扫描汇总，运行期在内存中维护 `HashMap<Namedomain, QuotaStats { keys, bytes }>`，每次写入/覆盖/删除按新旧字节差做 **`O(1)` 增量更新**，避免每次写事务做磁盘范围扫描；
   - **并发实现约束**：`redb` 写事务为同步文件 I/O，在 Axum async handler 中需统一经 `tokio::task::spawn_blocking` 调度执行，防止阻塞 Tokio worker 影响 `/ws` 弹幕转发延迟。
 
 ---
@@ -301,7 +302,7 @@ flowchart TB
 ## 6. 插件归属订阅源、统一 ACL 与安全防护
 
 ### 6.1 插件归属订阅源（`topics`）
-- **归属与持久化声明**：订阅源归属于发布插件的 `namedomain`，元信息持久化保存在 `var/plugins.redb` 的 `topic_meta` 表中，由发布方通过 `PUT /api/v1/topics/{name}` 预声明或在 `POST /api/v1/topics/{name}` 发布时顺带自动声明（操作身份由 `X-Dambo-Plugin` 确定，仅能操作本插件自身订阅源）；查询任意插件已注册的订阅源统一通过 `GET /api/v1/plugins/{target}` 的 `topics` 字段返回。
+- **归属与持久化声明**：订阅源归属于发布插件的 `namedomain`，元信息持久化保存在 `redb` 的 `topic_meta` 表中，由发布方通过 `PUT /api/v1/topics/{name}` 预声明或在 `POST /api/v1/topics/{name}` 发布时顺带自动声明（操作身份由 `X-Dambo-Plugin` 确定，仅能操作本插件自身订阅源）；查询任意插件已注册的订阅源统一通过 `GET /api/v1/plugins/{target}` 的 `topics` 字段返回。
 - **冷启动竞态消除**：由于 `topic_meta` 持久化落盘，即使在 OBS 多浏览器源并发启动时订阅方比发布方先打开 200ms，只要发布方此前曾声明过 `public: true`，服务端即可立即放行订阅请求；同时即便展示端未打开，管理页 `/{plugin_name}/m` 也能直接读取并切换可见性。
 - **公开与私有可见性**：
   - 创建或首次发布时可指定 `public: bool`（**默认为 `false` 私有**）：
@@ -310,7 +311,7 @@ flowchart TB
   - 若运行期将某订阅源从 `public: true` 切换为 `public: false`，服务端立即检查并切断不再具备 `topic:<name>` / `topic:*` 权限的外部 SSE 订阅，并推送通知。
 
 ### 6.2 统一 ACL 权限矩阵（单表 `acl_records` 模型）
-所有需要跨插件授权的资源均纳入同一张持久化表 `acl_records`（存 `var/plugins.redb`），**仅目标插件本身**可在自己的管理端 `/{plugin_name}/m` 批准、修改或撤销对自身资源的授权（宿主不提供集中式审批界面）：
+所有需要跨插件授权的资源均纳入同一张持久化表 `acl_records`（存 `var/dambo.redb`），**仅目标插件本身**可在自己的管理端 `/{plugin_name}/m` 批准、修改或撤销对自身资源的授权（宿主不提供集中式审批界面）：
 
 | 访问范围 | `resource` 格式 | 允许的生效 `level` | 默认策略与语义说明 |
 |---|---|---|---|
@@ -629,7 +630,7 @@ const offAcl = Dambo.acl.onChange((ev) => {
 | 文件 / 目录 | 预期改造内容 |
 |---|---|
 | [dambo-core/Cargo.toml](file:///home/knightmare/soft/dambo/dambo-core/Cargo.toml) | 引入 `redb`（纯 Rust 嵌入式 KV 引擎）；按需确认 `tokio-stream` / `async-stream`（用于 Axum SSE `Sse` 响应）。 |
-| [dambo-core/src/config.rs](file:///home/knightmare/soft/dambo/dambo-core/src/config.rs) | 在 `ServerConfig` 新增可选 `plugin_db_file`（默认 `"var/plugins.redb"`），以及安全门禁配置项 `allow_remote_manage`（默认 `false`）、`admin_token`（可选）、`allowed_hosts`（默认空）。 |
+| [dambo-core/src/config.rs](file:///home/knightmare/soft/dambo/dambo-core/src/config.rs) | 在 `ServerConfig` 提供 `db_file`（默认 `"var/dambo.redb"`，支持 `plugin_db_file` 别名），以及安全门禁配置项 `allow_remote_manage`（默认 `false`）、`admin_token`（可选）、`allowed_hosts`（默认空）。 |
 | [dambo-core/src/plugin.rs](file:///home/knightmare/soft/dambo/dambo-core/src/plugin.rs) | 将 `RESERVED_PLUGIN_NAMES` 从 6 项精简为 `&["ws", "api", "sdk"]`；将插件识别入口由 `index.html` 改为 `plugin.html`；`PluginManifest` 扩展 `plugin_id`、`version`、`name`（兼容 `title`）、`description`、`obs`、`defaults`；`PluginInfo` 补充 `plugin_id`、`version`、`namedomain`、`manage_route`、`has_custom_manage`、`defaults`；实现版本号解析与三级自动 fallback 查找及重名重版本扫描警告。 |
 | [dambo-core/src/server.rs](file:///home/knightmare/soft/dambo/dambo-core/src/server.rs) | 调整 `/`、`/{plugin_name}`、`/{plugin_name}/`、`/{plugin_name}/m`、`/{plugin_name}/m/`、`/{plugin_name}/{*path}` 路由与 `301`/`302` 重定向；接入兜底管理页嵌入资源；挂载全局同源/`Host` 防护中间件、`/m` 防嵌套响应头与统一 `dambo_admin` `HttpOnly` Cookie 签发及远程门禁；挂载 `/api/v1/*` 路由器。 |
 | `dambo-core/src/` 新增模块 | 建议拆分：`plugin_types.rs`（6 种类型与 `meta.format` 校验/推断引擎）、`plugin_store.rs`（`redb` 三表持久层 `kv_data`/`acl_records`/`topic_meta` + 内存存储层 + 容量配额 `O(1)` 计数 + ACL 引擎）、`plugin_hub.rs`（SSE 客户端订阅分发中心）、`plugin_api.rs`（15 个精简 `/api/v1/*` HTTP/SSE handlers 与安全鉴权辅助），以及内嵌 `assets/manage_fallback.html`。 |

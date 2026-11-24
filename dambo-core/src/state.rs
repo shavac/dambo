@@ -1,18 +1,16 @@
+use crate::db;
 use crate::model::RoomInfoSnapshot;
 use anyhow::{Context, Result, anyhow};
+use redb::Database;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 pub const MAX_ROOM_HISTORY: usize = 20;
-
-static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn now_unix_secs() -> u64 {
     SystemTime::now()
@@ -39,7 +37,7 @@ pub fn normalize_locale(raw: &str) -> Option<&'static str> {
     }
 }
 
-/// Entry stored in `var/state.json` representing a recently connected room.
+/// Entry stored in `redb` representing a recently connected room.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoomHistoryEntry {
     pub room_id: u64,
@@ -64,8 +62,9 @@ pub struct AppPersistedState {
     pub record_raw: Option<bool>,
 }
 
-/// Thread-safe, fault-tolerant, atomic JSON persistence store for `var/state.json`.
+/// Thread-safe, fault-tolerant, ACID `redb` persistence store for runtime host state.
 pub struct StateStore {
+    db: Arc<Database>,
     path: PathBuf,
     inner: RwLock<AppPersistedState>,
     write_lock: Mutex<()>,
@@ -73,34 +72,106 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// Load persisted state from `path`, falling back safely to default state on missing or corrupt files.
-    pub fn load_or_default<P: AsRef<Path>>(path: P) -> Self {
-        let path = path.as_ref().to_path_buf();
-        let state = if !path.exists() {
-            log::warn!(
-                "State file {:?} does not exist yet; starting with default runtime state",
-                path
-            );
-            AppPersistedState::default()
-        } else {
-            match fs::read_to_string(&path) {
-                Ok(raw) => match serde_json::from_str::<AppPersistedState>(&raw) {
-                    Ok(parsed) => Self::sanitize_state(parsed, &path),
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to parse state file {:?} ({}); falling back to default runtime state",
-                            path,
-                            e
-                        );
-                        AppPersistedState::default()
-                    }
-                },
+    /// Open a dedicated `redb` database at `db_path` (with optional legacy `state.json` migration).
+    pub fn open<P: AsRef<Path>>(db_path: P, legacy_state_path: Option<&Path>) -> Result<Self> {
+        let path = db_path.as_ref().to_path_buf();
+        let db = db::open_database(&path)?;
+        Ok(Self::from_db(db, path, legacy_state_path))
+    }
+
+    /// Initialize [`StateStore`] backed by a shared `redb::Database`, performing a one-time
+    /// migration from `legacy_state_path` if `redb` has no persisted state yet and has not migrated before.
+    pub fn from_db(db: Arc<Database>, db_path: PathBuf, legacy_state_path: Option<&Path>) -> Self {
+        let state = match db::read_meta(&db, db::KEY_APP_STATE) {
+            Ok(Some(bytes)) => match serde_json::from_slice::<AppPersistedState>(&bytes) {
+                Ok(parsed) => Self::sanitize_state(parsed, "redb:app_state"),
                 Err(e) => {
                     log::warn!(
-                        "Failed to read state file {:?} ({}); falling back to default runtime state",
-                        path,
+                        "Failed to parse app_state JSON from redb ({}); falling back to default runtime state",
                         e
                     );
+                    AppPersistedState::default()
+                }
+            },
+            Err(e) => {
+                log::warn!(
+                    "Failed to read app_state from redb ({}); falling back to default runtime state",
+                    e
+                );
+                AppPersistedState::default()
+            }
+            Ok(None) => {
+                let already_migrated = db::read_meta(&db, db::KEY_APP_STATE_MIGRATED)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !already_migrated
+                    && let Some(legacy_path) = legacy_state_path
+                    && legacy_path.exists()
+                {
+                    match fs::read_to_string(legacy_path) {
+                        Ok(raw) => match serde_json::from_str::<AppPersistedState>(&raw) {
+                            Ok(parsed) => {
+                                let sanitized = Self::sanitize_state(
+                                    parsed,
+                                    &legacy_path.display().to_string(),
+                                );
+                                match serde_json::to_vec(&sanitized) {
+                                    Ok(bytes) => {
+                                        if let Err(e) = db::write_meta_batch(
+                                            &db,
+                                            &[
+                                                (db::KEY_APP_STATE, bytes.as_slice()),
+                                                (db::KEY_APP_STATE_MIGRATED, b"1"),
+                                            ],
+                                        ) {
+                                            log::warn!(
+                                                "Failed to migrate legacy state {:?} into redb: {}",
+                                                legacy_path,
+                                                e
+                                            );
+                                        } else if let Err(e) = fs::remove_file(legacy_path) {
+                                            log::warn!(
+                                                "Migrated legacy state {:?} into redb, but failed to remove legacy file: {}",
+                                                legacy_path,
+                                                e
+                                            );
+                                        } else {
+                                            log::info!(
+                                                "Migrated legacy state {:?} into redb and removed old JSON file",
+                                                legacy_path
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "Failed to serialize migrated state from {:?}: {}",
+                                            legacy_path,
+                                            e
+                                        );
+                                    }
+                                }
+                                sanitized
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to parse legacy state file {:?} ({}); falling back to default runtime state",
+                                    legacy_path,
+                                    e
+                                );
+                                AppPersistedState::default()
+                            }
+                        },
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to read legacy state file {:?} ({}); falling back to default runtime state",
+                                legacy_path,
+                                e
+                            );
+                            AppPersistedState::default()
+                        }
+                    }
+                } else {
                     AppPersistedState::default()
                 }
             }
@@ -108,23 +179,24 @@ impl StateStore {
 
         let (state_tx, _) = watch::channel(state.clone());
         Self {
-            path,
+            db,
+            path: db_path,
             inner: RwLock::new(state),
             write_lock: Mutex::new(()),
             state_tx,
         }
     }
 
-    fn sanitize_state(mut state: AppPersistedState, path: &Path) -> AppPersistedState {
+    fn sanitize_state(mut state: AppPersistedState, source: &str) -> AppPersistedState {
         state.locale = match state.locale {
             Some(ref raw) if !raw.trim().is_empty() => {
                 if let Some(norm) = normalize_locale(raw) {
                     Some(norm.to_string())
                 } else {
                     log::warn!(
-                        "Unsupported persisted locale {:?} in {:?}; resetting to auto (None)",
+                        "Unsupported persisted locale {:?} in {}; resetting to auto (None)",
                         raw,
-                        path
+                        source
                     );
                     None
                 }
@@ -345,7 +417,9 @@ impl StateStore {
             .expect("StateStore write_lock poisoned");
         let mut next = self.snapshot();
         mutator(&mut next);
-        write_state_atomic(&self.path, &next)?;
+        let bytes = serde_json::to_vec(&next).context("Failed to serialize AppPersistedState")?;
+        db::write_meta(&self.db, db::KEY_APP_STATE, &bytes)
+            .context("Failed to persist app_state to redb")?;
         {
             let mut inner = self.inner.write().expect("StateStore RwLock poisoned");
             *inner = next.clone();
@@ -355,63 +429,6 @@ impl StateStore {
     }
 }
 
-fn write_state_atomic(path: &Path, state: &AppPersistedState) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create state directory {:?}", parent))?;
-    }
-
-    let json =
-        serde_json::to_string_pretty(state).context("Failed to serialize AppPersistedState")?;
-    let parent_dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let seq = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = parent_dir.join(format!(".state.{}.{}.tmp", std::process::id(), seq));
-
-    let write_res = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .with_context(|| format!("Failed to create temp state file {:?}", tmp_path))?;
-        file.write_all(json.as_bytes())
-            .with_context(|| format!("Failed to write temp state file {:?}", tmp_path))?;
-        file.write_all(b"\n")
-            .with_context(|| format!("Failed to finalize temp state file {:?}", tmp_path))?;
-        file.sync_all()
-            .with_context(|| format!("Failed to sync temp state file {:?}", tmp_path))?;
-        drop(file);
-
-        if let Err(rename_err) = fs::rename(&tmp_path, path) {
-            #[cfg(windows)]
-            {
-                let _ = &rename_err;
-                if path.exists() {
-                    let _ = fs::remove_file(path);
-                }
-                fs::rename(&tmp_path, path)
-                    .with_context(|| format!("Failed to replace state file {:?}", path))?;
-            }
-            #[cfg(not(windows))]
-            {
-                return Err(rename_err).with_context(|| {
-                    format!("Failed to atomically rename {:?} -> {:?}", tmp_path, path)
-                });
-            }
-        }
-        Ok(())
-    })();
-
-    if write_res.is_err() {
-        let _ = fs::remove_file(&tmp_path);
-    }
-    write_res
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,7 +436,7 @@ mod tests {
 
     static STATE_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
-    fn temp_state_path(tag: &str) -> PathBuf {
+    fn temp_state_paths(tag: &str) -> (PathBuf, PathBuf) {
         let id = STATE_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
             "dambo_state_test_{}_{}_{}",
@@ -428,31 +445,37 @@ mod tests {
             id
         ));
         let _ = fs::remove_dir_all(&dir);
-        dir.join("var").join("state.json")
+        let var_dir = dir.join("var");
+        (var_dir.join("dambo.redb"), var_dir.join("state.json"))
     }
 
     #[test]
     fn test_state_store_missing_file_and_corrupt_json_fallback() {
-        let state_path = temp_state_path("missing_corrupt");
+        let (db_path, legacy_path) = temp_state_paths("missing_corrupt");
 
-        // 1. Missing file falls back cleanly without creating anything on load
-        let store = StateStore::load_or_default(&state_path);
-        assert!(!state_path.exists());
+        // 1. Missing legacy file falls back cleanly to default state in redb
+        let store = StateStore::open(&db_path, Some(&legacy_path)).unwrap();
+        assert!(db_path.exists());
+        assert!(!legacy_path.exists());
         let snap = store.snapshot();
         assert_eq!(snap.current_room_id, None);
         assert_eq!(snap.locale, None);
         assert!(snap.room_history.is_empty());
         assert_eq!(snap.record_raw, None);
+        drop(store);
 
-        // 2. Corrupt JSON falls back safely to defaults
-        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        fs::write(&state_path, "{ not valid json !!!").unwrap();
-        let corrupt_store = StateStore::load_or_default(&state_path);
+        // 2. Corrupt legacy JSON falls back safely to defaults without deleting corrupt file
+        let corrupt_db = db_path.parent().unwrap().join("corrupt.redb");
+        fs::write(&legacy_path, "{ not valid json !!!").unwrap();
+        let corrupt_store = StateStore::open(&corrupt_db, Some(&legacy_path)).unwrap();
         assert_eq!(corrupt_store.snapshot(), AppPersistedState::default());
+        assert!(legacy_path.exists());
+        drop(corrupt_store);
 
-        // 3. Unknown/invalid locale, legacy extra fields (e.g. "theme"), and duplicate/zero room entries get sanitized
+        // 3. Unknown/invalid locale, legacy extra fields (e.g. "theme"), and duplicate/zero room entries get sanitized & migrated
+        let migrate_db = db_path.parent().unwrap().join("migrated.redb");
         fs::write(
-            &state_path,
+            &legacy_path,
             r#"{
                 "current_room_id": 0,
                 "theme": "default",
@@ -465,15 +488,22 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let sanitized = StateStore::load_or_default(&state_path);
+        let sanitized = StateStore::open(&migrate_db, Some(&legacy_path)).unwrap();
         let s = sanitized.snapshot();
         assert_eq!(s.current_room_id, None);
         assert_eq!(s.locale, None);
         assert_eq!(s.room_history.len(), 1);
         assert_eq!(s.room_history[0].room_id, 101);
         assert_eq!(s.room_history[0].uname, "主播A");
+        assert!(!legacy_path.exists());
+        drop(sanitized);
 
-        let _ = fs::remove_dir_all(state_path.parent().unwrap().parent().unwrap());
+        // Reopening loads migrated state from redb cleanly
+        let reopened = StateStore::open(&migrate_db, Some(&legacy_path)).unwrap();
+        assert_eq!(reopened.snapshot(), s);
+        drop(reopened);
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 
     #[test]
@@ -486,31 +516,33 @@ mod tests {
         assert_eq!(normalize_locale("fr-FR"), None);
         assert_eq!(normalize_locale("   "), None);
 
-        let state_path = temp_state_path("locale_persist");
-        let store = StateStore::load_or_default(&state_path);
+        let (db_path, _) = temp_state_paths("locale_persist");
+        let store = StateStore::open(&db_path, None).unwrap();
 
         assert!(store.set_locale(Some("fr-FR".to_string())).is_err());
 
         let updated = store.set_locale(Some("ja_JP".to_string())).unwrap();
         assert_eq!(updated.locale.as_deref(), Some("ja"));
-        assert!(state_path.exists());
+        assert!(db_path.exists());
 
         store.set_record_raw(Some(true)).unwrap();
+        drop(store);
 
-        let reloaded = StateStore::load_or_default(&state_path);
+        let reloaded = StateStore::open(&db_path, None).unwrap();
         assert_eq!(reloaded.locale().as_deref(), Some("ja"));
         assert_eq!(reloaded.record_raw(), Some(true));
 
-        let cleared = store.set_locale(None).unwrap();
+        let cleared = reloaded.set_locale(None).unwrap();
         assert_eq!(cleared.locale, None);
+        drop(reloaded);
 
-        let _ = fs::remove_dir_all(state_path.parent().unwrap().parent().unwrap());
+        let _ = fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 
     #[test]
     fn test_state_store_room_history_dedup_reorder_and_cap_20() {
-        let state_path = temp_state_path("history_cap");
-        let store = StateStore::load_or_default(&state_path);
+        let (db_path, _) = temp_state_paths("history_cap");
+        let store = StateStore::open(&db_path, None).unwrap();
 
         // Insert 25 distinct rooms (1..=25) -> keeps latest 20 (25 down to 6)
         for id in 1..=25u64 {
@@ -554,9 +586,12 @@ mod tests {
 
         // Remove entry persists across reload
         store.remove_history_room(25).unwrap();
-        let reloaded = StateStore::load_or_default(&state_path);
-        assert!(reloaded.room_history().iter().all(|e| e.room_id != 25));
+        drop(store);
 
-        let _ = fs::remove_dir_all(state_path.parent().unwrap().parent().unwrap());
+        let reloaded = StateStore::open(&db_path, None).unwrap();
+        assert!(reloaded.room_history().iter().all(|e| e.room_id != 25));
+        drop(reloaded);
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
     }
 }

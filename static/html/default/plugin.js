@@ -2,11 +2,27 @@
     const scPinBar = document.getElementById('sc-pin-bar');
     const container = document.getElementById('danmaku-container');
     const enterDock = document.getElementById('enter-dock');
-    const SHOW_LIKE = Dambo.utils.getQueryBool('show_like', false);
 
-    const MAX_ITEMS = 60;
-    const MAX_PIN_CARDS = 4;
-    const ENTER_TTL_MS = 3000;
+    const searchParams = new URLSearchParams(window.location.search);
+    const hasQueryOverride = {
+        show_like: searchParams.has('show_like'),
+        max_items: searchParams.has('max_items'),
+        max_pin_cards: searchParams.has('max_pin_cards'),
+        show_enter: searchParams.has('show_enter'),
+        enter_ttl_ms: searchParams.has('enter_ttl_ms'),
+        show_avatar: searchParams.has('show_avatar'),
+        show_medal: searchParams.has('show_medal'),
+    };
+    const runtimeConfig = {
+        showLike: Dambo.utils.getQueryBool('show_like', false),
+        maxItems: Math.max(10, Math.min(200, Number(Dambo.utils.getQueryParam('max_items', '60')) || 60)),
+        maxPinCards: Math.max(0, Math.min(10, Number(Dambo.utils.getQueryParam('max_pin_cards', '4')) || 4)),
+        showEnter: Dambo.utils.getQueryBool('show_enter', true),
+        enterTtlMs: Math.max(1000, Math.min(15000, Number(Dambo.utils.getQueryParam('enter_ttl_ms', '3000')) || 3000)),
+        showAvatar: Dambo.utils.getQueryBool('show_avatar', true),
+        showMedal: Dambo.utils.getQueryBool('show_medal', true),
+    };
+
     const GIFT_COMBO_WINDOW_MS = 4000;
     const RECENT_GIFT_TAIL_LIMIT = 8;
     const SCROLL_BOTTOM_THRESHOLD_PX = 24;
@@ -44,18 +60,56 @@
         enterTimers = [];
     }
 
+    function applyPlatformConfig(cfg) {
+        if (!cfg || typeof cfg !== 'object') return;
+        if (!hasQueryOverride.show_like && typeof cfg.show_like === 'boolean') {
+            runtimeConfig.showLike = cfg.show_like;
+        }
+        if (!hasQueryOverride.max_items && typeof cfg.max_items === 'number' && Number.isFinite(cfg.max_items)) {
+            runtimeConfig.maxItems = Math.max(10, Math.min(200, Math.floor(cfg.max_items)));
+            pruneOverflowItems();
+        }
+        if (!hasQueryOverride.max_pin_cards && typeof cfg.max_pin_cards === 'number' && Number.isFinite(cfg.max_pin_cards)) {
+            runtimeConfig.maxPinCards = Math.max(0, Math.min(10, Math.floor(cfg.max_pin_cards)));
+            if (scPinBar) {
+                while (scPinBar.children.length > runtimeConfig.maxPinCards) {
+                    scPinBar.removeChild(scPinBar.lastChild);
+                }
+                if (runtimeConfig.maxPinCards === 0 || scPinBar.children.length === 0) {
+                    scPinBar.classList.add('hidden');
+                }
+            }
+        }
+        if (!hasQueryOverride.show_enter && typeof cfg.show_enter === 'boolean') {
+            runtimeConfig.showEnter = cfg.show_enter;
+            if (!runtimeConfig.showEnter && enterDock) {
+                clearEnterTimers();
+                enterDock.replaceChildren();
+            }
+        }
+        if (!hasQueryOverride.enter_ttl_ms && typeof cfg.enter_ttl_ms === 'number' && Number.isFinite(cfg.enter_ttl_ms)) {
+            runtimeConfig.enterTtlMs = Math.max(1000, Math.min(15000, Math.floor(cfg.enter_ttl_ms)));
+        }
+        if (!hasQueryOverride.show_avatar && typeof cfg.show_avatar === 'boolean') {
+            runtimeConfig.showAvatar = cfg.show_avatar;
+        }
+        if (!hasQueryOverride.show_medal && typeof cfg.show_medal === 'boolean') {
+            runtimeConfig.showMedal = cfg.show_medal;
+        }
+    }
+
     function clearAllState() {
         timerBag.clearAll();
         giftCombos.clear();
         clearEnterTimers();
         autoScroll.reset();
         seenPinKeys.clear();
-        container.innerHTML = '';
+        container.replaceChildren();
         if (enterDock) {
-            enterDock.innerHTML = '';
+            enterDock.replaceChildren();
         }
         if (scPinBar) {
-            scPinBar.innerHTML = '';
+            scPinBar.replaceChildren();
             scPinBar.classList.add('hidden');
         }
     }
@@ -63,7 +117,7 @@
     function createSpan(className, text) {
         const span = document.createElement('span');
         span.className = className;
-        span.innerText = text;
+        span.textContent = text;
         return span;
     }
 
@@ -82,8 +136,8 @@
     }
 
     function buildUserIdentity(item, options = {}) {
-        const showAvatar = options.showAvatar !== false;
-        const showMedal = options.showMedal !== false;
+        const showAvatar = options.showAvatar !== false && runtimeConfig.showAvatar;
+        const showMedal = options.showMedal !== false && runtimeConfig.showMedal;
         const showGuard = options.showGuard !== false;
         const showColon = Boolean(options.showColon);
 
@@ -142,15 +196,15 @@
     }
 
     function showEnterInDock(item, options) {
-        if (!enterDock || !item) return;
+        if (!enterDock || !item || !runtimeConfig.showEnter) return;
 
-        const delayMs = Dambo.utils.remainingDurationMs(item, ENTER_TTL_MS, {
+        const delayMs = Dambo.utils.remainingDurationMs(item, runtimeConfig.enterTtlMs, {
             isSnapshot: Boolean(options?.isSnapshot),
         });
         if (delayMs <= 0) return;
 
         clearEnterTimers();
-        enterDock.innerHTML = '';
+        enterDock.replaceChildren();
 
         const row = document.createElement('div');
         row.className = 'item-enter';
@@ -184,7 +238,8 @@
     }
 
     function addPinnedHighlight(item, options) {
-        if (!scPinBar || (!Dambo.utils.isSuperChat(item.kind) && item.kind !== 'guard')) return;
+        if (!scPinBar || runtimeConfig.maxPinCards === 0) return;
+        if (!Dambo.utils.isSuperChat(item.kind) && item.kind !== 'guard') return;
         const key = pinnedHighlightKey(item);
         if (seenPinKeys.has(key)) return;
 
@@ -216,7 +271,7 @@
             const body = document.createElement('div');
             body.className = 'sc-pin-body';
             if (isGuard && !item.emoticon) {
-                body.innerText = bodyText;
+                body.textContent = bodyText;
             } else {
                 renderTextOrEmotes(body, item);
             }
@@ -233,7 +288,7 @@
 
         scPinBar.classList.remove('hidden');
         scPinBar.prepend(card);
-        while (scPinBar.children.length > MAX_PIN_CARDS) {
+        while (scPinBar.children.length > runtimeConfig.maxPinCards) {
             scPinBar.removeChild(scPinBar.lastChild);
         }
 
@@ -276,7 +331,7 @@
     }
 
     function pruneOverflowItems() {
-        while (container.children.length > MAX_ITEMS) {
+        while (container.children.length > runtimeConfig.maxItems) {
             const oldest = container.firstElementChild;
             if (!oldest) break;
             const comboKey = oldest.dataset ? oldest.dataset.giftComboKey : '';
@@ -316,7 +371,7 @@
         if (!entry.data.priceEl) {
             entry.data.priceEl = appendSpan(entry.data.el, 'price-badge', cny);
         } else {
-            entry.data.priceEl.innerText = cny;
+            entry.data.priceEl.textContent = cny;
         }
     }
 
@@ -357,7 +412,7 @@
                 }
             }
 
-            ui.countEl.innerText = formatGiftComboCount(entry.totalCount);
+            ui.countEl.textContent = formatGiftComboCount(entry.totalCount);
             updateGiftPriceBadge(entry);
 
             if (!isSnapshot) {
@@ -474,7 +529,7 @@
         if (!item) return;
         const kind = item.kind || 'chat';
 
-        if (kind === 'like' && !SHOW_LIKE) return;
+        if (kind === 'like' && !runtimeConfig.showLike) return;
         if (
             kind === 'room_info' ||
             kind === 'session_end' ||
@@ -518,10 +573,24 @@
         autoScroll.schedule();
     }
 
+    if (Dambo.config && typeof Dambo.config.get === 'function') {
+        Dambo.config
+            .get()
+            .then(applyPlatformConfig)
+            .catch(() => {});
+    }
+    if (Dambo.config && typeof Dambo.config.watch === 'function') {
+        Dambo.config.watch(() => {
+            Dambo.config
+                .get()
+                .then(applyPlatformConfig)
+                .catch(() => {});
+        });
+    }
+
     const client = Dambo.connect({
         channel: 'feed',
         replaySnapshot: false,
-        showLike: SHOW_LIKE,
     });
 
     client.on('snapshot', (snapshotData) => {
@@ -532,7 +601,7 @@
         const now = Date.now();
         items
             .filter((it) => it && it.kind !== 'enter')
-            .slice(-MAX_ITEMS)
+            .slice(-runtimeConfig.maxItems)
             .forEach((it) => renderItem(it, { isSnapshot: true }));
 
         giftCombos.pruneExpiredSnapshots();
@@ -540,7 +609,7 @@
         for (let i = items.length - 1; i >= 0; i--) {
             const it = items[i];
             if (it && it.kind === 'enter') {
-                if (it.timestamp && now - it.timestamp < ENTER_TTL_MS) {
+                if (it.timestamp && now - it.timestamp < runtimeConfig.enterTtlMs) {
                     showEnterInDock(it, { isSnapshot: true });
                 }
                 break;

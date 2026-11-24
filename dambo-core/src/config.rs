@@ -50,10 +50,17 @@ pub struct Config {
     pub record: RecordConfig,
 }
 
+/// Default path for the unified embedded `redb` database file.
+pub const DEFAULT_DB_FILE: &str = "var/dambo.redb";
+
+/// Legacy path previously used solely for plugin storage prior to unified `var/dambo.redb`.
+pub const LEGACY_PLUGIN_DB_FILE: &str = "var/plugins.redb";
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BilibiliConfig {
     #[serde(default)]
     pub room_id: u64,
+    /// Deprecated: login sessions are now stored in `redb`; kept for legacy one-time `session.json` migration.
     #[serde(default = "default_session_file")]
     pub session_file: String,
     #[serde(default = "default_avatar_cache_size")]
@@ -124,10 +131,12 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_html_dir")]
     pub html_dir: String,
+    /// Deprecated: runtime state is now stored in `redb`; kept for legacy one-time `state.json` migration.
     #[serde(default = "default_state_file")]
     pub state_file: String,
-    #[serde(default = "default_plugin_db_file")]
-    pub plugin_db_file: String,
+    /// Unified embedded redb database file (session, runtime state, plugin storage, ACLs, and topics).
+    #[serde(default = "default_db_file", alias = "plugin_db_file")]
+    pub db_file: String,
     #[serde(default)]
     pub allow_remote_manage: bool,
     #[serde(default)]
@@ -143,7 +152,7 @@ impl Default for ServerConfig {
             port: default_port(),
             html_dir: default_html_dir(),
             state_file: default_state_file(),
-            plugin_db_file: default_plugin_db_file(),
+            db_file: default_db_file(),
             allow_remote_manage: false,
             admin_token: None,
             allowed_hosts: Vec::new(),
@@ -247,8 +256,8 @@ fn default_html_dir() -> String {
 fn default_state_file() -> String {
     "var/state.json".to_string()
 }
-fn default_plugin_db_file() -> String {
-    "var/plugins.redb".to_string()
+fn default_db_file() -> String {
+    DEFAULT_DB_FILE.to_string()
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -298,7 +307,7 @@ mod tests {
         assert_eq!(def.bilibili.session_file, "var/session.json");
         assert_eq!(def.server.html_dir, "static/html");
         assert_eq!(def.server.state_file, "var/state.json");
-        assert_eq!(def.server.plugin_db_file, "var/plugins.redb");
+        assert_eq!(def.server.db_file, "var/dambo.redb");
         assert!(!def.server.allow_remote_manage);
         assert_eq!(def.server.admin_token, None);
         assert!(def.server.allowed_hosts.is_empty());
@@ -306,7 +315,7 @@ mod tests {
         assert_eq!(def.record.dir, "var/records");
         assert!(!def.record.record_raw);
 
-        // Explicit [event] + [server].state_file + [record].record_raw = true
+        // Explicit [event] + [server].db_file + [record].record_raw = true
         let parsed: Config = toml::from_str(
             r#"
 [event]
@@ -316,7 +325,7 @@ max_combo_wait_secs = 12
 
 [server]
 state_file = "/tmp/custom_state.json"
-plugin_db_file = "/tmp/custom_plugins.redb"
+db_file = "/tmp/custom_dambo.redb"
 allow_remote_manage = true
 admin_token = "secret123"
 allowed_hosts = ["dambo.local", "box.ts.net"]
@@ -331,18 +340,24 @@ record_raw = true
         assert_eq!(parsed.event.min_passthrough_chars, 6);
         assert_eq!(parsed.event.max_combo_wait_secs, 12);
         assert_eq!(parsed.server.state_file, "/tmp/custom_state.json");
-        assert_eq!(parsed.server.plugin_db_file, "/tmp/custom_plugins.redb");
+        assert_eq!(parsed.server.db_file, "/tmp/custom_dambo.redb");
         assert!(parsed.server.allow_remote_manage);
         assert_eq!(parsed.server.admin_token.as_deref(), Some("secret123"));
-        assert_eq!(parsed.server.allowed_hosts, vec!["dambo.local", "box.ts.net"]);
+        assert_eq!(
+            parsed.server.allowed_hosts,
+            vec!["dambo.local", "box.ts.net"]
+        );
         assert!(!parsed.record.enabled);
         assert!(parsed.record.record_raw);
 
-        // Legacy aliases [dam] and dump_raw remain readable
+        // Legacy aliases [dam], dump_raw, and plugin_db_file remain readable
         let legacy: Config = toml::from_str(
             r#"
 [dam]
 window_ms = 3000
+
+[server]
+plugin_db_file = "/tmp/custom_plugins.redb"
 
 [record]
 dump_raw = true
@@ -351,6 +366,7 @@ dump_raw = true
         .unwrap();
         assert_eq!(legacy.event.window_ms, 3000);
         assert_eq!(legacy.event.min_passthrough_chars, 4);
+        assert_eq!(legacy.server.db_file, "/tmp/custom_plugins.redb");
         assert!(legacy.record.record_raw);
     }
 }

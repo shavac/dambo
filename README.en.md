@@ -57,7 +57,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for testing and contribution conventions.
 
 ### 2. Sign In & Connect to a Room
 
-1. **QR Sign In**: Click the account button on the left of the capsule and scan the QR code with the Bilibili mobile app (your session is persisted locally in `var/session.json`).
+1. **QR Sign In**: Click the account button on the left of the capsule and scan the QR code with the Bilibili mobile app (your session is persisted locally in `var/dambo.redb`).
 2. **Connect to a Live Room**:
    - Enter a **room ID**, **short ID**, or `https://live.bilibili.com/...` URL and press `Enter` (or click **Connect**);
    - Or open the dropdown menu to pick directly from **My Room**, **Following Live**, or **Recent Rooms**.
@@ -78,7 +78,7 @@ Open **Plugins (...)** on the capsule (or **Plugins** in the system tray menu):
 
 - **Use in OBS Studio**: Click **Copy OBS URL**, create a **Browser** source in OBS, paste the URL, and set the recommended width/height from the table below for transparent overlay rendering.
 - **Float on Desktop**: Click **Open on Desktop** to pop out any plugin as a transparent desktop window. Hover near the top-right corner of the overlay to drag it, toggle **Always on Top**, or close it (or press `Esc`).
-- **View on LAN Devices**: To access `/list` from a phone or tablet on the same network, set `host = "0.0.0.0"` under `[server]` in `etc/config.toml`.
+- **Plugin Management & LAN Access**: Click **Manage** on a plugin card (or **Open Manage Page** in the tray menu) to open `/{plugin}/m` in your browser for configuration and ACL approval. To open `/list/` from a phone or tablet on the same network, set `host = "0.0.0.0"` under `[server]` in `etc/config.toml`.
 
 ---
 
@@ -88,10 +88,10 @@ Dambo includes four ready-to-use web plugins out of the box:
 
 | Plugin | Route | Recommended OBS Size | Use Case |
 | --- | --- | --- | --- |
-| **`default`** | `/` or `/default` | `420 × 720` | **Primary OBS Transparent Overlay**: pinned SuperChat/Guard bar, ephemeral enter dock, 4s sliding gift combo merging with pulse feedback, and auto-follow bottom scroll |
-| **`list`** | `/list` | `480 × 800` | **Streamer / Moderator Monitor**: category filters (All / Chat / Gift & SC / Medal), manual scroll-up pause with unread counter, and sticky SC header |
-| **`sc-ticker`** | `/sc-ticker` | `420 × 320` | **SC & Guard Countdown Cards**: compact corner widget focused purely on SuperChats and Guard subscriptions |
-| **`game24`** | `/game24` | `560 × 420` | **24-Point Poker Chat Game**: deals 4 cards (A–K) each round for viewers to solve via danmaku math expressions (e.g. `(3+3)*(8-4)`), with live scoring & leaderboard; defaults to `300s` per round and supports `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` |
+| **`default`** | `/` or `/default/` | `420 × 720` | **Primary OBS Transparent Overlay**: pinned SuperChat/Guard bar, ephemeral enter dock, 4s sliding gift combo merging with pulse feedback, and auto-follow bottom scroll |
+| **`list`** | `/list/` | `480 × 800` | **Streamer / Moderator Monitor**: category filters (All / Chat / Gift & SC / Medal), manual scroll-up pause with unread counter, and sticky SC header |
+| **`sc-ticker`** | `/sc-ticker/` | `420 × 320` | **SC & Guard Countdown Cards**: compact corner widget focused purely on SuperChats and Guard subscriptions |
+| **`game24`** | `/game24/` | `560 × 420` | **24-Point Poker Chat Game**: deals 4 cards (A–K) each round for viewers to solve via danmaku math expressions (e.g. `(3+3)*(8-4)`), with live scoring & leaderboard; defaults to `300s` per round and supports `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` |
 
 ---
 
@@ -101,7 +101,7 @@ Want a custom theme, giveaway spinner, song-request board, or chat mini-game? **
 
 1. Upload **[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)** (or Chinese **[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)**) directly to your preferred AI assistant.
 2. Describe what you want in plain language (for example: *"Using the uploaded PLUGIN_GUIDE.md, build a minimalist cyberpunk gift-alert banner plugin"*) and tell the AI to **follow the guide strictly**.
-3. Click **Plugins -> Open Plugins Folder** in Dambo (`static/html/`), create a new folder for your plugin, and place the AI-generated files inside (`index.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus an optional `assets/` folder for images, fonts, or audio).
+3. Click **Plugins -> Open Plugins Folder** in Dambo (`static/html/`), create a new folder for your plugin, and place the AI-generated files inside (`plugin.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus optional `manage.html` / `manage.css` / `manage.js` and static assets).
 4. Dambo hot-reloads the folder in ~200ms—your custom plugin appears right away in the UI and tray menu without restarting.
 
 ---
@@ -120,14 +120,16 @@ Want a custom theme, giveaway spinner, song-request board, or chat mini-game? **
   - `[server]`: defaults to `localhost:3838` (change `host = "0.0.0.0"` for LAN access).
   - `[feed]`: controls snapshot history depth (`max_history`), room-enter alerts (`show_enter`), and fan medals (`show_medal`).
   - `[record]`: controls lossless JSONL recording and filename patterns (saved under `var/records/`).
-- **`var/`** (runtime data): stores your saved login session (`session.json`), room history & language preference (`state.json`), logs (`logs/`), and recordings (`records/`).
+- **`var/`** (runtime data): stores the unified embedded database `dambo.redb` (login session, room history, language preference, recording toggle, and plugin storage/ACL/topics), logs (`logs/`), and recordings (`records/`).
 
 ### HTTP & WebSocket Endpoints
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /` or `GET /{plugin}` | Open any built-in or custom plugin page in a browser / OBS |
+| `GET /` or `GET /{plugin}/` | Open any built-in or custom plugin view page in a browser / OBS |
+| `GET /{plugin}/m` | Open the plugin configuration, storage & ACL management page in a browser |
 | `GET /sdk/dambo.js` | Embedded zero-dependency Pure-Web Plugin SDK |
+| `GET /api/v1/*` | Layer 1 Plugin Platform HTTP REST + SSE APIs |
 | `GET /ws` | Channel A WebSocket — real-time danmaku & overlay event feed (`Snapshot`, `Event`, `RoomState`) |
 | `GET /ws/event` | Channel B WebSocket — shaped, combo-settled event batches for bots, TTS & AI pipelines |
 

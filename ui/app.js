@@ -313,7 +313,7 @@ function renderPlugins(plugins) {
 
     const listEl = document.getElementById('plugin-cards-list');
     if (!listEl) return;
-    listEl.innerHTML = '';
+    listEl.replaceChildren();
 
     if (pluginList.length === 0) {
         const empty = document.createElement('div');
@@ -409,8 +409,29 @@ function renderPlugins(plugins) {
             }
         };
 
+        const manageBtn = document.createElement('button');
+        manageBtn.type = 'button';
+        manageBtn.className = 'plugin-btn';
+        manageBtn.innerText = t('plugin.open_manage');
+        manageBtn.title = p.manage_url || p.manage_route || '';
+        manageBtn.onclick = async () => {
+            if (!invoke) return;
+            try {
+                await invoke('open_plugin_manage', { pluginName: p.name });
+                showToast(t('toast.opened_manage', { name: p.title || p.name }));
+            } catch (e) {
+                console.error('open_plugin_manage failed:', e);
+                showToast(t('toast.error_prefix', { error: String(e) }));
+            }
+        };
+
+        const secondaryRow = document.createElement('div');
+        secondaryRow.className = 'plugin-card-actions-row';
+        secondaryRow.appendChild(manageBtn);
+        secondaryRow.appendChild(copyBtn);
+
         actions.appendChild(toggleDesktopBtn);
-        actions.appendChild(copyBtn);
+        actions.appendChild(secondaryRow);
 
         card.appendChild(main);
         card.appendChild(actions);
@@ -810,7 +831,7 @@ function renderRoomOptions(payload) {
     }
 
     if (followingEl) {
-        followingEl.innerHTML = '';
+        followingEl.replaceChildren();
         const list = payload?.following_live || [];
         if (list.length === 0) {
             const empty = document.createElement('div');
@@ -842,7 +863,7 @@ function renderHistoryList(historyRooms) {
     currentHistoryRooms = Array.isArray(historyRooms) ? historyRooms : [];
     const historyEl = document.getElementById('history-rooms-list');
     if (!historyEl) return;
-    historyEl.innerHTML = '';
+    historyEl.replaceChildren();
 
     if (currentHistoryRooms.length === 0) {
         const empty = document.createElement('div');

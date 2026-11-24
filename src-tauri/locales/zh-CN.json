@@ -7,6 +7,7 @@
   "tray.plugin_open_desktop": "桌面打开",
   "tray.plugin_close_desktop": "关闭桌面",
   "tray.plugin_copy_url": "复制 OBS URL",
+  "tray.plugin_open_manage": "打开管理页",
   "tray.plugin_open_dir": "打开插件目录...",
   "tray.language_menu": "语言",
   "tray.language_zh_cn": "简体中文",
@@ -50,6 +51,7 @@
   "plugin.close_desktop": "关闭桌面",
   "plugin.copy_url": "复制 OBS URL",
   "plugin.copied": "✓ 已复制",
+  "plugin.open_manage": "管理页",
   "plugin.open_dir": "打开插件目录",
 
   "more.title": "更多操作",
@@ -79,6 +81,7 @@
   "toast.copied_url": "已复制地址：{url}",
   "toast.opened_desktop": "已在桌面打开插件：{name}",
   "toast.closed_desktop": "已关闭桌面插件：{name}",
+  "toast.opened_manage": "已在浏览器打开管理页：{name}",
   "toast.locale_updated": "语言已切换：{locale}",
   "toast.record_raw_on": "已开启原始包录制",
   "toast.record_raw_off": "已关闭原始包录制",

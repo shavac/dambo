@@ -52,7 +52,8 @@
             position: relative;
             box-shadow: 0 4px 16px rgba(0,0,0,0.4);
         }
-        #qr-container svg {
+        #qr-container svg,
+        #qr-container img.qr-img {
             width: 170px;
             height: 170px;
             display: block;
@@ -90,67 +91,6 @@
     <div id="status-text" class="status-text" data-i18n="qr.loading">Loading QR code...</div>
     <button id="refresh-btn" class="refresh-btn" style="display:none;" data-i18n="qr.refresh_btn">Refresh QR Code</button>
 
-    <script>
-        const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-        const listen = window.__TAURI__?.event?.listen;
-        const refreshBtn = document.getElementById('refresh-btn');
-        let dict = {};
-
-        function tr(key, fallback) {
-            return dict[key] || fallback;
-        }
-
-        function applyLocale(payload) {
-            if (!payload) return;
-            if (payload.locale) {
-                document.documentElement.lang = payload.locale;
-            }
-            if (payload.messages) {
-                dict = payload.messages;
-            }
-            document.title = tr('qr.window_title', 'Bilibili QR Sign In');
-            document.querySelectorAll('[data-i18n]').forEach((el) => {
-                const key = el.getAttribute('data-i18n');
-                if (key && dict[key]) {
-                    el.innerText = dict[key];
-                }
-            });
-        }
-
-        async function initQrWindow() {
-            if (invoke) {
-                invoke('get_i18n').then(applyLocale).catch(console.error);
-            }
-            if (listen) {
-                await listen('i18n-updated', (event) => applyLocale(event.payload));
-                await listen('qr_code_updated', (event) => {
-                    const data = event.payload;
-                    if (data && data.svg) {
-                        document.getElementById('qr-container').innerHTML = data.svg;
-                    }
-                    if (data && data.message) {
-                        document.getElementById('status-text').innerText = data.message;
-                    }
-                    if (refreshBtn) {
-                        refreshBtn.style.display = data && data.show_refresh ? 'inline-block' : 'none';
-                    }
-                });
-                await listen('qr_login_success', () => {
-                    document.getElementById('status-text').innerText = tr('qr.success', 'Signed in, closing...');
-                    if (refreshBtn) refreshBtn.style.display = 'none';
-                });
-            }
-
-            refreshBtn?.addEventListener('click', () => {
-                refreshBtn.style.display = 'none';
-                document.getElementById('status-text').innerText = tr('qr.refreshing', 'Refreshing QR code...');
-                invoke?.('refresh_qr_code').catch(console.error);
-            });
-
-            invoke?.('refresh_qr_code').catch(console.error);
-        }
-
-        document.addEventListener('DOMContentLoaded', initQrWindow);
-    </script>
+    <script src="login.js"></script>
 </body>
 </html>
