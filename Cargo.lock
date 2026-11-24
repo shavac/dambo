@@ -299,12 +299,11 @@ dependencies = [
 [[package]]
 name = "blive-proto"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3b65ba73591199367eb4402d55168a5dbd2b9f4aa7f29ed36ba6a2ad2891e28"
 dependencies = [
  "base64 0.22.1",
  "brotlic",
  "chrono",
+ "clru",
  "flate2",
  "futures-channel",
  "http 0.2.12",
@@ -934,7 +933,6 @@ dependencies = [
  "axum",
  "blive-proto",
  "chrono",
- "clru",
  "futures-util",
  "http 1.5.0",
  "log",
@@ -949,7 +947,6 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml 1.2.2+spec-1.1.0",
- "tungstenite 0.20.1",
 ]
 
 [[package]]

@@ -1,24 +1,18 @@
 use crate::db;
 use crate::model::{AuthState, RoomQuickItem};
 use anyhow::{Context, Result, anyhow};
-use blive_proto::auth::form_urlencode;
+use blive_proto::api::BiliApiClient;
 pub use blive_proto::auth::{
     DANMAKU_MAX_CHARS, QrPollStatus, SendDanmakuError, SessionData, parse_live_user_info_response,
     parse_nav_response, parse_qr_poll_code, parse_qr_poll_response, parse_send_danmaku_response,
 };
-use blive_proto::commands::value_as_u64;
 use qrcode::QrCode;
 use qrcode::render::{svg, unicode};
 use redb::Database;
-use reqwest::header::{CONTENT_TYPE, COOKIE, ORIGIN, REFERER, SET_COOKIE};
-use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
-
-const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /// Render a URL string into `(svg_xml, terminal_unicode_qr)`.
 pub fn render_qr(url: &str) -> Result<(String, String)> {
@@ -82,7 +76,7 @@ pub struct AuthManager {
     write_lock: Mutex<()>,
     session: RwLock<Option<SessionData>>,
     state_tx: watch::Sender<AuthState>,
-    http: reqwest::Client,
+    api: BiliApiClient,
 }
 
 impl AuthManager {
@@ -191,19 +185,13 @@ impl AuthManager {
             None => AuthState::default(),
         };
 
-        let http = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("Failed to construct reqwest HTTP client");
-
         let (state_tx, _) = watch::channel(initial_state);
         Self {
             db,
             write_lock: Mutex::new(()),
             session: RwLock::new(loaded),
             state_tx,
-            http,
+            api: BiliApiClient::new(),
         }
     }
 
@@ -332,7 +320,7 @@ impl AuthManager {
         log::warn!("⚠️ Cleared expired Bilibili session");
     }
 
-    /// Send a live danmaku text message to `room_id` via `https://api.live.bilibili.com/msg/send`.
+    /// Send a live danmaku text message to `room_id` via `blive-proto`.
     pub async fn send_danmaku(
         &self,
         room_id: u64,
@@ -348,61 +336,14 @@ impl AuthManager {
             return Err(SendDanmakuError::NotLoggedIn);
         }
 
-        let trimmed = msg.trim();
-        if trimmed.is_empty() {
-            return Err(SendDanmakuError::EmptyMessage);
-        }
-        if trimmed.chars().count() > DANMAKU_MAX_CHARS {
-            return Err(SendDanmakuError::MessageTooLong {
-                max: DANMAKU_MAX_CHARS,
-            });
-        }
-
-        let rnd = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-            .to_string();
-        let room_str = room_id.to_string();
-        let csrf = session.bili_jct.trim();
-        let body = form_urlencode(&[
-            ("bubble", "0"),
-            ("msg", trimmed),
-            ("color", "16777215"),
-            ("mode", "1"),
-            ("fontsize", "25"),
-            ("rnd", &rnd),
-            ("roomid", &room_str),
-            ("csrf", csrf),
-            ("csrf_token", csrf),
-        ]);
-
-        let resp = self
-            .http
-            .post("https://api.live.bilibili.com/msg/send")
-            .header(COOKIE, session.to_cookie_header())
-            .header(REFERER, format!("https://live.bilibili.com/{}", room_id))
-            .header(ORIGIN, "https://live.bilibili.com")
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| SendDanmakuError::Network(e.to_string()))?;
-
-        let json: Value = resp
-            .json()
-            .await
-            .map_err(|e| SendDanmakuError::Network(e.to_string()))?;
-
-        let parsed = parse_send_danmaku_response(&json);
-        if matches!(parsed, Err(SendDanmakuError::AuthExpired(_))) {
+        let res = self.api.send_danmaku(&session, room_id, msg).await;
+        if matches!(res, Err(SendDanmakuError::AuthExpired(_))) {
             self.invalidate_session();
         }
-        parsed
+        res
     }
 
-    /// Validate stored cookies against `https://api.bilibili.com/x/web-interface/nav`,
-    /// falling back to `https://api.live.bilibili.com/xlive/web-ucenter/user/get_user_info`.
+    /// Validate stored cookies via `blive-proto` (`nav` with live user-info fallback).
     pub async fn validate_session(&self) -> Result<AuthState> {
         let Some(session) = self.current_session() else {
             self.state_tx.send_replace(AuthState::default());
@@ -413,134 +354,29 @@ impl AuthManager {
             return Ok(AuthState::default());
         }
 
-        let cookie = session.to_cookie_header();
-        let fallback_mid = session.dede_user_id.parse().unwrap_or(0);
-
-        let nav_err: String = match self
-            .http
-            .get("https://api.bilibili.com/x/web-interface/nav")
-            .header(COOKIE, &cookie)
-            .header(REFERER, "https://www.bilibili.com/")
-            .send()
+        let state = self
+            .api
+            .validate_session(&session)
             .await
-        {
-            Ok(resp) => match resp.json::<Value>().await {
-                Ok(json) => {
-                    if let Some(state) = parse_nav_response(&json, fallback_mid) {
-                        return Ok(self.apply_validated_auth(state));
-                    }
-                    format!(
-                        "unexpected nav payload (code={})",
-                        json["code"].as_i64().unwrap_or(-1)
-                    )
-                }
-                Err(e) => format!("Failed to decode Bilibili nav JSON: {:#}", e),
-            },
-            Err(e) => format!("Failed to request Bilibili nav API: {:#}", e),
-        };
-
-        log::warn!(
-            "Primary Bilibili nav API unavailable ({}), falling back to live user info API",
-            nav_err
-        );
-
-        let live_res = self
-            .http
-            .get("https://api.live.bilibili.com/xlive/web-ucenter/user/get_user_info")
-            .header(COOKIE, &cookie)
-            .header(REFERER, "https://live.bilibili.com/")
-            .send()
-            .await;
-
-        let live_err: String = match live_res {
-            Ok(resp) => match resp.json::<Value>().await {
-                Ok(json) => {
-                    if let Some(state) = parse_live_user_info_response(&json, fallback_mid) {
-                        return Ok(self.apply_validated_auth(state));
-                    }
-                    format!(
-                        "unexpected live user_info payload (code={})",
-                        json["code"].as_i64().unwrap_or(-1)
-                    )
-                }
-                Err(e) => format!("Failed to decode Bilibili live user_info JSON: {:#}", e),
-            },
-            Err(e) => format!("Failed to request Bilibili live user_info API: {:#}", e),
-        };
-
-        Err(anyhow!("nav: {}; live_user_info: {}", nav_err, live_err))
+            .map_err(|e| anyhow!(e))?;
+        Ok(self.apply_validated_auth(state))
     }
 
-    /// Request a fresh QR login URL & key from `passport.bilibili.com`.
+    /// Request a fresh QR login URL & key from Bilibili and render SVG + terminal QR codes.
     pub async fn generate_qr(&self) -> Result<QrGenerateResult> {
-        let resp: Value = self
-            .http
-            .get("https://passport.bilibili.com/x/passport-login/web/qrcode/generate")
-            .header(REFERER, "https://passport.bilibili.com/login")
-            .send()
-            .await
-            .context("Failed to request Bilibili QR generate API")?
-            .json()
-            .await
-            .context("Failed to decode Bilibili QR generate JSON")?;
-
-        let code = resp["code"].as_i64().unwrap_or(-1);
-        if code != 0 {
-            return Err(anyhow!(
-                "QR generate API failed (code {}): {}",
-                code,
-                resp["message"].as_str().unwrap_or("unknown")
-            ));
-        }
-
-        let url = resp["data"]["url"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("QR generate response missing data.url"))?
-            .to_string();
-        let qrcode_key = resp["data"]["qrcode_key"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("QR generate response missing data.qrcode_key"))?
-            .to_string();
-
-        let (svg, terminal_qr) = render_qr(&url)?;
+        let qr = self.api.generate_qr().await.map_err(|e| anyhow!(e))?;
+        let (svg, terminal_qr) = render_qr(&qr.url)?;
         Ok(QrGenerateResult {
-            url,
-            qrcode_key,
+            url: qr.url,
+            qrcode_key: qr.qrcode_key,
             svg,
             terminal_qr,
         })
     }
 
-    /// Poll QR scan confirmation status.
+    /// Poll QR scan confirmation status and persist the session on success.
     pub async fn poll_qr(&self, qrcode_key: &str) -> Result<QrPollStatus> {
-        let response = self
-            .http
-            .get("https://passport.bilibili.com/x/passport-login/web/qrcode/poll")
-            .query(&[("qrcode_key", qrcode_key)])
-            .header(REFERER, "https://passport.bilibili.com/login")
-            .send()
-            .await
-            .context("Failed to request Bilibili QR poll API")?;
-
-        let set_cookies: Vec<String> = response
-            .headers()
-            .get_all(SET_COOKIE)
-            .iter()
-            .filter_map(|hv| hv.to_str().ok().map(|s| s.to_string()))
-            .collect();
-
-        let body: Value = response
-            .json()
-            .await
-            .context("Failed to decode Bilibili QR poll JSON")?;
-
-        let code = body["data"]["code"].as_i64().unwrap_or(-1);
-        let message = body["data"]["message"].as_str().unwrap_or("");
-        let fallback_url = body["data"]["url"].as_str();
-
-        let status = parse_qr_poll_response(code, message, &set_cookies, fallback_url);
+        let status = self.api.poll_qr(qrcode_key).await.map_err(|e| anyhow!(e))?;
         if let QrPollStatus::Success(ref session) = status {
             let mid = session.dede_user_id.parse().unwrap_or(0);
             self.save_session(
@@ -558,7 +394,6 @@ impl AuthManager {
                 });
             }
         }
-
         Ok(status)
     }
 
@@ -567,44 +402,11 @@ impl AuthManager {
         let Some(session) = self.current_session() else {
             return Ok(None);
         };
-        let mid = session.dede_user_id.trim();
-        if mid.is_empty() {
-            return Ok(None);
-        }
-
-        let resp: Value = self
-            .http
-            .get("https://api.live.bilibili.com/room/v1/Room/getRoomInfoOld")
-            .query(&[("mid", mid)])
-            .header(COOKIE, session.to_cookie_header())
-            .header(REFERER, "https://live.bilibili.com/")
-            .send()
+        let uname = self.current_state().uname;
+        self.api
+            .fetch_my_room(&session, &uname)
             .await
-            .context("Failed to query getRoomInfoOld")?
-            .json()
-            .await
-            .context("Failed to parse getRoomInfoOld JSON")?;
-
-        if resp["code"].as_i64() != Some(0) {
-            return Ok(None);
-        }
-
-        let data = &resp["data"];
-        let room_status = data["roomStatus"].as_i64().unwrap_or(0);
-        let room_id = value_as_u64(&data["roomid"]).unwrap_or(0);
-        if room_status == 1 && room_id > 0 {
-            let title = data["title"].as_str().unwrap_or("").to_string();
-            let is_live = data["liveStatus"].as_i64() == Some(1);
-            let room_uname = self.current_state().uname;
-            Ok(Some(RoomQuickItem {
-                room_id,
-                room_uname,
-                title,
-                is_live,
-            }))
-        } else {
-            Ok(None)
-        }
+            .map_err(|e| anyhow!(e))
     }
 
     /// Fetch followed streamers that are currently live.
@@ -612,80 +414,10 @@ impl AuthManager {
         let Some(session) = self.current_session() else {
             return Ok(Vec::new());
         };
-        let cookie = session.to_cookie_header();
-
-        let primary = self
-            .http
-            .get("https://api.live.bilibili.com/relation/v1/feed/feed_list")
-            .query(&[("page", "1"), ("pagesize", "30")])
-            .header(COOKIE, &cookie)
-            .header(REFERER, "https://live.bilibili.com/")
-            .send()
-            .await;
-
-        if let Ok(resp) = primary
-            && let Ok(json) = resp.json::<Value>().await
-            && json["code"].as_i64() == Some(0)
-            && let Some(arr) = json["data"]["list"].as_array()
-        {
-            let items = arr
-                .iter()
-                .filter_map(|item| {
-                    let room_id = value_as_u64(&item["roomid"])?;
-                    if room_id == 0 {
-                        return None;
-                    }
-                    Some(RoomQuickItem {
-                        room_id,
-                        room_uname: item["uname"].as_str().unwrap_or("").to_string(),
-                        title: item["title"].as_str().unwrap_or("").to_string(),
-                        is_live: true,
-                    })
-                })
-                .collect::<Vec<_>>();
-            return Ok(items);
-        }
-
-        // Fallback endpoint
-        let fallback_resp: Value = self
-            .http
-            .get("https://api.live.bilibili.com/xlive/web-ucenter/user/following")
-            .query(&[("page", "1"), ("page_size", "29")])
-            .header(COOKIE, &cookie)
-            .header(REFERER, "https://live.bilibili.com/")
-            .send()
+        self.api
+            .fetch_following_live(&session)
             .await
-            .context("Failed to query Bilibili following live list")?
-            .json()
-            .await
-            .context("Failed to parse following live JSON")?;
-
-        if fallback_resp["code"].as_i64() != Some(0) {
-            return Ok(Vec::new());
-        }
-
-        let items = fallback_resp["data"]["list"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter(|item| item["live_status"].as_i64() == Some(1))
-                    .filter_map(|item| {
-                        let room_id = value_as_u64(&item["roomid"])?;
-                        if room_id == 0 {
-                            return None;
-                        }
-                        Some(RoomQuickItem {
-                            room_id,
-                            room_uname: item["uname"].as_str().unwrap_or("").to_string(),
-                            title: item["title"].as_str().unwrap_or("").to_string(),
-                            is_live: true,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(items)
+            .map_err(|e| anyhow!(e))
     }
 }
 

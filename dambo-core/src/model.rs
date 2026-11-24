@@ -1,6 +1,6 @@
 use crate::state::RoomHistoryEntry;
 pub use blive_proto::models::{
-    AuthState, RawBiliEvent, RoomInfoSnapshot, SessionSummary, now_unix_ms,
+    AuthState, RawBiliEvent, RoomInfoSnapshot, RoomQuickItem, SessionSummary, now_unix_ms,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -120,15 +120,6 @@ pub struct RoomStateSnapshot {
     pub room_title: String,
     pub is_live: bool,
     pub connected: bool,
-}
-
-/// Room item for the quick switcher dropdown in UI
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RoomQuickItem {
-    pub room_id: u64,
-    pub room_uname: String,
-    pub title: String,
-    pub is_live: bool,
 }
 
 /// Payload for room quick switcher options fetched via Tauri IPC

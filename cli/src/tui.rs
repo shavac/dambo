@@ -4,7 +4,7 @@ use crate::command::{
 use crate::format::{
     DisplayFilter, FeedEntry, FilterMode, display_listen_host, format_cli_log, format_history,
     format_plugins, format_room_info_lines, format_room_options, format_send_danmaku_error,
-    format_snapshot_item, format_user_info_lines,
+    format_snapshot_item, format_user_info_lines, is_ephemeral_kind,
 };
 use crate::logger::{CliLogEntry, CliLoggerHandle};
 use anyhow::Result;
@@ -43,6 +43,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const MAX_FEED_ENTRIES: usize = 2000;
 const MAX_INPUT_HISTORY: usize = 100;
 const NOTICE_TTL: Duration = Duration::from_secs(4);
+const EPHEMERAL_TTL: Duration = Duration::from_secs(5);
 
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PANIC_HOOK_ONCE: Once = Once::new();
@@ -284,9 +285,64 @@ enum ActionResult {
     },
 }
 
+struct EphemeralNotice {
+    kind: String,
+    price: u64,
+    line: Line<'static>,
+    set_at: Instant,
+}
+
+#[derive(Default)]
+struct EphemeralSlot {
+    current: Option<EphemeralNotice>,
+}
+
+impl EphemeralSlot {
+    fn update(&mut self, kind: String, price: u64, line: Line<'static>, now: Instant) {
+        self.current = Some(EphemeralNotice {
+            kind,
+            price,
+            line,
+            set_at: now,
+        });
+    }
+
+    fn clear(&mut self) -> bool {
+        self.current.take().is_some()
+    }
+
+    fn clear_if_disallowed(&mut self, filter: &DisplayFilter) -> bool {
+        if let Some(ref notice) = self.current
+            && !filter.allows_kind(&notice.kind, notice.price)
+        {
+            self.current = None;
+            return true;
+        }
+        false
+    }
+
+    fn expire_if_needed(&mut self, now: Instant, ttl: Duration) -> bool {
+        if let Some(ref notice) = self.current
+            && now.saturating_duration_since(notice.set_at) >= ttl
+        {
+            self.current = None;
+            return true;
+        }
+        false
+    }
+
+    fn active_line(&self, filter: &DisplayFilter) -> Option<&Line<'static>> {
+        self.current
+            .as_ref()
+            .filter(|notice| filter.allows_kind(&notice.kind, notice.price))
+            .map(|notice| &notice.line)
+    }
+}
+
 struct TuiApp {
     runtime: Arc<DamboRuntime>,
     entries: VecDeque<FeedEntry>,
+    ephemeral: EphemeralSlot,
     scroll_from_bottom: usize,
     last_total_lines: usize,
     filter: DisplayFilter,
@@ -312,6 +368,7 @@ impl TuiApp {
         Self {
             runtime,
             entries: VecDeque::with_capacity(MAX_FEED_ENTRIES),
+            ephemeral: EphemeralSlot::default(),
             scroll_from_bottom: 0,
             last_total_lines: 0,
             filter: DisplayFilter::new(cfg.feed.show_enter),
@@ -417,6 +474,7 @@ impl TuiApp {
         let prev_room_id = self.room_state.room_id;
         if snap.room_id != prev_room_id {
             self.seen_snapshot_ids.clear();
+            self.ephemeral.clear();
             if snap.room_id == 0 {
                 self.announced_room_id = None;
             }
@@ -447,6 +505,15 @@ impl TuiApp {
                 self.seen_snapshot_ids.insert(item.id);
             }
         }
+        if is_ephemeral_kind(&item.kind) {
+            if self.filter.allows_kind(&item.kind, item.price) {
+                let entry = format_snapshot_item(item);
+                self.ephemeral
+                    .update(item.kind.clone(), item.price, entry.line, Instant::now());
+                self.dirty = true;
+            }
+            return;
+        }
         self.push_entry(format_snapshot_item(item));
     }
 
@@ -464,6 +531,7 @@ impl TuiApp {
                     }
                     self.announced_room_id = None;
                     self.seen_snapshot_ids.clear();
+                    self.ephemeral.clear();
                 } else {
                     self.announce_room_info_if_ready(false);
                 }
@@ -525,6 +593,7 @@ impl TuiApp {
                 Ok(()) => {
                     self.announced_room_id = None;
                     self.seen_snapshot_ids.clear();
+                    self.ephemeral.clear();
                     self.set_notice("已断开直播间", false);
                     self.push_entry(FeedEntry::system("已断开直播间连接"));
                 }
@@ -702,6 +771,7 @@ impl TuiApp {
                     FilterCommand::SetEnter(v) => self.filter.show_enter = v,
                     FilterCommand::SetLike(v) => self.filter.show_like = v,
                 }
+                self.ephemeral.clear_if_disallowed(&self.filter);
                 self.scroll_from_bottom = 0;
                 self.push_entry(FeedEntry::system(format!(
                     "当前过滤设置: {}",
@@ -721,6 +791,7 @@ impl TuiApp {
             },
             CliCommand::Clear => {
                 self.entries.clear();
+                self.ephemeral.clear();
                 self.scroll_from_bottom = 0;
                 self.last_total_lines = 0;
                 self.set_notice("屏幕已清空", false);
@@ -968,24 +1039,6 @@ impl TuiApp {
             .map(|entry| entry.line.clone())
             .collect();
 
-        let inner_width = area.width.saturating_sub(2).max(1);
-        let inner_height = area.height.saturating_sub(2) as usize;
-
-        let total_lines = count_wrapped_lines(&visible_lines, inner_width);
-        let paragraph = Paragraph::new(Text::from(visible_lines)).wrap(Wrap { trim: false });
-        let max_scroll = total_lines.saturating_sub(inner_height);
-
-        if self.scroll_from_bottom > 0 && total_lines > self.last_total_lines {
-            self.scroll_from_bottom = self
-                .scroll_from_bottom
-                .saturating_add(total_lines - self.last_total_lines);
-        }
-        self.last_total_lines = total_lines;
-        self.scroll_from_bottom = self.scroll_from_bottom.min(max_scroll);
-
-        let scroll_y = max_scroll.saturating_sub(self.scroll_from_bottom);
-        let scroll_u16 = scroll_y.min(u16::MAX as usize) as u16;
-
         let title = if self.scroll_from_bottom > 0 {
             format!(
                 " 弹幕与动态 [暂停滚动 ↑{}行 · 按 End 回到底部] ",
@@ -1007,7 +1060,53 @@ impl TuiApp {
                 }),
             ));
 
-        frame.render_widget(paragraph.block(block).scroll((scroll_u16, 0)), area);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let (feed_area, ephemeral_area) = if inner.height >= 2 {
+            (
+                Rect {
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: inner.height - 1,
+                },
+                Some(Rect {
+                    x: inner.x,
+                    y: inner.y + inner.height - 1,
+                    width: inner.width,
+                    height: 1,
+                }),
+            )
+        } else {
+            (inner, None)
+        };
+
+        let inner_width = feed_area.width.max(1);
+        let inner_height = feed_area.height as usize;
+
+        let total_lines = count_wrapped_lines(&visible_lines, inner_width);
+        let paragraph = Paragraph::new(Text::from(visible_lines)).wrap(Wrap { trim: false });
+        let max_scroll = total_lines.saturating_sub(inner_height);
+
+        if self.scroll_from_bottom > 0 && total_lines > self.last_total_lines {
+            self.scroll_from_bottom = self
+                .scroll_from_bottom
+                .saturating_add(total_lines - self.last_total_lines);
+        }
+        self.last_total_lines = total_lines;
+        self.scroll_from_bottom = self.scroll_from_bottom.min(max_scroll);
+
+        let scroll_y = max_scroll.saturating_sub(self.scroll_from_bottom);
+        let scroll_u16 = scroll_y.min(u16::MAX as usize) as u16;
+
+        frame.render_widget(paragraph.scroll((scroll_u16, 0)), feed_area);
+
+        if let Some(eph_area) = ephemeral_area
+            && let Some(eph_line) = self.ephemeral.active_line(&self.filter)
+        {
+            frame.render_widget(Paragraph::new(eph_line.clone()), eph_area);
+        }
     }
 
     fn draw_input(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -1194,10 +1293,14 @@ where
                     app.handle_action_result(res, &action_tx);
                 }
                 _ = tick.tick() => {
+                    let now = Instant::now();
                     if let Some((_, _, set_at)) = app.status_notice
-                        && set_at.elapsed() >= NOTICE_TTL
+                        && now.saturating_duration_since(set_at) >= NOTICE_TTL
                     {
                         app.status_notice = None;
+                        app.dirty = true;
+                    }
+                    if app.ephemeral.expire_if_needed(now, EPHEMERAL_TTL) {
                         app.dirty = true;
                     }
                 }
@@ -1353,5 +1456,47 @@ mod tests {
         assert_eq!(input.text(), "啊好a");
         input.history_next();
         assert_eq!(input.text(), "草");
+    }
+
+    #[test]
+    fn test_ephemeral_slot_replace_filter_and_expire() {
+        let mut slot = EphemeralSlot::default();
+        let mut filter = DisplayFilter::new(true);
+        let t0 = Instant::now();
+
+        slot.update("enter".to_string(), 0, Line::from("→ 甲 进入了直播间"), t0);
+        assert_eq!(
+            slot.active_line(&filter).map(|l| l.to_string()).as_deref(),
+            Some("→ 甲 进入了直播间")
+        );
+
+        // Subsequent ephemeral event replaces previous in place rather than stacking
+        let t1 = t0 + Duration::from_secs(2);
+        slot.update(
+            "guard_enter".to_string(),
+            0,
+            Line::from("欢迎 舰长 乙 进入直播间"),
+            t1,
+        );
+        assert_eq!(
+            slot.active_line(&filter).map(|l| l.to_string()).as_deref(),
+            Some("欢迎 舰长 乙 进入直播间")
+        );
+
+        // Not yet expired at t1 + 4s
+        assert!(!slot.expire_if_needed(t1 + Duration::from_secs(4), EPHEMERAL_TTL));
+        assert!(slot.active_line(&filter).is_some());
+
+        // Filter hides active notice immediately when disallowed
+        filter.show_enter = false;
+        assert!(slot.active_line(&filter).is_none());
+        assert!(slot.clear_if_disallowed(&filter));
+        assert!(!slot.clear());
+
+        // TTL expiration clears the notice after EPHEMERAL_TTL
+        filter.show_enter = true;
+        slot.update("like".to_string(), 0, Line::from("♥ 丙 为主播点赞了"), t1);
+        assert!(slot.expire_if_needed(t1 + EPHEMERAL_TTL, EPHEMERAL_TTL));
+        assert!(slot.active_line(&filter).is_none());
     }
 }

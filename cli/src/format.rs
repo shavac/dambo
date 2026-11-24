@@ -46,7 +46,7 @@ impl DisplayFilter {
                     || (kind == "gift" && price > 0)
             }
             FilterMode::All => match kind {
-                "enter" => self.show_enter,
+                "enter" | "guard_enter" => self.show_enter,
                 "like" => self.show_like,
                 _ => true,
             },
@@ -101,6 +101,12 @@ fn is_status_kind(kind: &str) -> bool {
             | "cut_off"
             | "reconnected"
     )
+}
+
+/// Returns `true` for high-frequency ephemeral presence/activity events
+/// rendered on the pinned bottom line instead of scrolling into the main feed.
+pub fn is_ephemeral_kind(kind: &str) -> bool {
+    matches!(kind, "enter" | "guard_enter" | "like")
 }
 
 /// A single logical row stored in the TUI message buffer.
@@ -175,11 +181,26 @@ pub fn connect_host(host: &str) -> &str {
     }
 }
 
-/// Format 13-digit Unix millisecond timestamp as local `HH:MM:SS`.
-pub fn format_timestamp_hms(ts_ms: u64) -> String {
-    if ts_ms == 0 {
-        return Local::now().format("%H:%M:%S").to_string();
+/// Normalize Unix timestamps in seconds / ms / µs / ns to 13-digit milliseconds.
+fn normalize_timestamp_to_ms(ts: u64) -> Option<u64> {
+    if ts >= 1_000_000_000_000_000_000 {
+        Some(ts / 1_000_000)
+    } else if ts >= 1_000_000_000_000_000 {
+        Some(ts / 1_000)
+    } else if ts >= 1_000_000_000_000 {
+        Some(ts)
+    } else if ts >= 1_000_000_000 {
+        Some(ts.saturating_mul(1_000))
+    } else {
+        None
     }
+}
+
+/// Format a Unix timestamp (ms, or normalized from s/µs/ns) as local `HH:MM:SS`.
+pub fn format_timestamp_hms(ts_raw: u64) -> String {
+    let Some(ts_ms) = normalize_timestamp_to_ms(ts_raw) else {
+        return Local::now().format("%H:%M:%S").to_string();
+    };
     let secs = (ts_ms / 1000) as i64;
     let nanos = ((ts_ms % 1000) * 1_000_000) as u32;
     let dt: DateTime<Local> = Local
@@ -949,11 +970,19 @@ mod tests {
         let mut filter = DisplayFilter::new(true);
         assert!(filter.allows_kind("chat", 0));
         assert!(filter.allows_kind("enter", 0));
+        assert!(filter.allows_kind("guard_enter", 0));
         assert!(filter.allows_kind("like", 0));
+        assert!(is_ephemeral_kind("enter"));
+        assert!(is_ephemeral_kind("guard_enter"));
+        assert!(is_ephemeral_kind("like"));
+        assert!(!is_ephemeral_kind("chat"));
+        assert!(!is_ephemeral_kind("gift"));
+        assert!(!is_ephemeral_kind("follow"));
 
         filter.show_enter = false;
         filter.show_like = false;
         assert!(!filter.allows_kind("enter", 0));
+        assert!(!filter.allows_kind("guard_enter", 0));
         assert!(!filter.allows_kind("like", 0));
         assert!(filter.allows_kind("live", 0));
 
@@ -1108,5 +1137,19 @@ mod tests {
         let guard_text = entry_text(&format_snapshot_item(&guard));
         assert!(guard_text.contains("[舰长]"));
         assert!(guard_text.contains("¥138"));
+    }
+
+    #[test]
+    fn test_format_timestamp_hms_normalizes_units() {
+        let secs = 1_795_479_892u64;
+        let ms = secs * 1_000 + 456;
+        let us = ms * 1_000 + 789;
+        let ns = us * 1_000 + 123;
+        let expected = format_timestamp_hms(ms);
+        assert_eq!(expected.len(), 8);
+        assert_eq!(format_timestamp_hms(secs), expected);
+        assert_eq!(format_timestamp_hms(us), expected);
+        assert_eq!(format_timestamp_hms(ns), expected);
+        assert_eq!(format_timestamp_hms(0).len(), 8);
     }
 }
