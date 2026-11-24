@@ -2,13 +2,14 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-> **Dambo — An Advanced Danmaku Platform for the AI Era.**
+**dambo** is a lightweight, high-performance Bilibili live-room interaction & overlay toolkit combining **zero-code AI plugin customization**, **transparent OBS overlays & desktop floating widgets**, **desktop chat input**, **lossless session recording**, and **real-time event streams** out of the box.
 
-**dambo** is a lightweight, high-performance Bilibili live-room danmaku platform that brings together **live danmaku collection & desktop chat input**, **transparent OBS overlays & desktop floating widgets**, **lossless session recording**, and **AI-ready real-time event streams** out of the box.
+**Turn chat into custom overlays:** No coding skills needed—send our plugin guide docs to any AI assistant (ChatGPT, Claude, Gemini, DeepSeek, etc.), answer 2 quick rounds of multiple-choice questions, and drop the generated folder into `static/html/`. Dambo hot-reloads it in ~**200ms with no restart** and automatically provides a browser management console.
 
-Whether you want ultra-lightweight transparent overlays while gaming, a quick desktop chat box to interact with viewers, interactive chat mini-games like 24-Point Poker, AI-generated custom plugins, or structured WebSocket event feeds for bots and AI pipelines, **dambo** handles it smoothly.
+### Documentation & Quick Links
 
-- **AI Plugin Guide**: [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) (Chinese: [PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)) — upload this file directly to an AI assistant and let it build or customize plugins for your stream.
+- **AI Custom Plugin Docs**: [`docs/PLUGIN_GUIDE.en.md`](docs/PLUGIN_GUIDE.en.md) (Requirements Interview, [中文](docs/PLUGIN_GUIDE.md)) · [`docs/PLUGIN_SPEC.en.md`](docs/PLUGIN_SPEC.en.md) (Technical Spec & SDK Contract, [中文](docs/PLUGIN_SPEC.md))
+- **Architecture, Config & Contributing**: [`docs/PLUGIN_API_DESIGN.md`](docs/PLUGIN_API_DESIGN.md) (Platform Design) · [`etc/config.sample.toml`](etc/config.sample.toml) (Sample Config) · [`CONTRIBUTING.md`](CONTRIBUTING.md) (Dev & Testing Conventions)
 
 ---
 
@@ -76,7 +77,7 @@ When you are both **signed in to Bilibili** and **connected to a live room**, th
 
 Open **Plugins (...)** on the capsule (or **Plugins** in the system tray menu):
 
-- **Use in OBS Studio**: Click **Copy OBS URL**, create a **Browser** source in OBS, paste the URL, and set the recommended width/height from the table below for transparent overlay rendering.
+- **Use in OBS Studio**: Click **Copy OBS URL**, create a **Browser** source in OBS, paste the URL, and set your preferred width and height for transparent overlay rendering.
 - **Float on Desktop**: Click **Open on Desktop** to pop out any plugin as a transparent desktop window. Hover near the top-right corner of the overlay to drag it, toggle **Always on Top**, or close it (or press `Esc`).
 - **LAN Multi-Device Access**: To open monitor views (such as `/list/`) from a phone or tablet on the same Wi-Fi network, set `host = "0.0.0.0"` under `[server]` in `etc/config.toml`.
 
@@ -97,25 +98,23 @@ Every plugin exposes a dedicated browser management page at `GET /{plugin}/m` fo
 
 Dambo includes four ready-to-use web plugins out of the box:
 
-| Plugin | Route | Recommended OBS Size | Use Case |
-| --- | --- | --- | --- |
-| **`default`** | `/` or `/default/` | `420 × 720` | **Primary OBS Transparent Overlay**: pinned SuperChat/Guard bar, ephemeral enter dock, 4s sliding gift combo merging with pulse feedback, and auto-follow bottom scroll |
-| **`list`** | `/list/` | `480 × 800` | **Streamer / Moderator Monitor**: category filters (All / Chat / Gift & SC / Medal), manual scroll-up pause with unread counter, and sticky SC header |
-| **`sc-ticker`** | `/sc-ticker/` | `420 × 320` | **SC & Guard Countdown Cards**: compact corner widget focused purely on SuperChats and Guard subscriptions |
-| **`game24`** | `/game24/` | `560 × 420` | **24-Point Poker Chat Game**: deals 4 cards (A–K) each round for viewers to solve via danmaku math expressions (e.g. `(3+3)*(8-4)`), with live scoring & leaderboard; defaults to `300s` per round and supports `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` |
+| Plugin | Route | Use Case |
+| --- | --- | --- |
+| **`default`** | `/` or `/default/` | **Primary OBS Transparent Overlay**: pinned SuperChat/Guard bar, ephemeral enter dock, 4s sliding gift combo merging with pulse feedback, and auto-follow bottom scroll |
+| **`list`** | `/list/` | **Streamer / Moderator Monitor**: category filters (All / Chat / Gift & SC / Medal), manual scroll-up pause with unread counter, and sticky SC header |
+| **`sc-ticker`** | `/sc-ticker/` | **SC & Guard Countdown Cards**: compact corner widget focused purely on SuperChats and Guard subscriptions |
+| **`game24`** | `/game24/` | **24-Point Poker Chat Game**: deals 4 cards (A–K) each round for viewers to solve via danmaku math expressions (e.g. `(3+3)*(8-4)`), with live scoring & leaderboard; defaults to `300s` per round and supports `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` |
 
 ---
 
-## Build Custom Plugins with AI (`PLUGIN_GUIDE`)
-
-### Build Plugins from Scratch with Any AI Assistant
+## Build Plugins from Scratch with Any AI Assistant
 
 No coding required—turn an idea into a working plugin in two simple steps with any AI assistant (ChatGPT / Claude / Gemini / DeepSeek, etc.):
 
-1. **Refine Your Idea**: Download [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md) from this repo, upload it to your AI, and describe your idea in one sentence (e.g., *"I want a gift battery goal progress bar"*).
-2. **Generate the Plugin**: Answer the AI's 2 rounds of multiple-choice questions to lock down the details, then upload [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md) when prompted and reply **`开始生成`** (or *"Start generating"*). Drop the generated folder into `static/html/` and it is ready to use.
+1. **Refine Your Idea**: Download [`docs/PLUGIN_GUIDE.en.md`](docs/PLUGIN_GUIDE.en.md) ([中文](docs/PLUGIN_GUIDE.md)) from this repo, upload it to your AI, and describe your idea in one sentence (e.g., *"I want a gift battery goal progress bar"*).
+2. **Generate the Plugin**: Answer the AI's 2 rounds of multiple-choice questions to lock down the details, then upload [`docs/PLUGIN_SPEC.en.md`](docs/PLUGIN_SPEC.en.md) ([中文](docs/PLUGIN_SPEC.md)) when prompted and reply **`Start generating`**. Drop the generated folder into `static/html/` and it is ready to use.
 
-> You can also use the existing all-in-one guide **[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)** (Chinese: **[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)**): click **Plugins -> Open Plugins Folder** in Dambo (`static/html/`) and drop in the generated folder (`plugin.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus optional `manage.html` / `manage.css` / `manage.js` and static assets). Dambo hot-reloads it in ~200ms—no restart required.
+> Click **Plugins -> Open Plugins Folder** in Dambo (`static/html/`) and drop in the generated folder (`plugin.html`, `plugin.json`, `plugin.css`, `plugin.js`, plus optional `manage.html` / `manage.css` / `manage.js` and static assets). Dambo hot-reloads it in ~200ms with no restart required. For manual plugin development, see the technical specification **[`docs/PLUGIN_SPEC.en.md`](docs/PLUGIN_SPEC.en.md)** ([中文](docs/PLUGIN_SPEC.md)).
 
 ---
 

@@ -2,13 +2,14 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-> **弹宝，AI 时代的先进弹幕平台。**
+**dambo（弹宝）** 是一款高性能、低资源占用的 B 站直播间交互与挂件工具，集 **AI 零基础定制插件**、**OBS 透明挂件 / 桌面置顶悬浮窗**、**弹幕采集与桌面快捷发弹幕**、**无损互动录制**与 **实时事件流**于一体，开箱即用。
 
-**dambo（弹宝）** 是一款高性能、低资源占用的 B 站直播间弹幕平台，集**弹幕采集与桌面快捷发弹幕**、**OBS 透明挂件 / 桌面置顶悬浮窗**、**无损互动录制**与 **AI 实时事件流**于一体，开箱即用。
+**对话即可定制挂件：** 无需编程基础，只需将插件引导文档发给任意 AI（ChatGPT / Claude / Gemini / DeepSeek 等），回答 2 轮大白话选择题即可生成专属 OBS 挂件与桌面互动工具；放入 `static/html/` 后约 **200ms 自动热重载**，并自带可视化管理页实时调参。
 
-无论你是想在屏幕上叠加低开销的透明弹幕、边打游戏边发弹幕和玩 24 点互动小游戏，还是用 AI 快速定制专属挂件、将结构化弹幕与礼物事件流接入下游机器人或分析管线，**弹宝**都能流畅胜任。
+### 文档与资源索引
 
-- **AI 定制插件向导**：[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)（英文版：[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)）——无需手写代码，直接上传给 AI 即可帮你生成或修改专属插件。
+- **AI 定制插件文档**：[`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md)（需求访谈，[English](docs/PLUGIN_GUIDE.en.md)） · [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md)（技术契约与 SDK 规范，[English](docs/PLUGIN_SPEC.en.md)）
+- **架构与配置参考**：[`docs/PLUGIN_API_DESIGN.md`](docs/PLUGIN_API_DESIGN.md)（插件平台架构设计） · [`etc/config.sample.toml`](etc/config.sample.toml)（示例配置） · [`CONTRIBUTING.md`](CONTRIBUTING.md)（测试与开发约定）
 
 ---
 
@@ -76,7 +77,7 @@ cargo run -p dambo-cli --release -- --config etc/config.toml
 
 在控制舱点击 **插件（...）**（或在系统托盘中展开 **插件** 菜单）：
 
-- **接入 OBS Studio**：点击插件卡片上的 **复制 OBS URL**，在 OBS 来源中新建 **浏览器** 源，粘贴地址并按下方建议尺寸设置宽高即可实现透明叠加。
+- **接入 OBS Studio**：点击插件卡片上的 **复制 OBS URL**，在 OBS 来源中新建 **浏览器** 源，粘贴地址并设置所需宽高即可实现透明叠加。
 - **桌面独立悬浮查看**：点击 **桌面打开**，插件会作为透明悬浮窗直接浮在屏幕上；将鼠标移到浮窗右上角可拖动位置、切换窗口置顶或关闭（也可用 `Esc` 关闭）。
 - **局域网多端查看**：若想用同一 Wi-Fi 下的手机/平板打开监看面板（如 `/list/`），可在配置文件 `etc/config.toml` 的 `[server]` 下将 `host` 改为 `"0.0.0.0"`。
 
@@ -97,25 +98,23 @@ cargo run -p dambo-cli --release -- --config etc/config.toml
 
 Dambo 默认自带 4 款即开即用的网页插件：
 
-| 插件 | 访问路径 | 建议 OBS 尺寸 | 适用场景与玩法 |
-| --- | --- | --- | --- |
-| **`default`** | `/` 或 `/default/` | `420 × 720` | **主力透明弹幕挂件**：底部进房停靠栏、顶部 SC/大航海倒计时置顶条、礼物 4 秒滑动连击归并跳动与自动跟随置底 |
-| **`list`** | `/list/` | `480 × 800` | **主播 / 场控监看列表**：支持按全部 / 弹幕 / 礼物与SC / 粉丝牌筛选，向上翻看历史时自动锁屏并统计未读数 |
-| **`sc-ticker`** | `/sc-ticker/` | `420 × 320` | **SC 与大航海独立卡片**：仅聚焦展示醒目留言（SC）与上舰倒计时滚动条，适合单独摆放在画面角落 |
-| **`game24`** | `/game24/` | `560 × 420` | **扑克 24 点弹幕抢答游戏**：每局随机发 4 张 A–K 扑克牌，观众在弹幕发算式（如 `(3+3)*(8-4)`）抢答计分并显示排行榜；默认单局 `300s`，支持 `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` 参数定制 |
+| 插件 | 访问路径 | 适用场景与玩法 |
+| --- | --- | --- |
+| **`default`** | `/` 或 `/default/` | **主力透明弹幕挂件**：底部进房停靠栏、顶部 SC/大航海倒计时置顶条、礼物 4 秒滑动连击归并跳动与自动跟随置底 |
+| **`list`** | `/list/` | **主播 / 场控监看列表**：支持按全部 / 弹幕 / 礼物与SC / 粉丝牌筛选，向上翻看历史时自动锁屏并统计未读数 |
+| **`sc-ticker`** | `/sc-ticker/` | **SC 与大航海独立卡片**：仅聚焦展示醒目留言（SC）与上舰倒计时滚动条，适合单独摆放在画面角落 |
+| **`game24`** | `/game24/` | **扑克 24 点弹幕抢答游戏**：每局随机发 4 张 A–K 扑克牌，观众在弹幕发算式（如 `(3+3)*(8-4)`）抢答计分并显示排行榜；默认单局 `300s`，支持 `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` 参数定制 |
 
 ---
 
-## 让 AI 帮你定制专属插件（`PLUGIN_GUIDE` 用法）
-
-### 使用 AI 助手零基础制作插件
+## 使用 AI 助手零基础制作插件
 
 无需编写代码，只需两步即可让任意 AI（ChatGPT / Claude / Gemini / DeepSeek 等）为你生成可用插件：
 
-1. **梳理想法**：下载本仓库的 [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md) 上传给 AI，并用一句话描述你的初步想法（例如：*“我想做一个礼物电池目标进度条”*）。
-2. **生成代码**：回答 AI 的 2 轮选择题确认细节后，按 AI 提示上传 [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md) 并回复 **`开始生成`**，将生成的文件夹放入 `static/html/` 即可使用。
+1. **梳理想法**：下载本仓库的 [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md)（[English](docs/PLUGIN_GUIDE.en.md)）上传给 AI，并用一句话描述你的初步想法（例如：*“我想做一个礼物电池目标进度条”*）。
+2. **生成代码**：回答 AI 的 2 轮选择题确认细节后，按 AI 提示上传 [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md)（[English](docs/PLUGIN_SPEC.en.md)）并回复 **`开始生成`**，将生成的文件夹放入 `static/html/` 即可使用。
 
-> 也可使用现有完整单文件规范 **[PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md)**（英文版：**[PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)**）：在控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`）放入 AI 生成的插件文件夹（标准结构为 `plugin.html`、`plugin.json`、`plugin.css`、`plugin.js`，可选 `manage.html` / `manage.css` / `manage.js` 及同级静态资源），保存后约 200ms 内控制舱会自动识别上线，**无需重启 Dambo** 即可直接在桌面打开、管理或复制到 OBS 使用。
+> 在控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`）放入插件文件夹（标准结构为 `plugin.html`、`plugin.json`、`plugin.css`、`plugin.js`，可选 `manage.html` / `manage.css` / `manage.js` 及同级静态资源），保存后约 200ms 自动识别上线，**无需重启 Dambo** 即可直接在桌面打开、访问管理页或复制到 OBS 使用。如需手动编写，可查阅技术规范 [`docs/PLUGIN_SPEC.md`](docs/PLUGIN_SPEC.md)（[English](docs/PLUGIN_SPEC.en.md)）。
 
 ---
 

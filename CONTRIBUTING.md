@@ -38,7 +38,7 @@ All built-in and community plugins under `static/html/<plugin-id>/` must remain 
   └── assets/         # [OPTIONAL] Static images, fonts, or audio (referenced as ./assets/<file>)
   ```
 - **Strict Pure-Web Isolation**: Never use `window.__TAURI__`, Node.js APIs, `require()`, bare `npm` imports, or `.innerHTML` with user-supplied text.
-- See [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) / [PLUGIN_GUIDE.zh.md](PLUGIN_GUIDE.zh.md) for full SDK contracts and self-verification steps.
+- See [docs/PLUGIN_SPEC.en.md](docs/PLUGIN_SPEC.en.md) / [docs/PLUGIN_SPEC.md](docs/PLUGIN_SPEC.md) for full SDK contracts and self-verification steps.
 
 ## Pull Request Guidelines
 
