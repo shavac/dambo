@@ -1713,17 +1713,26 @@
         }
     }
 
+    function decodePluginSegment(raw) {
+        if (!raw) return '';
+        let decoded = raw;
+        try {
+            decoded = decodeURIComponent(raw);
+        } catch (_) {
+            // keep raw segment
+        }
+        const lower = decoded.toLowerCase();
+        if (lower === 'sdk' || lower === 'api' || lower === 'ws') {
+            return '';
+        }
+        return decoded;
+    }
+
     function parsePluginContext() {
         if (typeof window === 'undefined' || !window.location || !window.location.pathname) {
             return { pluginName: '', mode: 'view' };
         }
-        const rawSegments = window.location.pathname.split('/');
-        const segments = [];
-        for (let i = 0; i < rawSegments.length; i++) {
-            if (rawSegments[i]) {
-                segments.push(rawSegments[i]);
-            }
-        }
+        const segments = window.location.pathname.split('/').filter(Boolean);
         if (segments.length === 0) {
             let rootPlugin = 'default';
             if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
@@ -1731,32 +1740,16 @@
                 const baseHref = baseEl ? baseEl.getAttribute('href') || '' : '';
                 const baseParts = baseHref.split('/').filter(Boolean);
                 if (baseParts.length > 0) {
-                    let candidate = baseParts[0];
-                    try {
-                        candidate = decodeURIComponent(candidate);
-                    } catch (_) {
-                        // keep raw segment
-                    }
-                    const lowerCandidate = candidate.toLowerCase();
-                    if (
-                        lowerCandidate !== 'sdk' &&
-                        lowerCandidate !== 'api' &&
-                        lowerCandidate !== 'ws'
-                    ) {
+                    const candidate = decodePluginSegment(baseParts[0]);
+                    if (candidate) {
                         rootPlugin = candidate;
                     }
                 }
             }
             return { pluginName: rootPlugin, mode: 'view' };
         }
-        let first = segments[0];
-        try {
-            first = decodeURIComponent(first);
-        } catch (_) {
-            // keep raw segment
-        }
-        const lowerFirst = first.toLowerCase();
-        if (lowerFirst === 'sdk' || lowerFirst === 'api' || lowerFirst === 'ws') {
+        const first = decodePluginSegment(segments[0]);
+        if (!first) {
             return { pluginName: '', mode: 'view' };
         }
         const mode = (segments.length >= 2 && segments[1] === 'm') ? 'manage' : 'view';
@@ -2158,81 +2151,68 @@
             }
         }
 
+        function registerListener(list, entry, needsServerSync) {
+            list.push(entry);
+            ensureConnectedAfterAdd(needsServerSync);
+            let removed = false;
+            return function off() {
+                if (removed) return;
+                removed = true;
+                for (let i = 0; i < list.length; i++) {
+                    if (list[i].id === entry.id) {
+                        list.splice(i, 1);
+                        break;
+                    }
+                }
+                cleanupOrSyncAfterRemove(needsServerSync);
+            };
+        }
+
         return {
             addWatch: function (store, owner, namespace, prefix, cb) {
                 if (typeof cb !== 'function') {
                     throw new TypeError('Dambo watch callback must be a function');
                 }
-                const id = nextListenerId++;
-                watchListeners.push({
-                    id: id,
-                    store: store,
-                    owner: owner,
-                    namespace: namespace,
-                    prefix: prefix || '',
-                    cb: cb,
-                });
-                ensureConnectedAfterAdd(true);
-                let removed = false;
-                return function off() {
-                    if (removed) return;
-                    removed = true;
-                    for (let i = 0; i < watchListeners.length; i++) {
-                        if (watchListeners[i].id === id) {
-                            watchListeners.splice(i, 1);
-                            break;
-                        }
-                    }
-                    cleanupOrSyncAfterRemove(true);
-                };
+                return registerListener(
+                    watchListeners,
+                    {
+                        id: nextListenerId++,
+                        store: store,
+                        owner: owner,
+                        namespace: namespace,
+                        prefix: prefix || '',
+                        cb: cb,
+                    },
+                    true
+                );
             },
             addTopic: function (owner, topic, cb) {
                 if (typeof cb !== 'function') {
                     throw new TypeError('Dambo topic subscribe callback must be a function');
                 }
-                const id = nextListenerId++;
-                topicListeners.push({
-                    id: id,
-                    owner: owner,
-                    topic: topic,
-                    cb: cb,
-                });
-                ensureConnectedAfterAdd(true);
-                let removed = false;
-                return function off() {
-                    if (removed) return;
-                    removed = true;
-                    for (let i = 0; i < topicListeners.length; i++) {
-                        if (topicListeners[i].id === id) {
-                            topicListeners.splice(i, 1);
-                            break;
-                        }
-                    }
-                    cleanupOrSyncAfterRemove(true);
-                };
+                return registerListener(
+                    topicListeners,
+                    {
+                        id: nextListenerId++,
+                        owner: owner,
+                        topic: topic,
+                        cb: cb,
+                    },
+                    true
+                );
             },
             addAcl: function (cb) {
                 if (typeof cb !== 'function') {
                     throw new TypeError('Dambo acl.onChange callback must be a function');
                 }
-                const id = nextListenerId++;
-                aclListeners.push({
-                    id: id,
-                    cb: cb,
-                });
-                ensureConnectedAfterAdd(false);
-                let removed = false;
-                return function off() {
-                    if (removed) return;
-                    removed = true;
-                    for (let i = 0; i < aclListeners.length; i++) {
-                        if (aclListeners[i].id === id) {
-                            aclListeners.splice(i, 1);
-                            break;
-                        }
-                    }
-                    cleanupOrSyncAfterRemove(false);
-                };
+                return registerListener(
+                    aclListeners,
+                    {
+                        id: nextListenerId++,
+                        cb: cb,
+                    },
+                    false
+                );
             },
         };
     })();
@@ -2443,27 +2423,15 @@
         },
         set: function (keyOrMap, val) {
             if (keyOrMap && typeof keyOrMap === 'object' && !Array.isArray(keyOrMap)) {
-                return storageSelf.mset('config', keyOrMap).then(function (res) {
-                    metaCache = null;
-                    return res;
-                });
+                return storageSelf.mset('config', keyOrMap);
             }
-            return storageSelf.set('config', String(keyOrMap), val).then(function (res) {
-                metaCache = null;
-                return res;
-            });
+            return storageSelf.set('config', String(keyOrMap), val);
         },
         reset: function (key) {
             if (key !== undefined && key !== null) {
-                return storageSelf.delete('config', String(key)).then(function (res) {
-                    metaCache = null;
-                    return res;
-                });
+                return storageSelf.delete('config', String(key));
             }
-            return storageSelf.clearNamespace('config').then(function (res) {
-                metaCache = null;
-                return res;
-            });
+            return storageSelf.clearNamespace('config');
         },
         schema: function () {
             return pluginApi.meta().then(function (meta) {

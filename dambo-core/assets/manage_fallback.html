@@ -409,6 +409,27 @@
         return span;
       }
 
+      function makeBtn(label, cls, onClick) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        if (cls) btn.className = cls;
+        btn.textContent = label;
+        btn.addEventListener('click', onClick);
+        return btn;
+      }
+
+      function makeLevelSelect(levels, selectedLevel) {
+        const sel = document.createElement('select');
+        for (const lvl of levels) {
+          const o = document.createElement('option');
+          o.value = lvl;
+          o.textContent = lvl;
+          if (selectedLevel === lvl) o.selected = true;
+          sel.appendChild(o);
+        }
+        return sel;
+      }
+
       function clearChildren(el) {
         el.replaceChildren();
       }
@@ -587,37 +608,31 @@
             const reader = {};
             const inputNode = createTypedInput(entry, reader);
 
-            const saveBtn = document.createElement('button');
-            saveBtn.type = 'button';
-            saveBtn.className = 'primary small';
-            saveBtn.textContent = '保存';
-            saveBtn.addEventListener('click', async () => {
-              try {
-                const nextVal = reader.get();
-                await Dambo.config.set(key, nextVal);
-                showToast(`已保存配置 ${key}`);
-                await loadConfigPanel(true);
-              } catch (err) {
-                handleApiError(err, '保存配置失败');
-              }
-            });
-            actions.appendChild(saveBtn);
-
-            if (entry.is_overridden) {
-              const resetBtn = document.createElement('button');
-              resetBtn.type = 'button';
-              resetBtn.className = 'small';
-              resetBtn.textContent = '恢复默认';
-              resetBtn.addEventListener('click', async () => {
+            actions.appendChild(
+              makeBtn('保存', 'primary small', async () => {
                 try {
-                  await Dambo.config.reset(key);
-                  showToast(`已恢复配置 ${key} 默认值`);
+                  const nextVal = reader.get();
+                  await Dambo.config.set(key, nextVal);
+                  showToast(`已保存配置 ${key}`);
                   await loadConfigPanel(true);
                 } catch (err) {
-                  handleApiError(err, '恢复默认失败');
+                  handleApiError(err, '保存配置失败');
                 }
-              });
-              actions.appendChild(resetBtn);
+              })
+            );
+
+            if (entry.is_overridden) {
+              actions.appendChild(
+                makeBtn('恢复默认', 'small', async () => {
+                  try {
+                    await Dambo.config.reset(key);
+                    showToast(`已恢复配置 ${key} 默认值`);
+                    await loadConfigPanel(true);
+                  } catch (err) {
+                    handleApiError(err, '恢复默认失败');
+                  }
+                })
+              );
             }
             top.appendChild(actions);
             box.appendChild(top);
@@ -686,19 +701,8 @@
 
               const controls = document.createElement('div');
               controls.className = 'row';
-              const sel = document.createElement('select');
-              for (const lvl of allowedGrantLevels(rec.resource)) {
-                const o = document.createElement('option');
-                o.value = lvl;
-                o.textContent = lvl;
-                if (rec.requested_level === lvl) o.selected = true;
-                sel.appendChild(o);
-              }
-              const approveBtn = document.createElement('button');
-              approveBtn.type = 'button';
-              approveBtn.className = 'primary small';
-              approveBtn.textContent = '批准';
-              approveBtn.addEventListener('click', async () => {
+              const sel = makeLevelSelect(allowedGrantLevels(rec.resource), rec.requested_level);
+              const approveBtn = makeBtn('批准', 'primary small', async () => {
                 try {
                   await Dambo.acl.set(rec.requester, { resource: rec.resource, level: sel.value });
                   showToast(`已授予 ${rec.requester} -> ${rec.resource} (${sel.value})`);
@@ -707,12 +711,7 @@
                   handleApiError(err, '审批失败');
                 }
               });
-
-              const denyBtn = document.createElement('button');
-              denyBtn.type = 'button';
-              denyBtn.className = 'danger small';
-              denyBtn.textContent = '拒绝';
-              denyBtn.addEventListener('click', async () => {
+              const denyBtn = makeBtn('拒绝', 'danger small', async () => {
                 try {
                   await Dambo.acl.set(rec.requester, { resource: rec.resource, level: 'none' });
                   showToast(`已拒绝 ${rec.requester} -> ${rec.resource}`);
@@ -761,19 +760,11 @@
 
               const controls = document.createElement('div');
               controls.className = 'row';
-              const sel = document.createElement('select');
-              for (const lvl of allowedGrantLevels(rec.resource).concat(['none'])) {
-                const o = document.createElement('option');
-                o.value = lvl;
-                o.textContent = lvl;
-                if (rec.level === lvl) o.selected = true;
-                sel.appendChild(o);
-              }
-              const updBtn = document.createElement('button');
-              updBtn.type = 'button';
-              updBtn.className = 'small';
-              updBtn.textContent = '更新等级';
-              updBtn.addEventListener('click', async () => {
+              const sel = makeLevelSelect(
+                allowedGrantLevels(rec.resource).concat(['none']),
+                rec.level
+              );
+              const updBtn = makeBtn('更新等级', 'small', async () => {
                 try {
                   await Dambo.acl.set(rec.requester, { resource: rec.resource, level: sel.value });
                   showToast(`已更新 ${rec.requester} -> ${sel.value}`);
@@ -782,12 +773,7 @@
                   handleApiError(err, '更新失败');
                 }
               });
-
-              const delBtn = document.createElement('button');
-              delBtn.type = 'button';
-              delBtn.className = 'danger small';
-              delBtn.textContent = '撤销删除';
-              delBtn.addEventListener('click', async () => {
+              const delBtn = makeBtn('撤销删除', 'danger small', async () => {
                 try {
                   await Dambo.acl.remove(rec.requester, rec.resource);
                   showToast(`已撤销 ${rec.requester} -> ${rec.resource}`);
@@ -861,11 +847,7 @@
 
             const controls = document.createElement('div');
             controls.className = 'row';
-            const toggleBtn = document.createElement('button');
-            toggleBtn.type = 'button';
-            toggleBtn.className = 'small';
-            toggleBtn.textContent = topic.public ? '设为私有' : '设为公开';
-            toggleBtn.addEventListener('click', async () => {
+            const toggleBtn = makeBtn(topic.public ? '设为私有' : '设为公开', 'small', async () => {
               try {
                 await Dambo.topics.configure(topic.name, {
                   public: !topic.public,
@@ -877,12 +859,7 @@
                 handleApiError(err, '切换可见性失败');
               }
             });
-
-            const rmBtn = document.createElement('button');
-            rmBtn.type = 'button';
-            rmBtn.className = 'danger small';
-            rmBtn.textContent = '删除';
-            rmBtn.addEventListener('click', async () => {
+            const rmBtn = makeBtn('删除', 'danger small', async () => {
               try {
                 await Dambo.topics.remove(topic.name);
                 showToast(`已删除订阅源 ${topic.name}`);
@@ -998,11 +975,7 @@
             const reader = {};
             const inputNode = createTypedInput(entry, reader);
 
-            const saveBtn = document.createElement('button');
-            saveBtn.type = 'button';
-            saveBtn.className = 'primary small';
-            saveBtn.textContent = '更新';
-            saveBtn.addEventListener('click', async () => {
+            const saveBtn = makeBtn('更新', 'primary small', async () => {
               try {
                 const nextVal = reader.get();
                 await currentStoreHandle().set(ns, key, nextVal);
@@ -1011,12 +984,7 @@
                 handleApiError(err, '更新失败');
               }
             });
-
-            const delBtn = document.createElement('button');
-            delBtn.type = 'button';
-            delBtn.className = 'danger small';
-            delBtn.textContent = '删除';
-            delBtn.addEventListener('click', async () => {
+            const delBtn = makeBtn('删除', 'danger small', async () => {
               try {
                 await currentStoreHandle().delete(ns, key);
                 showToast(`已删除 ${ns}/${key}`);

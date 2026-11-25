@@ -312,7 +312,7 @@ pub struct FieldSchema {
     pub nullable: bool,
 }
 
-fn is_false(b: &bool) -> bool {
+pub(crate) fn is_false(b: &bool) -> bool {
     !*b
 }
 

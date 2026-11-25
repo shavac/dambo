@@ -22,6 +22,47 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+/// Returns `true` when `host` is an all-interfaces wildcard bind address.
+pub fn is_wildcard_host(host: &str) -> bool {
+    matches!(host.trim(), "0.0.0.0" | "::" | "[::]")
+}
+
+/// Wrap bare IPv6 host literals in `[...]` for valid HTTP/WS URL authority formatting.
+pub fn format_url_host(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.contains(':') && !trimmed.starts_with('[') && !trimmed.ends_with(']') {
+        format!("[{}]", trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Format the configured server bind host for display without replacing wildcard hosts.
+pub fn display_listen_host(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        "localhost".to_string()
+    } else {
+        format_url_host(trimmed)
+    }
+}
+
+/// Map wildcard or IPv6 loopback listen hosts (`0.0.0.0`, `::`, `::1`, etc.) to `"localhost"`.
+pub fn connect_host(host: &str) -> &str {
+    let trimmed = host.trim();
+    if trimmed.is_empty()
+        || trimmed == "0.0.0.0"
+        || trimmed == "::"
+        || trimmed == "[::]"
+        || trimmed == "::1"
+        || trimmed == "[::1]"
+    {
+        "localhost"
+    } else {
+        trimmed
+    }
+}
+
 /// Shared state for Axum HTTP static serving, dual WebSocket channels, and Layer 1 plugin APIs.
 pub struct AppState {
     pub config: Arc<Config>,
@@ -72,13 +113,13 @@ fn content_type_for_path(path: &Path) -> &'static str {
         .map(|s| s.to_ascii_lowercase())
         .as_deref()
     {
-        Some("html") | Some("htm") => "text/html; charset=utf-8",
+        Some("html" | "htm") => "text/html; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
-        Some("js") | Some("mjs") => "application/javascript; charset=utf-8",
+        Some("js" | "mjs") => "application/javascript; charset=utf-8",
         Some("json") => "application/json; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
         Some("ico") => "image/x-icon",
@@ -416,13 +457,6 @@ impl std::error::Error for ServerBindError {
 pub struct BoundServer {
     primary: TcpListener,
     companion: Option<TcpListener>,
-    bound_addr: SocketAddr,
-}
-
-impl BoundServer {
-    pub fn bound_addr(&self) -> SocketAddr {
-        self.bound_addr
-    }
 }
 
 /// Bind primary HTTP/WS listener (and companion loopback listener when applicable) before spawning serve loops.
@@ -503,11 +537,7 @@ pub async fn bind_server(
         flag.store(primary_is_local || companion.is_some(), Ordering::Release);
     }
 
-    Ok(BoundServer {
-        primary,
-        companion,
-        bound_addr,
-    })
+    Ok(BoundServer { primary, companion })
 }
 
 /// Serve already-bound HTTP & dual WebSocket listeners until cancelled.
@@ -550,25 +580,14 @@ pub async fn serve_bound(
 }
 
 /// Bind and serve HTTP + dual WebSocket endpoints until cancelled.
+#[cfg(test)]
 pub async fn serve(
     state: Arc<AppState>,
     addr: SocketAddr,
     cancel: CancellationToken,
 ) -> Result<()> {
-    serve_with_loopback_flag(state, addr, cancel, None).await
-}
-
-/// Bind and serve HTTP + dual WebSocket endpoints until cancelled, optionally attaching a companion
-/// loopback listener when `addr` targets a specific non-loopback interface so local desktop overlays
-/// and local browser management remain accessible via localhost/127.0.0.1.
-pub async fn serve_with_loopback_flag(
-    state: Arc<AppState>,
-    addr: SocketAddr,
-    cancel: CancellationToken,
-    loopback_accessible: Option<Arc<AtomicBool>>,
-) -> Result<()> {
     let host = state.config.server.host.clone();
-    let bound = bind_server(&host, addr, loopback_accessible.as_deref()).await?;
+    let bound = bind_server(&host, addr, None).await?;
     serve_bound(state, bound, cancel).await
 }
 

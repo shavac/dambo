@@ -505,6 +505,20 @@
         return deck.slice(0, 4);
     }
 
+    function createCardCorner(rankText, suitSymbol, isBottom) {
+        const corner = document.createElement('div');
+        corner.className = isBottom ? 'card-corner bottom' : 'card-corner';
+        const rankEl = document.createElement('span');
+        rankEl.className = 'card-rank';
+        rankEl.textContent = rankText;
+        const suitEl = document.createElement('span');
+        suitEl.className = 'card-suit-sm';
+        suitEl.textContent = suitSymbol;
+        corner.appendChild(rankEl);
+        corner.appendChild(suitEl);
+        return corner;
+    }
+
     function renderCards(cards, solved) {
         cardsStageEl.replaceChildren();
 
@@ -514,18 +528,7 @@
             el.className = `poker-card ${card.suit.color}${solved ? ' solved-glow' : ''}`;
             el.style.animationDelay = `${idx * 65}ms`;
 
-            // 左上角牌面与花色
-            const topCorner = document.createElement('div');
-            topCorner.className = 'card-corner';
-            const topRank = document.createElement('span');
-            topRank.className = 'card-rank';
-            topRank.textContent = rankText;
-            const topSuit = document.createElement('span');
-            topSuit.className = 'card-suit-sm';
-            topSuit.textContent = card.suit.symbol;
-            topCorner.appendChild(topRank);
-            topCorner.appendChild(topSuit);
-            el.appendChild(topCorner);
+            el.appendChild(createCardCorner(rankText, card.suit.symbol, false));
 
             // A / J / Q / K 右上角点数明确标识（免去观众心算转换认知负担）
             if (card.rank === 1 || card.rank >= 11) {
@@ -544,18 +547,7 @@
             center.appendChild(suitLg);
             el.appendChild(center);
 
-            // 右下角倒置角标
-            const bottomCorner = document.createElement('div');
-            bottomCorner.className = 'card-corner bottom';
-            const botRank = document.createElement('span');
-            botRank.className = 'card-rank';
-            botRank.textContent = rankText;
-            const botSuit = document.createElement('span');
-            botSuit.className = 'card-suit-sm';
-            botSuit.textContent = card.suit.symbol;
-            bottomCorner.appendChild(botRank);
-            bottomCorner.appendChild(botSuit);
-            el.appendChild(bottomCorner);
+            el.appendChild(createCardCorner(rankText, card.suit.symbol, true));
 
             cardsStageEl.appendChild(el);
         });

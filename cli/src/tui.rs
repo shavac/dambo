@@ -391,6 +391,12 @@ impl TuiApp {
         self.dirty = true;
     }
 
+    fn report_error(&mut self, msg: impl Into<String>) {
+        let text = msg.into();
+        self.set_notice(text.clone(), true);
+        self.push_entry(FeedEntry::error(text));
+    }
+
     fn push_entry(&mut self, entry: FeedEntry) {
         if self.entries.len() >= MAX_FEED_ENTRIES {
             self.entries.pop_front();
@@ -563,20 +569,14 @@ impl TuiApp {
         self.dirty = true;
     }
 
-    fn handle_action_result(
-        &mut self,
-        res: ActionResult,
-        action_tx: &mpsc::UnboundedSender<ActionResult>,
-    ) {
+    fn handle_action_result(&mut self, res: ActionResult) {
         match res {
             ActionResult::DanmakuSent { msg, result } => match result {
                 Ok(()) => {
                     self.set_notice(format!("✓ 弹幕已发送: {}", msg), false);
                 }
                 Err(err) => {
-                    let err_msg = format_send_danmaku_error(&err);
-                    self.set_notice(err_msg.clone(), true);
-                    self.push_entry(FeedEntry::error(err_msg));
+                    self.report_error(format_send_danmaku_error(&err));
                 }
             },
             ActionResult::RoomSwitched { target, result } => match result {
@@ -584,9 +584,7 @@ impl TuiApp {
                     self.set_notice(format!("正在连接直播间 {}...", room_id), false);
                 }
                 Err(err) => {
-                    let msg = format!("切换房间 '{}' 失败: {}", target, err);
-                    self.set_notice(msg.clone(), true);
-                    self.push_entry(FeedEntry::error(msg));
+                    self.report_error(format!("切换房间 '{}' 失败: {}", target, err));
                 }
             },
             ActionResult::RoomLeft(result) => match result {
@@ -598,9 +596,7 @@ impl TuiApp {
                     self.push_entry(FeedEntry::system("已断开直播间连接"));
                 }
                 Err(err) => {
-                    let msg = format!("断开房间失败: {}", err);
-                    self.set_notice(msg.clone(), true);
-                    self.push_entry(FeedEntry::error(msg));
+                    self.report_error(format!("断开房间失败: {}", err));
                 }
             },
             ActionResult::RoomOptionsLoaded(opts) => {
@@ -631,7 +627,6 @@ impl TuiApp {
                 }
             }
         }
-        let _ = action_tx;
     }
 
     fn execute_submission(&mut self, raw: String, action_tx: &mpsc::UnboundedSender<ActionResult>) {
@@ -640,21 +635,18 @@ impl TuiApp {
             ParsedInput::SendDanmaku(msg) => {
                 let char_len = msg.chars().count();
                 if char_len > DANMAKU_MAX_CHARS {
-                    let err = format!("弹幕超出长度限制（{}/{} 字）", char_len, DANMAKU_MAX_CHARS);
-                    self.set_notice(err.clone(), true);
-                    self.push_entry(FeedEntry::error(err));
+                    self.report_error(format!(
+                        "弹幕超出长度限制（{}/{} 字）",
+                        char_len, DANMAKU_MAX_CHARS
+                    ));
                     return;
                 }
                 if !self.auth_state.is_login {
-                    let err = "尚未登录 B 站账号，请先输入 /login 扫码登录";
-                    self.set_notice(err, true);
-                    self.push_entry(FeedEntry::error(err));
+                    self.report_error("尚未登录 B 站账号，请先输入 /login 扫码登录");
                     return;
                 }
                 if !self.room_state.connected || self.room_state.room_id == 0 {
-                    let err = "尚未连接直播间，请先输入 /room <房间号> 进入直播间";
-                    self.set_notice(err, true);
-                    self.push_entry(FeedEntry::error(err));
+                    self.report_error("尚未连接直播间，请先输入 /room <房间号> 进入直播间");
                     return;
                 }
                 self.set_notice(format!("正在发送: {}", msg), false);
@@ -666,8 +658,7 @@ impl TuiApp {
                 });
             }
             ParsedInput::InvalidCommand(hint) => {
-                self.set_notice(hint.clone(), true);
-                self.push_entry(FeedEntry::error(hint));
+                self.report_error(hint);
             }
             ParsedInput::Command(cmd) => self.dispatch_command(cmd, action_tx),
         }
@@ -1232,7 +1223,7 @@ where
             }
 
             tokio::select! {
-                _ = wait_shutdown(shutdown_rx) => {
+                _ = wait_for_shutdown(shutdown_rx) => {
                     app.should_quit = true;
                     break;
                 }
@@ -1290,7 +1281,7 @@ where
                     app.push_entry(format_cli_log(&entry));
                 }
                 Some(res) = action_rx.recv() => {
-                    app.handle_action_result(res, &action_tx);
+                    app.handle_action_result(res);
                 }
                 _ = tick.tick() => {
                     let now = Instant::now();
@@ -1308,7 +1299,7 @@ where
 
             // Coalesce burst background messages before next draw when staying in TUI.
             if !app.should_quit && !app.pending_login {
-                drain_burst_channels(&mut app, &mut ch, &mut log_rx, &mut action_rx, &action_tx);
+                drain_burst_channels(&mut app, &mut ch, &mut log_rx, &mut action_rx);
             }
 
             if app.should_quit || app.pending_login {
@@ -1345,7 +1336,6 @@ fn drain_burst_channels(
     ch: &mut TuiChannels,
     log_rx: &mut mpsc::UnboundedReceiver<CliLogEntry>,
     action_rx: &mut mpsc::UnboundedReceiver<ActionResult>,
-    action_tx: &mpsc::UnboundedSender<ActionResult>,
 ) {
     for _ in 0..64 {
         let mut progressed = false;
@@ -1362,7 +1352,7 @@ fn drain_burst_channels(
             progressed = true;
         }
         if let Ok(res) = action_rx.try_recv() {
-            app.handle_action_result(res, action_tx);
+            app.handle_action_result(res);
             progressed = true;
         }
         if !progressed {
@@ -1395,7 +1385,7 @@ fn count_wrapped_lines(lines: &[Line<'_>], width: u16) -> usize {
     total
 }
 
-async fn wait_shutdown(rx: &mut watch::Receiver<bool>) {
+pub async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
     if *rx.borrow() {
         return;
     }

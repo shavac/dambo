@@ -7,7 +7,7 @@ use crate::format::{
     connect_host, display_listen_host, format_room_info_plain, format_user_info_plain,
     is_wildcard_host,
 };
-use crate::tui::TuiChannels;
+use crate::tui::{TuiChannels, wait_for_shutdown};
 use anyhow::Result;
 use clap::Parser;
 use dambo_core::DamboRuntime;
@@ -77,17 +77,6 @@ fn spawn_shutdown_watcher(shutdown_tx: watch::Sender<bool>) {
             std::process::exit(130);
         }
     });
-}
-
-async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
-    if *rx.borrow() {
-        return;
-    }
-    while rx.changed().await.is_ok() {
-        if *rx.borrow() {
-            return;
-        }
-    }
 }
 
 async fn run_cli_qr_login(runtime: &DamboRuntime, shutdown_rx: &mut watch::Receiver<bool>) -> bool {

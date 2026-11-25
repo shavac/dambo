@@ -48,17 +48,12 @@
     };
 
     const timerBag = Dambo.utils.createTimerBag();
+    const enterTimers = Dambo.utils.createTimerBag();
     const autoScroll = Dambo.utils.createAutoScroll(container, {
         thresholdPx: SCROLL_BOTTOM_THRESHOLD_PX,
     });
     const comboEntriesByEl = new WeakMap();
     const seenPinKeys = new Set();
-    let enterTimers = [];
-
-    function clearEnterTimers() {
-        enterTimers.forEach((id) => clearTimeout(id));
-        enterTimers = [];
-    }
 
     function applyPlatformConfig(cfg) {
         if (!cfg || typeof cfg !== 'object') return;
@@ -83,7 +78,7 @@
         if (!hasQueryOverride.show_enter && typeof cfg.show_enter === 'boolean') {
             runtimeConfig.showEnter = cfg.show_enter;
             if (!runtimeConfig.showEnter && enterDock) {
-                clearEnterTimers();
+                enterTimers.clearAll();
                 enterDock.replaceChildren();
             }
         }
@@ -101,7 +96,7 @@
     function clearAllState() {
         timerBag.clearAll();
         giftCombos.clear();
-        clearEnterTimers();
+        enterTimers.clearAll();
         autoScroll.reset();
         seenPinKeys.clear();
         container.replaceChildren();
@@ -203,7 +198,7 @@
         });
         if (delayMs <= 0) return;
 
-        clearEnterTimers();
+        enterTimers.clearAll();
         enterDock.replaceChildren();
 
         const row = document.createElement('div');
@@ -217,17 +212,15 @@
         appendSpan(row, 'event-action', Dambo.utils.formatInteract(item).summaryText);
         enterDock.appendChild(row);
 
-        const dismissId = setTimeout(() => {
+        enterTimers.set(() => {
             if (!row.isConnected) return;
             row.classList.add('fade-out');
-            const removeId = setTimeout(() => {
+            enterTimers.set(() => {
                 if (row.parentElement === enterDock) {
                     row.remove();
                 }
             }, FADE_MS);
-            enterTimers.push(removeId);
         }, delayMs);
-        enterTimers.push(dismissId);
     }
 
     function pinnedHighlightKey(item) {

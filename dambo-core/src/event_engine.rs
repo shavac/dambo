@@ -116,10 +116,12 @@ impl BackpressureQueue {
         }
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.inner.lock().expect("BackpressureQueue poisoned").len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.inner
             .lock()
@@ -187,6 +189,14 @@ impl BackpressureQueue {
     }
 }
 
+fn initial_sample_users(uname: &str) -> Vec<String> {
+    if uname.is_empty() {
+        Vec::new()
+    } else {
+        vec![uname.to_string()]
+    }
+}
+
 #[derive(Default)]
 struct Reservoir {
     events: Vec<EventItem>,
@@ -238,11 +248,7 @@ impl Reservoir {
                             ev.content
                         },
                         count: 1,
-                        sample_users: if ev.uname.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![ev.uname]
-                        },
+                        sample_users: initial_sample_users(&ev.uname),
                         price: 0,
                         ..Default::default()
                     });
@@ -266,39 +272,33 @@ impl Reservoir {
                 } else {
                     let idx = self.events.len();
                     self.chat_indices.insert(key, idx);
+                    let sample_users = initial_sample_users(&ev.uname);
                     self.events.push(EventItem {
                         seq: ev.seq,
                         kind: "chat".to_string(),
                         uid: ev.uid,
-                        uname: ev.uname.clone(),
+                        uname: ev.uname,
                         medal_level,
                         content: ev.content,
                         count: 1,
-                        sample_users: if ev.uname.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![ev.uname]
-                        },
+                        sample_users,
                         price: 0,
                         ..Default::default()
                     });
                 }
             }
             _ => {
+                let sample_users = initial_sample_users(&ev.uname);
                 self.events.push(EventItem {
                     seq: ev.seq,
                     kind: ev.kind,
                     msg_type: ev.msg_type,
                     uid: ev.uid,
-                    uname: ev.uname.clone(),
+                    uname: ev.uname,
                     medal_level,
                     content: ev.content,
                     count: 1,
-                    sample_users: if ev.uname.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![ev.uname]
-                    },
+                    sample_users,
                     price: ev.price,
                     face: None,
                     guard_level: ev.guard_level,
@@ -346,7 +346,6 @@ fn extract_gift_base_name(content: &str) -> String {
 pub struct EventEngine {
     pub window_ms: u64,
     pub dedup_enabled: bool,
-    pub buffer_capacity: usize,
     pub min_passthrough_chars: usize,
     pub max_combo_wait_secs: u64,
     queue: Arc<BackpressureQueue>,
@@ -362,7 +361,6 @@ impl EventEngine {
         Self {
             window_ms: cfg.window_ms,
             dedup_enabled: cfg.dedup_enabled,
-            buffer_capacity: cfg.buffer_capacity,
             min_passthrough_chars: cfg.min_passthrough_chars,
             max_combo_wait_secs: cfg.max_combo_wait_secs,
             queue: Arc::new(BackpressureQueue::new(
@@ -577,11 +575,12 @@ impl EventEngine {
         } else {
             None
         };
+        let sample_users = initial_sample_users(&bucket.uname);
         let item = EventItem {
             seq: bucket.last_seq,
             kind: "gift".to_string(),
             uid: bucket.uid,
-            uname: bucket.uname.clone(),
+            uname: bucket.uname,
             face: if bucket.total_price > 0 {
                 bucket.face
             } else {
@@ -590,11 +589,7 @@ impl EventEngine {
             medal_level: bucket.medal_level,
             content: format!("{} x{}", bucket.gift_name, bucket.total_num),
             count: bucket.total_num,
-            sample_users: if bucket.uname.is_empty() {
-                Vec::new()
-            } else {
-                vec![bucket.uname]
-            },
+            sample_users,
             price: bucket.total_price,
             batch_combo_id: Some(bucket.batch_combo_id),
             ..Default::default()
@@ -623,21 +618,18 @@ impl EventEngine {
         } else {
             None
         };
+        let sample_users = initial_sample_users(&ev.uname);
         let item = EventItem {
             seq: ev.seq,
             kind: ev.kind,
             msg_type: ev.msg_type,
             uid: ev.uid,
-            uname: ev.uname.clone(),
+            uname: ev.uname,
             face,
             medal_level: ev.medal_level.unwrap_or(0),
             content: ev.content,
             count,
-            sample_users: if ev.uname.is_empty() {
-                Vec::new()
-            } else {
-                vec![ev.uname]
-            },
+            sample_users,
             price: ev.price,
             guard_level: ev.guard_level,
             batch_combo_id: ev.batch_combo_id,

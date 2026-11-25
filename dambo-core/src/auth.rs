@@ -2,10 +2,7 @@ use crate::db;
 use crate::model::{AuthState, RoomQuickItem};
 use anyhow::{Context, Result, anyhow};
 use blive_proto::api::BiliApiClient;
-pub use blive_proto::auth::{
-    DANMAKU_MAX_CHARS, QrPollStatus, SendDanmakuError, SessionData, parse_live_user_info_response,
-    parse_nav_response, parse_qr_poll_code, parse_qr_poll_response, parse_send_danmaku_response,
-};
+pub use blive_proto::auth::{DANMAKU_MAX_CHARS, QrPollStatus, SendDanmakuError, SessionData};
 use qrcode::QrCode;
 use qrcode::render::{svg, unicode};
 use redb::Database;
@@ -62,6 +59,71 @@ fn remove_session_from_db(db: &Database) -> Result<()> {
     db::delete_meta(db, db::KEY_AUTH_SESSION).context("Failed to remove auth_session from redb")
 }
 
+fn try_migrate_legacy_session(db: &Database, legacy_path: &Path) -> Option<SessionData> {
+    let already_migrated = db::read_meta(db, db::KEY_AUTH_SESSION_MIGRATED)
+        .ok()
+        .flatten()
+        .is_some();
+    if already_migrated || !legacy_path.exists() {
+        return None;
+    }
+    let session = match load_legacy_session_file(legacy_path) {
+        Ok(Some(s)) if s.is_valid_format() => s,
+        Ok(Some(_)) => {
+            log::warn!(
+                "Legacy session {:?} has invalid format; skipping migration",
+                legacy_path
+            );
+            return None;
+        }
+        Ok(None) => return None,
+        Err(e) => {
+            log::warn!(
+                "Failed to load legacy session {:?}; leaving file untouched: {}",
+                legacy_path,
+                e
+            );
+            return None;
+        }
+    };
+    match serde_json::to_vec(&session) {
+        Ok(bytes) => {
+            if let Err(e) = db::write_meta_batch(
+                db,
+                &[
+                    (db::KEY_AUTH_SESSION, bytes.as_slice()),
+                    (db::KEY_AUTH_SESSION_MIGRATED, b"1"),
+                ],
+            ) {
+                log::warn!(
+                    "Failed to migrate legacy session {:?} into redb: {}",
+                    legacy_path,
+                    e
+                );
+            } else if let Err(e) = fs::remove_file(legacy_path) {
+                log::warn!(
+                    "Migrated legacy session {:?} into redb, but failed to remove legacy file: {}",
+                    legacy_path,
+                    e
+                );
+            } else {
+                log::info!(
+                    "Migrated legacy session {:?} into redb and removed plaintext file",
+                    legacy_path
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to serialize legacy session {:?} during migration: {}",
+                legacy_path,
+                e
+            );
+        }
+    }
+    Some(session)
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct QrGenerateResult {
     pub url: String,
@@ -99,76 +161,7 @@ impl AuthManager {
                 log::warn!("Failed to load auth_session from redb: {}", e);
                 None
             }
-            Ok(None) => {
-                let already_migrated = db::read_meta(&db, db::KEY_AUTH_SESSION_MIGRATED)
-                    .ok()
-                    .flatten()
-                    .is_some();
-                if !already_migrated
-                    && let Some(legacy_path) = legacy_session_path
-                    && legacy_path.exists()
-                {
-                    match load_legacy_session_file(legacy_path) {
-                        Ok(Some(s)) if s.is_valid_format() => match serde_json::to_vec(&s) {
-                            Ok(bytes) => {
-                                if let Err(e) = db::write_meta_batch(
-                                    &db,
-                                    &[
-                                        (db::KEY_AUTH_SESSION, bytes.as_slice()),
-                                        (db::KEY_AUTH_SESSION_MIGRATED, b"1"),
-                                    ],
-                                ) {
-                                    log::warn!(
-                                        "Failed to migrate legacy session {:?} into redb: {}",
-                                        legacy_path,
-                                        e
-                                    );
-                                } else {
-                                    if let Err(e) = fs::remove_file(legacy_path) {
-                                        log::warn!(
-                                            "Migrated legacy session {:?} into redb, but failed to remove legacy file: {}",
-                                            legacy_path,
-                                            e
-                                        );
-                                    } else {
-                                        log::info!(
-                                            "Migrated legacy session {:?} into redb and removed plaintext file",
-                                            legacy_path
-                                        );
-                                    }
-                                }
-                                Some(s)
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to serialize legacy session {:?} during migration: {}",
-                                    legacy_path,
-                                    e
-                                );
-                                Some(s)
-                            }
-                        },
-                        Ok(Some(_)) => {
-                            log::warn!(
-                                "Legacy session {:?} has invalid format; skipping migration",
-                                legacy_path
-                            );
-                            None
-                        }
-                        Ok(None) => None,
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to load legacy session {:?}; leaving file untouched: {}",
-                                legacy_path,
-                                e
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            }
+            Ok(None) => legacy_session_path.and_then(|p| try_migrate_legacy_session(&db, p)),
         };
 
         let initial_state = match &loaded {

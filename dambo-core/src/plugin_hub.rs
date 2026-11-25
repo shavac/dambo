@@ -85,8 +85,6 @@ pub struct RequesterDisplay {
 struct SseClientRecord {
     plugin_name: String,
     namedomain: String,
-    #[allow(dead_code)]
-    mode: String,
     watches: Vec<AcceptedWatch>,
     topics: Vec<AcceptedTopic>,
     tx: mpsc::Sender<SseOutbound>,
@@ -153,6 +151,7 @@ impl PluginEventHub {
     }
 
     /// Number of currently connected SSE clients (useful for diagnostics & tests).
+    #[cfg(test)]
     pub fn client_count(&self) -> usize {
         self.clients.read().map(|c| c.len()).unwrap_or(0)
     }
@@ -162,7 +161,6 @@ impl PluginEventHub {
         &self,
         plugin_name: String,
         namedomain: String,
-        mode: String,
         watches: Vec<AcceptedWatch>,
         topics: Vec<AcceptedTopic>,
     ) -> (String, mpsc::Receiver<SseOutbound>) {
@@ -175,7 +173,6 @@ impl PluginEventHub {
                 SseClientRecord {
                     plugin_name,
                     namedomain,
-                    mode,
                     watches,
                     topics,
                     tx,
@@ -437,39 +434,66 @@ impl PluginEventHub {
             return;
         }
 
-        let mut revoked_watches: HashMap<String, Vec<(StoreKind, String)>> = HashMap::new();
-        let mut revoked_topics: HashMap<String, Vec<String>> = HashMap::new();
+        enum PruneTarget {
+            Watch {
+                cid: String,
+                store: StoreKind,
+                namespace: String,
+            },
+            Topic {
+                cid: String,
+                topic: String,
+            },
+        }
 
+        let mut queries = Vec::new();
+        let mut targets = Vec::new();
         for (cid, caller_domain, watches, topics) in candidates {
             for w in watches {
                 let res = format!("{}:{}", w.store.as_str(), w.namespace);
-                let allowed = match store
-                    .check_effective_acl(&caller_domain, owner_namedomain, &res)
-                    .await
-                {
-                    Ok(chk) => parse_acl_level(&chk.effective_level)
-                        .satisfies(AclLevel::Read, &AclResourceKind::Persist),
-                    Err(_) => false,
-                };
-                if !allowed {
-                    revoked_watches
-                        .entry(cid.clone())
-                        .or_default()
-                        .push((w.store, w.namespace));
+                if let Ok(parsed) = parse_acl_resource(&res) {
+                    queries.push((caller_domain.clone(), owner_namedomain.to_string(), parsed));
+                    targets.push(PruneTarget::Watch {
+                        cid: cid.clone(),
+                        store: w.store,
+                        namespace: w.namespace,
+                    });
                 }
             }
             for t in topics {
                 let res = format!("topic:{}", t.topic);
-                let allowed = match store
-                    .check_effective_acl(&caller_domain, owner_namedomain, &res)
-                    .await
-                {
-                    Ok(chk) => parse_acl_level(&chk.effective_level)
-                        .satisfies(AclLevel::Subscribe, &AclResourceKind::Topic),
-                    Err(_) => false,
-                };
-                if !allowed {
-                    revoked_topics.entry(cid.clone()).or_default().push(t.topic);
+                if let Ok(parsed) = parse_acl_resource(&res) {
+                    queries.push((caller_domain.clone(), owner_namedomain.to_string(), parsed));
+                    targets.push(PruneTarget::Topic {
+                        cid: cid.clone(),
+                        topic: t.topic,
+                    });
+                }
+            }
+        }
+
+        let Ok(levels) = store.check_effective_acl_batch(queries).await else {
+            return;
+        };
+
+        let mut revoked_watches: HashMap<String, Vec<(StoreKind, String)>> = HashMap::new();
+        let mut revoked_topics: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (target, eff_level) in targets.into_iter().zip(levels) {
+            match target {
+                PruneTarget::Watch {
+                    cid,
+                    store: s,
+                    namespace,
+                } => {
+                    if !eff_level.satisfies(AclLevel::Read, &AclResourceKind::Persist) {
+                        revoked_watches.entry(cid).or_default().push((s, namespace));
+                    }
+                }
+                PruneTarget::Topic { cid, topic } => {
+                    if !eff_level.satisfies(AclLevel::Subscribe, &AclResourceKind::Topic) {
+                        revoked_topics.entry(cid).or_default().push(topic);
+                    }
                 }
             }
         }
@@ -585,6 +609,22 @@ pub async fn evaluate_subscriptions(
     let mut seen_watches: HashMap<(StoreKind, String, String, Option<String>), ()> = HashMap::new();
     let mut seen_topics: HashMap<(String, String), ()> = HashMap::new();
 
+    struct StagedWatch {
+        store_kind: StoreKind,
+        owner_domain: String,
+        requested_owner: String,
+        namespace: String,
+        prefix: Option<String>,
+        parsed: crate::plugin_types::ParsedAclResource,
+    }
+    struct StagedTopic {
+        owner_domain: String,
+        requested_owner: String,
+        topic: String,
+        parsed: crate::plugin_types::ParsedAclResource,
+    }
+
+    let mut staged_watches = Vec::with_capacity(raw_watches.len());
     for w in raw_watches {
         let store_kind = match StoreKind::parse(&w.store) {
             Ok(s) => s,
@@ -633,64 +673,17 @@ pub async fn evaluate_subscriptions(
                 continue;
             }
         };
-
-        let allowed = match store
-            .check_effective_acl(
-                caller_namedomain,
-                &target_info.namedomain,
-                &parsed.canonical(),
-            )
-            .await
-        {
-            Ok(chk) => {
-                chk.is_self
-                    || parse_acl_level(&chk.effective_level).satisfies(AclLevel::Read, &parsed.kind)
-            }
-            Err(err) => {
-                result.rejected.push(RejectedSub {
-                    kind: "watch",
-                    owner: w.owner,
-                    target: w.namespace,
-                    code: err.code,
-                    message: err.message,
-                });
-                continue;
-            }
-        };
-
-        if !allowed {
-            result.rejected.push(RejectedSub {
-                kind: "watch",
-                owner: w.owner,
-                target: w.namespace,
-                code: "ACL_DENIED",
-                message: format!(
-                    "Permission 'read' required on '{}' for target '{}'",
-                    parsed.canonical(),
-                    target_info.namedomain
-                ),
-            });
-            continue;
-        }
-
-        let clean_prefix = w.prefix.filter(|p| !p.is_empty());
-        let dedup_key = (
+        staged_watches.push(StagedWatch {
             store_kind,
-            target_info.namedomain.clone(),
-            w.namespace.clone(),
-            clean_prefix.clone(),
-        );
-        if seen_watches.insert(dedup_key, ()).is_none() {
-            result.accepted_watches.push(AcceptedWatch {
-                store: store_kind,
-                owner: target_info.namedomain,
-                requested_owner: w.owner,
-                namespace: w.namespace,
-                prefix: clean_prefix,
-            });
-        }
+            owner_domain: target_info.namedomain,
+            requested_owner: w.owner,
+            namespace: w.namespace,
+            prefix: w.prefix,
+            parsed,
+        });
     }
 
+    let mut staged_topics = Vec::with_capacity(raw_topics.len());
     for t in raw_topics {
         let Some(target_info) = plugins.resolve_target(Some(caller_plugin_name), &t.owner) else {
             result.rejected.push(RejectedSub {
@@ -726,54 +719,109 @@ pub async fn evaluate_subscriptions(
                 continue;
             }
         };
+        staged_topics.push(StagedTopic {
+            owner_domain: target_info.namedomain,
+            requested_owner: t.owner,
+            topic: t.topic,
+            parsed,
+        });
+    }
 
-        let allowed = match store
-            .check_effective_acl(
-                caller_namedomain,
-                &target_info.namedomain,
-                &parsed.canonical(),
-            )
-            .await
-        {
-            Ok(chk) => {
-                chk.is_self
-                    || parse_acl_level(&chk.effective_level)
-                        .satisfies(AclLevel::Subscribe, &parsed.kind)
+    let mut acl_queries = Vec::with_capacity(staged_watches.len() + staged_topics.len());
+    for sw in &staged_watches {
+        acl_queries.push((
+            caller_namedomain.to_string(),
+            sw.owner_domain.clone(),
+            sw.parsed.clone(),
+        ));
+    }
+    for st in &staged_topics {
+        acl_queries.push((
+            caller_namedomain.to_string(),
+            st.owner_domain.clone(),
+            st.parsed.clone(),
+        ));
+    }
+
+    match store.check_effective_acl_batch(acl_queries).await {
+        Ok(levels) => {
+            let (watch_levels, topic_levels) = levels.split_at(staged_watches.len());
+            for (sw, &eff_level) in staged_watches.into_iter().zip(watch_levels) {
+                if !eff_level.satisfies(AclLevel::Read, &sw.parsed.kind) {
+                    result.rejected.push(RejectedSub {
+                        kind: "watch",
+                        owner: sw.requested_owner,
+                        target: sw.namespace,
+                        code: "ACL_DENIED",
+                        message: format!(
+                            "Permission 'read' required on '{}' for target '{}'",
+                            sw.parsed.canonical(),
+                            sw.owner_domain
+                        ),
+                    });
+                    continue;
+                }
+                let clean_prefix = sw.prefix.filter(|p| !p.is_empty());
+                let dedup_key = (
+                    sw.store_kind,
+                    sw.owner_domain.clone(),
+                    sw.namespace.clone(),
+                    clean_prefix.clone(),
+                );
+                if seen_watches.insert(dedup_key, ()).is_none() {
+                    result.accepted_watches.push(AcceptedWatch {
+                        store: sw.store_kind,
+                        owner: sw.owner_domain,
+                        requested_owner: sw.requested_owner,
+                        namespace: sw.namespace,
+                        prefix: clean_prefix,
+                    });
+                }
             }
-            Err(err) => {
+            for (st, &eff_level) in staged_topics.into_iter().zip(topic_levels) {
+                if !eff_level.satisfies(AclLevel::Subscribe, &st.parsed.kind) {
+                    result.rejected.push(RejectedSub {
+                        kind: "topic",
+                        owner: st.requested_owner,
+                        target: st.topic,
+                        code: "ACL_DENIED",
+                        message: format!(
+                            "Permission 'subscribe' required on '{}' for target '{}'",
+                            st.parsed.canonical(),
+                            st.owner_domain
+                        ),
+                    });
+                    continue;
+                }
+                let dedup_key = (st.owner_domain.clone(), st.topic.clone());
+                if seen_topics.insert(dedup_key, ()).is_none() {
+                    result.accepted_topics.push(AcceptedTopic {
+                        owner: st.owner_domain,
+                        requested_owner: st.requested_owner,
+                        topic: st.topic,
+                    });
+                }
+            }
+        }
+        Err(err) => {
+            for sw in staged_watches {
+                result.rejected.push(RejectedSub {
+                    kind: "watch",
+                    owner: sw.requested_owner,
+                    target: sw.namespace,
+                    code: err.code,
+                    message: err.message.clone(),
+                });
+            }
+            for st in staged_topics {
                 result.rejected.push(RejectedSub {
                     kind: "topic",
-                    owner: t.owner,
-                    target: t.topic,
+                    owner: st.requested_owner,
+                    target: st.topic,
                     code: err.code,
-                    message: err.message,
+                    message: err.message.clone(),
                 });
-                continue;
             }
-        };
-
-        if !allowed {
-            result.rejected.push(RejectedSub {
-                kind: "topic",
-                owner: t.owner,
-                target: t.topic,
-                code: "ACL_DENIED",
-                message: format!(
-                    "Permission 'subscribe' required on '{}' for target '{}'",
-                    parsed.canonical(),
-                    target_info.namedomain
-                ),
-            });
-            continue;
-        }
-
-        let dedup_key = (target_info.namedomain.clone(), t.topic.clone());
-        if seen_topics.insert(dedup_key, ()).is_none() {
-            result.accepted_topics.push(AcceptedTopic {
-                owner: target_info.namedomain,
-                requested_owner: t.owner,
-                topic: t.topic,
-            });
         }
     }
 
@@ -805,14 +853,5 @@ pub fn resolve_requester_display(
             name: None,
             installed: false,
         },
-    }
-}
-
-fn parse_acl_level(raw: &str) -> AclLevel {
-    match raw {
-        "read" => AclLevel::Read,
-        "write" => AclLevel::Write,
-        "subscribe" => AclLevel::Subscribe,
-        _ => AclLevel::None,
     }
 }

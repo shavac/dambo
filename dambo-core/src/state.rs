@@ -5,7 +5,7 @@ use redb::Database;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
@@ -65,23 +65,90 @@ pub struct AppPersistedState {
 /// Thread-safe, fault-tolerant, ACID `redb` persistence store for runtime host state.
 pub struct StateStore {
     db: Arc<Database>,
-    path: PathBuf,
     inner: RwLock<AppPersistedState>,
     write_lock: Mutex<()>,
     state_tx: watch::Sender<AppPersistedState>,
 }
 
+fn try_migrate_legacy_state(db: &Database, legacy_path: &Path) -> Option<AppPersistedState> {
+    let already_migrated = db::read_meta(db, db::KEY_APP_STATE_MIGRATED)
+        .ok()
+        .flatten()
+        .is_some();
+    if already_migrated || !legacy_path.exists() {
+        return None;
+    }
+    let raw = match fs::read_to_string(legacy_path) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "Failed to read legacy state file {:?} ({}); falling back to default runtime state",
+                legacy_path,
+                e
+            );
+            return None;
+        }
+    };
+    let parsed = match serde_json::from_str::<AppPersistedState>(&raw) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!(
+                "Failed to parse legacy state file {:?} ({}); falling back to default runtime state",
+                legacy_path,
+                e
+            );
+            return None;
+        }
+    };
+    let sanitized = StateStore::sanitize_state(parsed, &legacy_path.display().to_string());
+    match serde_json::to_vec(&sanitized) {
+        Ok(bytes) => {
+            if let Err(e) = db::write_meta_batch(
+                db,
+                &[
+                    (db::KEY_APP_STATE, bytes.as_slice()),
+                    (db::KEY_APP_STATE_MIGRATED, b"1"),
+                ],
+            ) {
+                log::warn!(
+                    "Failed to migrate legacy state {:?} into redb: {}",
+                    legacy_path,
+                    e
+                );
+            } else if let Err(e) = fs::remove_file(legacy_path) {
+                log::warn!(
+                    "Migrated legacy state {:?} into redb, but failed to remove legacy file: {}",
+                    legacy_path,
+                    e
+                );
+            } else {
+                log::info!(
+                    "Migrated legacy state {:?} into redb and removed old JSON file",
+                    legacy_path
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to serialize migrated state from {:?}: {}",
+                legacy_path,
+                e
+            );
+        }
+    }
+    Some(sanitized)
+}
+
 impl StateStore {
     /// Open a dedicated `redb` database at `db_path` (with optional legacy `state.json` migration).
     pub fn open<P: AsRef<Path>>(db_path: P, legacy_state_path: Option<&Path>) -> Result<Self> {
-        let path = db_path.as_ref().to_path_buf();
-        let db = db::open_database(&path)?;
-        Ok(Self::from_db(db, path, legacy_state_path))
+        let db = db::open_database(db_path.as_ref())?;
+        Ok(Self::from_db(db, legacy_state_path))
     }
 
     /// Initialize [`StateStore`] backed by a shared `redb::Database`, performing a one-time
     /// migration from `legacy_state_path` if `redb` has no persisted state yet and has not migrated before.
-    pub fn from_db(db: Arc<Database>, db_path: PathBuf, legacy_state_path: Option<&Path>) -> Self {
+    pub fn from_db(db: Arc<Database>, legacy_state_path: Option<&Path>) -> Self {
         let state = match db::read_meta(&db, db::KEY_APP_STATE) {
             Ok(Some(bytes)) => match serde_json::from_slice::<AppPersistedState>(&bytes) {
                 Ok(parsed) => Self::sanitize_state(parsed, "redb:app_state"),
@@ -100,87 +167,14 @@ impl StateStore {
                 );
                 AppPersistedState::default()
             }
-            Ok(None) => {
-                let already_migrated = db::read_meta(&db, db::KEY_APP_STATE_MIGRATED)
-                    .ok()
-                    .flatten()
-                    .is_some();
-                if !already_migrated
-                    && let Some(legacy_path) = legacy_state_path
-                    && legacy_path.exists()
-                {
-                    match fs::read_to_string(legacy_path) {
-                        Ok(raw) => match serde_json::from_str::<AppPersistedState>(&raw) {
-                            Ok(parsed) => {
-                                let sanitized = Self::sanitize_state(
-                                    parsed,
-                                    &legacy_path.display().to_string(),
-                                );
-                                match serde_json::to_vec(&sanitized) {
-                                    Ok(bytes) => {
-                                        if let Err(e) = db::write_meta_batch(
-                                            &db,
-                                            &[
-                                                (db::KEY_APP_STATE, bytes.as_slice()),
-                                                (db::KEY_APP_STATE_MIGRATED, b"1"),
-                                            ],
-                                        ) {
-                                            log::warn!(
-                                                "Failed to migrate legacy state {:?} into redb: {}",
-                                                legacy_path,
-                                                e
-                                            );
-                                        } else if let Err(e) = fs::remove_file(legacy_path) {
-                                            log::warn!(
-                                                "Migrated legacy state {:?} into redb, but failed to remove legacy file: {}",
-                                                legacy_path,
-                                                e
-                                            );
-                                        } else {
-                                            log::info!(
-                                                "Migrated legacy state {:?} into redb and removed old JSON file",
-                                                legacy_path
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "Failed to serialize migrated state from {:?}: {}",
-                                            legacy_path,
-                                            e
-                                        );
-                                    }
-                                }
-                                sanitized
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to parse legacy state file {:?} ({}); falling back to default runtime state",
-                                    legacy_path,
-                                    e
-                                );
-                                AppPersistedState::default()
-                            }
-                        },
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to read legacy state file {:?} ({}); falling back to default runtime state",
-                                legacy_path,
-                                e
-                            );
-                            AppPersistedState::default()
-                        }
-                    }
-                } else {
-                    AppPersistedState::default()
-                }
-            }
+            Ok(None) => legacy_state_path
+                .and_then(|p| try_migrate_legacy_state(&db, p))
+                .unwrap_or_default(),
         };
 
         let (state_tx, _) = watch::channel(state.clone());
         Self {
             db,
-            path: db_path,
             inner: RwLock::new(state),
             write_lock: Mutex::new(()),
             state_tx,
@@ -221,10 +215,6 @@ impl StateStore {
         }
         state.room_history = cleaned_history;
         state
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     pub fn snapshot(&self) -> AppPersistedState {
@@ -432,6 +422,7 @@ impl StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static STATE_TEST_ID: AtomicU64 = AtomicU64::new(1);

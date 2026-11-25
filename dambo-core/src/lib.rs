@@ -132,11 +132,7 @@ impl DamboRuntime {
         let log_dir = resolve_path(&base_dir, &cfg.log.path);
 
         let db = db::open_runtime_database(&db_path, legacy_plugin_db.as_deref())?;
-        let state_store = Arc::new(StateStore::from_db(
-            db.clone(),
-            db_path.clone(),
-            Some(&legacy_state_path),
-        ));
+        let state_store = Arc::new(StateStore::from_db(db.clone(), Some(&legacy_state_path)));
         let startup_auto_connect = Arc::new(AtomicBool::new(
             state_store.current_room_id().is_some_and(|id| id > 0) || cfg.bilibili.room_id > 0,
         ));
@@ -191,6 +187,52 @@ impl DamboRuntime {
     /// Returns whether local loopback access (`localhost` / `127.0.0.1` / `[::1]`) is bound for HTTP/WS services.
     pub fn is_loopback_accessible(&self) -> bool {
         self.loopback_accessible.load(Ordering::Acquire)
+    }
+
+    /// Resolve the preferred local loopback authority host (`"localhost"`, `"127.0.0.1"`, or `"[::1]"`)
+    /// when a primary or companion loopback listener is available.
+    pub fn local_loopback_host(&self) -> Option<&'static str> {
+        let trimmed = self.config.server.host.trim();
+        if trimmed.eq_ignore_ascii_case("::")
+            || trimmed.eq_ignore_ascii_case("[::]")
+            || trimmed.eq_ignore_ascii_case("::1")
+            || trimmed.eq_ignore_ascii_case("[::1]")
+        {
+            return Some("[::1]");
+        }
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("localhost") || trimmed == "0.0.0.0" {
+            return Some("localhost");
+        }
+        if trimmed == "127.0.0.1" {
+            return Some("127.0.0.1");
+        }
+        if self.is_loopback_accessible() {
+            let is_v6 = trimmed
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| ip.is_ipv6());
+            return Some(if is_v6 { "[::1]" } else { "127.0.0.1" });
+        }
+        None
+    }
+
+    /// Build the canonical view URL (`http://{host}:{port}/{plugin}/`) for a plugin.
+    pub fn plugin_url(&self, name: &str) -> String {
+        let host = server::format_url_host(server::connect_host(&self.config.server.host));
+        format!("http://{}:{}/{}/", host, self.config.server.port, name)
+    }
+
+    /// Build the canonical management URL (`http://{host}:{port}/{plugin}/m`) for a plugin,
+    /// preferring a local loopback host when accessible so local admin cookies auto-mint.
+    pub fn plugin_manage_url(&self, name: &str) -> String {
+        let host = self
+            .local_loopback_host()
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                server::format_url_host(server::connect_host(&self.config.server.host))
+            });
+        format!("http://{}:{}/{}/m", host, self.config.server.port, name)
     }
 
     /// Inspect an error chain to extract the occupied address when binding failed with `AddrInUse`.

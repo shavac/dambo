@@ -5,6 +5,8 @@ use dambo_core::auth::{QrPollStatus, SendDanmakuError};
 use dambo_core::config::parse_log_level;
 use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
 use dambo_core::plugin::PluginInfo;
+#[cfg(test)]
+use dambo_core::server::format_url_host;
 use dambo_core::state::{AppPersistedState, RoomHistoryEntry, normalize_locale};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -193,66 +195,12 @@ fn active_locale(runtime: &DamboRuntime) -> &'static str {
     i18n::resolve_locale(stored.as_deref())
 }
 
-fn connect_host(host: &str) -> &str {
-    let trimmed = host.trim();
-    if trimmed.is_empty()
-        || trimmed == "0.0.0.0"
-        || trimmed == "::"
-        || trimmed == "::1"
-        || trimmed == "[::1]"
-    {
-        "localhost"
-    } else {
-        trimmed
-    }
-}
-
-fn format_url_host(host: &str) -> String {
-    let trimmed = host.trim();
-    if trimmed.contains(':') && !trimmed.starts_with('[') && !trimmed.ends_with(']') {
-        format!("[{}]", trimmed)
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn local_loopback_host(runtime: &DamboRuntime) -> Option<&'static str> {
-    let trimmed = runtime.config.server.host.trim();
-    if trimmed.eq_ignore_ascii_case("::")
-        || trimmed.eq_ignore_ascii_case("::1")
-        || trimmed.eq_ignore_ascii_case("[::1]")
-    {
-        return Some("[::1]");
-    }
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("localhost") || trimmed == "0.0.0.0" {
-        return Some("localhost");
-    }
-    if trimmed == "127.0.0.1" {
-        return Some("127.0.0.1");
-    }
-    if runtime.is_loopback_accessible() {
-        let is_v6 = trimmed
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_ipv6());
-        return Some(if is_v6 { "[::1]" } else { "127.0.0.1" });
-    }
-    None
-}
-
-fn plugin_url(runtime: &DamboRuntime, name: &str) -> String {
-    let host = format_url_host(connect_host(&runtime.config.server.host));
-    let port = runtime.config.server.port;
-    format!("http://{}:{}/{}/", host, port, name)
-}
-
 fn desktop_overlay_url(runtime: &DamboRuntime, name: &str) -> String {
-    if let Some(loopback) = local_loopback_host(runtime) {
+    if let Some(loopback) = runtime.local_loopback_host() {
         let port = runtime.config.server.port;
         format!("http://{}:{}/{}/", loopback, port, name)
     } else {
-        let fallback = plugin_url(runtime, name);
+        let fallback = runtime.plugin_url(name);
         log::warn!(
             "Companion loopback listener unavailable for '{}'; opening overlay via {} (window controls require localhost/127.0.0.1 capability)",
             name,
@@ -260,14 +208,6 @@ fn desktop_overlay_url(runtime: &DamboRuntime, name: &str) -> String {
         );
         fallback
     }
-}
-
-fn plugin_manage_url(runtime: &DamboRuntime, name: &str) -> String {
-    let host = local_loopback_host(runtime)
-        .map(str::to_string)
-        .unwrap_or_else(|| format_url_host(connect_host(&runtime.config.server.host)));
-    let port = runtime.config.server.port;
-    format!("http://{}:{}/{}/m", host, port, name)
 }
 
 fn build_plugin_dtos(
@@ -280,9 +220,9 @@ fn build_plugin_dtos(
         .map(|p| PluginDto {
             name: p.name.clone(),
             route: p.route.clone(),
-            url: plugin_url(runtime, &p.name),
+            url: runtime.plugin_url(&p.name),
             manage_route: p.manage_route.clone(),
-            manage_url: plugin_manage_url(runtime, &p.name),
+            manage_url: runtime.plugin_manage_url(&p.name),
             is_builtin: p.is_builtin,
             is_desktop_open: is_plugin_desktop_open(app, &p.name, excluding_label),
             title: p.title.clone(),
@@ -868,7 +808,7 @@ fn open_plugin_manage_page(runtime: &DamboRuntime, plugin_name: &str) -> Result<
         .plugins
         .get(plugin_name)
         .ok_or_else(|| format!("Plugin '{}' not found", plugin_name))?;
-    let url = plugin_manage_url(runtime, &plugin.name);
+    let url = runtime.plugin_manage_url(&plugin.name);
     open_in_os(&url);
     Ok(url)
 }
@@ -2047,7 +1987,7 @@ pub fn run(config_path: &str) {
                         return;
                     }
                     if let Some(plugin_name) = menu_id.strip_prefix("plugin:copy_url:") {
-                        copy_to_clipboard(&plugin_url(&rt_menu, plugin_name));
+                        copy_to_clipboard(&rt_menu.plugin_url(plugin_name));
                         return;
                     }
                     if let Some(plugin_name) = menu_id.strip_prefix("plugin:open_manage:") {

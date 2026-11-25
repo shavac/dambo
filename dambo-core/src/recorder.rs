@@ -1,4 +1,3 @@
-use crate::config::RecordConfig;
 use crate::model::{RawBiliEvent, RoomInfoSnapshot, SessionSummary, now_unix_ms};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, TimeZone};
@@ -83,15 +82,6 @@ struct RecorderInner {
 }
 
 impl Recorder {
-    pub fn from_config(cfg: &RecordConfig) -> Self {
-        Self::new(
-            cfg.enabled,
-            cfg.record_raw,
-            PathBuf::from(&cfg.dir),
-            cfg.filename_pattern.clone(),
-        )
-    }
-
     pub fn new(
         enabled: bool,
         record_raw: bool,
@@ -210,6 +200,7 @@ impl Recorder {
         self.paths.read().ok().and_then(|p| p.current_path.clone())
     }
 
+    #[cfg(test)]
     pub fn current_raw_path(&self) -> Option<PathBuf> {
         self.paths.read().ok().and_then(|p| p.raw_path.clone())
     }
@@ -264,6 +255,7 @@ impl Recorder {
     }
 
     /// Queue an event to the background recorder writer (cloning & sanitizing unpaid `face` if needed).
+    #[cfg(test)]
     pub fn record_event(&self, event: &RawBiliEvent) -> Result<()> {
         if event.kind == "combo_end" || (!self.enabled && !self.is_record_raw_enabled()) {
             return Ok(());
@@ -290,6 +282,7 @@ impl Recorder {
     }
 
     /// Queue an enriched Bilibili raw packet JSON value to `*_raw.jsonl` when `record_raw == true`.
+    #[cfg(test)]
     pub fn record_raw_json(&self, enriched_val: &Value) -> Result<()> {
         if !self.is_record_raw_enabled() {
             return Ok(());

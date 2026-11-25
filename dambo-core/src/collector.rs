@@ -4,15 +4,10 @@ use crate::hub::StateHub;
 use crate::model::{RawBiliEvent, RoomInfoSnapshot, now_unix_ms};
 use crate::recorder::Recorder;
 use blive_proto::api::BiliApiClient;
-pub use blive_proto::commands::{
-    EventNormalizer as CollectorNormalizer, parse_active_super_chats_json, parse_bili_cmd_events,
-    parse_bili_cmd_json, parse_bili_live_time_to_unix_secs, parse_room_get_info_json,
-    parse_room_input,
-};
+pub use blive_proto::commands::{EventNormalizer as CollectorNormalizer, parse_room_input};
 use blive_proto::commands::{append_cookie_kv, apply_room_meta_cmd, sanitize_live_timestamp};
 use blive_proto::models::RoomMetaUpdate;
 pub use blive_proto::pb::enrich_raw_json_with_pb_decoded;
-pub use blive_proto::websocket::{FrameDecodeResult, decode_bili_frames};
 use blive_proto::websocket::{LiveWsPoll, LiveWsSession};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +30,7 @@ pub struct CollectorContext {
 }
 
 struct ActiveCollector {
+    #[cfg(test)]
     room_id: u64,
     cancel: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
@@ -107,10 +103,12 @@ impl CollectorManager {
     }
 
     /// Inject a normalized event into the collector broadcast (used by tests).
+    #[cfg(test)]
     pub fn inject_event(&self, event: RawBiliEvent) {
         let _ = self.raw_tx.send(event);
     }
 
+    #[cfg(test)]
     pub async fn active_room_id(&self) -> u64 {
         self.active
             .lock()
@@ -365,6 +363,7 @@ impl CollectorManager {
         });
 
         *guard = Some(ActiveCollector {
+            #[cfg(test)]
             room_id: input_room_id,
             cancel,
             handle,

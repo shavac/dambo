@@ -147,39 +147,7 @@ impl FeedEntry {
     }
 }
 
-/// Returns `true` when `host` is an all-interfaces wildcard bind address.
-pub fn is_wildcard_host(host: &str) -> bool {
-    matches!(host.trim(), "0.0.0.0" | "::" | "[::]")
-}
-
-/// Format the configured server bind host for display without replacing wildcard hosts.
-pub fn display_listen_host(host: &str) -> String {
-    let trimmed = host.trim();
-    if trimmed.is_empty() {
-        return "localhost".to_string();
-    }
-    if trimmed.contains(':') && !trimmed.starts_with('[') {
-        format!("[{}]", trimmed)
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Map wildcard listen hosts (`0.0.0.0`, `::`, etc.) to a locally reachable host string.
-pub fn connect_host(host: &str) -> &str {
-    let trimmed = host.trim();
-    if trimmed.is_empty()
-        || trimmed == "0.0.0.0"
-        || trimmed == "::"
-        || trimmed == "[::]"
-        || trimmed == "::1"
-        || trimmed == "[::1]"
-    {
-        "localhost"
-    } else {
-        trimmed
-    }
-}
+pub use dambo_core::server::{connect_host, display_listen_host, is_wildcard_host};
 
 /// Normalize Unix timestamps in seconds / ms / µs / ns to 13-digit milliseconds.
 fn normalize_timestamp_to_ms(ts: u64) -> Option<u64> {

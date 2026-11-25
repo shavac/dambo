@@ -4,9 +4,7 @@ use crate::plugin_hub::{
     AcceptedTopic, AcceptedWatch, PluginEventHub, RejectedSub, RequesterDisplay, SseOutbound,
     TopicSubInput, WatchSubInput, evaluate_subscriptions, resolve_requester_display,
 };
-use crate::plugin_store::{
-    AclLevel, AclRecord, ConfigEntryView, StoreKind, TopicMeta, parse_defaults_map,
-};
+use crate::plugin_store::{AclLevel, AclRecord, ConfigEntryView, StoreKind, TopicMeta};
 use crate::plugin_types::{
     PluginApiError, TypedEntry, WriteEntryInput, is_valid_key, parse_acl_resource,
 };
@@ -147,13 +145,7 @@ impl AdminSessionStore {
         let Some(queue) = guard.get_mut(&ip) else {
             return Ok(());
         };
-        while let Some(&front) = queue.front() {
-            if now.saturating_duration_since(front) >= self.auth_failure_window {
-                queue.pop_front();
-            } else {
-                break;
-            }
-        }
+        prune_expired_failures(queue, now, self.auth_failure_window);
         if queue.is_empty() {
             guard.remove(&ip);
             return Ok(());
@@ -178,13 +170,7 @@ impl AdminSessionStore {
         };
         if !guard.contains_key(&ip) && guard.len() >= MAX_TRACKED_AUTH_IPS {
             guard.retain(|_, q| {
-                while let Some(&front) = q.front() {
-                    if now.saturating_duration_since(front) >= self.auth_failure_window {
-                        q.pop_front();
-                    } else {
-                        break;
-                    }
-                }
+                prune_expired_failures(q, now, self.auth_failure_window);
                 !q.is_empty()
             });
             if guard.len() >= MAX_TRACKED_AUTH_IPS {
@@ -199,13 +185,7 @@ impl AdminSessionStore {
         }
 
         let queue = guard.entry(ip).or_default();
-        while let Some(&front) = queue.front() {
-            if now.saturating_duration_since(front) >= self.auth_failure_window {
-                queue.pop_front();
-            } else {
-                break;
-            }
-        }
+        prune_expired_failures(queue, now, self.auth_failure_window);
         queue.push_back(now);
     }
 
@@ -214,6 +194,16 @@ impl AdminSessionStore {
         let ip = peer_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         if let Ok(mut guard) = self.auth_failures.lock() {
             guard.remove(&ip);
+        }
+    }
+}
+
+fn prune_expired_failures(queue: &mut VecDeque<Instant>, now: Instant, window: Duration) {
+    while let Some(&front) = queue.front() {
+        if now.saturating_duration_since(front) >= window {
+            queue.pop_front();
+        } else {
+            break;
         }
     }
 }
@@ -563,9 +553,9 @@ pub fn authorize_and_maybe_mint_manage_cookie(
 fn check_referer_matches_manage(
     headers: &HeaderMap,
     plugin_name: &str,
-) -> Result<bool, PluginApiError> {
+) -> Result<(), PluginApiError> {
     let Some(ref_hdr) = headers.get(header::REFERER) else {
-        return Ok(false);
+        return Ok(());
     };
     let raw_ref = ref_hdr
         .to_str()
@@ -589,7 +579,7 @@ fn check_referer_matches_manage(
             expected, ref_path
         )));
     }
-    Ok(true)
+    Ok(())
 }
 
 fn require_manage_session(
@@ -609,8 +599,7 @@ fn require_manage_session(
         ));
     }
 
-    let _ = check_referer_matches_manage(headers, caller_plugin_name)?;
-    Ok(())
+    check_referer_matches_manage(headers, caller_plugin_name)
 }
 
 /// Global security middleware applied to `/api/v1/*`.
@@ -659,22 +648,23 @@ fn require_caller_plugin(
     headers: &HeaderMap,
     plugins: &PluginRegistry,
 ) -> Result<PluginInfo, ApiError> {
-    let raw = headers
-        .get("x-dambo-plugin")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ApiError(PluginApiError::invalid_argument(
-                "Missing required 'X-Dambo-Plugin' header",
-            ))
-        })?;
-    plugins.get(raw).ok_or_else(|| {
-        ApiError(PluginApiError::plugin_not_found(format!(
-            "Caller plugin '{}' is not installed or registered",
-            raw
-        )))
+    optional_caller_plugin(headers, plugins)?.ok_or_else(|| {
+        ApiError(PluginApiError::invalid_argument(
+            "Missing required 'X-Dambo-Plugin' header",
+        ))
     })
+}
+
+fn resolve_data_target(
+    headers: &HeaderMap,
+    plugins: &PluginRegistry,
+    store_raw: &str,
+    owner: &str,
+) -> Result<(PluginInfo, StoreKind, PluginInfo), ApiError> {
+    let caller = require_caller_plugin(headers, plugins)?;
+    let store = StoreKind::parse(store_raw)?;
+    let target_info = resolve_target_plugin(plugins, Some(&caller), owner)?;
+    Ok((caller, store, target_info))
 }
 
 fn optional_caller_plugin(
@@ -827,7 +817,7 @@ fn build_plugin_dto(
         has_custom_manage: info.has_custom_manage,
         is_builtin: info.is_builtin,
         obs,
-        defaults: parse_defaults_map(&info.defaults, &info.namedomain),
+        defaults: (*info.parsed_defaults).clone(),
         config,
         topics,
     }
@@ -953,9 +943,10 @@ async fn health() -> impl IntoResponse {
 
 async fn list_plugins(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     let list = state.plugins.list();
+    let mut topics_by_owner = state.plugin_store.list_all_topics_grouped().await?;
     let mut out = Vec::with_capacity(list.len());
     for info in &list {
-        let topics = state.plugin_store.list_topics(&info.namedomain).await?;
+        let topics = topics_by_owner.remove(&info.namedomain).unwrap_or_default();
         out.push(build_plugin_dto(info, topics, None));
     }
     Ok(Json(serde_json::json!({ "plugins": out })))
@@ -989,10 +980,10 @@ async fn get_plugin(
             config = Some(
                 state
                     .plugin_store
-                    .get_merged_config(
+                    .get_merged_config_cached(
                         &c.namedomain,
                         &target_info.namedomain,
-                        &target_info.defaults,
+                        &target_info.parsed_defaults,
                     )
                     .await?,
             );
@@ -1007,9 +998,8 @@ async fn data_list_namespaces(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
-    let store = StoreKind::parse(&store_raw)?;
-    let target_info = resolve_target_plugin(&state.plugins, Some(&caller), &owner)?;
+    let (caller, store, target_info) =
+        resolve_data_target(&headers, &state.plugins, &store_raw, &owner)?;
     let namespaces = state
         .plugin_store
         .list_namespaces(
@@ -1028,9 +1018,8 @@ async fn data_list_entries(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
-    let store = StoreKind::parse(&store_raw)?;
-    let target_info = resolve_target_plugin(&state.plugins, Some(&caller), &owner)?;
+    let (caller, store, target_info) =
+        resolve_data_target(&headers, &state.plugins, &store_raw, &owner)?;
 
     let keys_vec: Option<Vec<String>> = query.keys.map(|raw| {
         raw.split(',')
@@ -1041,7 +1030,7 @@ async fn data_list_entries(
     });
     let entries = state
         .plugin_store
-        .list_entries(
+        .list_entries_cached(
             &caller.namedomain,
             &target_info.namedomain,
             store,
@@ -1049,7 +1038,7 @@ async fn data_list_entries(
             query.prefix.as_deref(),
             keys_vec.as_deref(),
             query.limit,
-            &target_info.defaults,
+            &target_info.parsed_defaults,
         )
         .await?;
 
@@ -1061,9 +1050,8 @@ async fn data_clear_namespace(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
-    let store = StoreKind::parse(&store_raw)?;
-    let target_info = resolve_target_plugin(&state.plugins, Some(&caller), &owner)?;
+    let (caller, store, target_info) =
+        resolve_data_target(&headers, &state.plugins, &store_raw, &owner)?;
 
     let (deleted, mutation) = state
         .plugin_store
@@ -1082,19 +1070,18 @@ async fn data_get_key(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
-    let store = StoreKind::parse(&store_raw)?;
-    let target_info = resolve_target_plugin(&state.plugins, Some(&caller), &owner)?;
+    let (caller, store, target_info) =
+        resolve_data_target(&headers, &state.plugins, &store_raw, &owner)?;
 
     let entry = state
         .plugin_store
-        .get_entry(
+        .get_entry_cached(
             &caller.namedomain,
             &target_info.namedomain,
             store,
             &ns,
             &key,
-            &target_info.defaults,
+            &target_info.parsed_defaults,
         )
         .await?;
     Ok(Json(SingleKeyResponse { key, entry }))
@@ -1106,20 +1093,19 @@ async fn data_put_key(
     State(state): State<Arc<AppState>>,
     Json(input): Json<WriteEntryInput>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
-    let store = StoreKind::parse(&store_raw)?;
-    let target_info = resolve_target_plugin(&state.plugins, Some(&caller), &owner)?;
+    let (caller, store, target_info) =
+        resolve_data_target(&headers, &state.plugins, &store_raw, &owner)?;
 
     let (entry, mutation) = state
         .plugin_store
-        .put_entry(
+        .put_entry_cached(
             &caller.namedomain,
             &target_info.namedomain,
             store,
             &ns,
             &key,
             input,
-            &target_info.defaults,
+            &target_info.parsed_defaults,
         )
         .await?;
     state
@@ -1133,9 +1119,8 @@ async fn data_delete_key(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
-    let store = StoreKind::parse(&store_raw)?;
-    let target_info = resolve_target_plugin(&state.plugins, Some(&caller), &owner)?;
+    let (caller, store, target_info) =
+        resolve_data_target(&headers, &state.plugins, &store_raw, &owner)?;
 
     let (existed, mutation) = state
         .plugin_store
@@ -1161,9 +1146,8 @@ async fn data_mset(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MsetBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
-    let store = StoreKind::parse(&store_raw)?;
-    let target_info = resolve_target_plugin(&state.plugins, Some(&caller), &owner)?;
+    let (caller, store, target_info) =
+        resolve_data_target(&headers, &state.plugins, &store_raw, &owner)?;
 
     if body.entries.len() > MAX_MSET_ENTRIES {
         return Err(ApiError(PluginApiError::invalid_argument(format!(
@@ -1184,13 +1168,13 @@ async fn data_mset(
 
     let (committed, mutation) = state
         .plugin_store
-        .mset_entries(
+        .mset_entries_cached(
             &caller.namedomain,
             &target_info.namedomain,
             store,
             &ns,
             body.entries,
-            &target_info.defaults,
+            &target_info.parsed_defaults,
         )
         .await?;
     if let Some(m) = mutation {
@@ -1583,7 +1567,6 @@ async fn sse_events(
     let (client_id, rx) = state.plugin_hub.register_client(
         caller.name.clone(),
         caller.namedomain.clone(),
-        mode.to_string(),
         sync_res.accepted_watches.clone(),
         sync_res.accepted_topics.clone(),
     );

@@ -209,6 +209,7 @@ impl StateHub {
     }
 
     /// Update room title dynamically (e.g. on ROOM_CHANGE) and broadcast if changed.
+    #[cfg(test)]
     pub fn update_room_title(&self, room_title: String) {
         let trimmed = room_title.trim().to_string();
         if trimmed.is_empty() {

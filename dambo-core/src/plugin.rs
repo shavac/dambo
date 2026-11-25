@@ -46,6 +46,9 @@ pub struct PluginInfo {
     pub obs_height: Option<u32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub defaults: BTreeMap<String, serde_json::Value>,
+    /// Pre-parsed and schema-validated `defaults` cached at scan time to avoid repeated parsing on hot paths.
+    #[serde(skip)]
+    pub parsed_defaults: Arc<BTreeMap<String, crate::plugin_types::TypedEntry>>,
 }
 
 impl PluginInfo {
@@ -299,6 +302,10 @@ pub fn scan_plugins(html_dir: &Path) -> Vec<PluginInfo> {
         let is_builtin = matches!(name, "default" | "list");
         let obs = manifest.obs.unwrap_or_default();
         let defaults = parse_defaults_map(manifest.defaults, name);
+        let parsed_defaults = Arc::new(crate::plugin_store::parse_defaults_map(
+            &defaults,
+            &namedomain,
+        ));
 
         plugins.push(PluginInfo {
             name: name.to_string(),
@@ -315,6 +322,7 @@ pub fn scan_plugins(html_dir: &Path) -> Vec<PluginInfo> {
             obs_width: obs.width.filter(|&w| w > 0),
             obs_height: obs.height.filter(|&h| h > 0),
             defaults,
+            parsed_defaults,
         });
     }
 
@@ -372,10 +380,6 @@ impl PluginRegistry {
             html_dir,
             plugins_tx,
         }
-    }
-
-    pub fn html_dir(&self) -> &Path {
-        &self.html_dir
     }
 
     pub fn list(&self) -> Vec<PluginInfo> {

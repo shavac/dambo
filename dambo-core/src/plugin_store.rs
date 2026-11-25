@@ -1,8 +1,8 @@
 use crate::plugin_types::{
     AclResourceKind, DataType, MAX_BYTES_PER_STORE, MAX_KEYS_PER_STORE, ParsedAclResource,
-    PluginApiError, TypedEntry, WriteEntryInput, infer_data_type, is_valid_key, is_valid_namespace,
-    is_valid_topic_name, parse_acl_resource, parse_default_entry, serialize_and_check_entry_size,
-    validate_schema_definition, validate_value_against,
+    PluginApiError, TypedEntry, WriteEntryInput, infer_data_type, is_false, is_valid_key,
+    is_valid_namespace, is_valid_topic_name, parse_acl_resource, parse_default_entry,
+    serialize_and_check_entry_size, validate_schema_definition, validate_value_against,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -74,6 +74,15 @@ impl AclLevel {
         }
     }
 
+    pub fn from_str_lossy(raw: &str) -> Self {
+        match raw {
+            "read" => Self::Read,
+            "write" => Self::Write,
+            "subscribe" => Self::Subscribe,
+            _ => Self::None,
+        }
+    }
+
     pub fn valid_for_request(self, kind: &AclResourceKind) -> bool {
         match kind {
             AclResourceKind::Persist | AclResourceKind::Memory => {
@@ -138,10 +147,6 @@ struct AclRecordValue {
     #[serde(default, skip_serializing_if = "is_false")]
     prior_denied: bool,
     updated_at: i64,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
 }
 
 /// Public representation of an ACL row keyed by `(owner, requester, resource)`.
@@ -563,6 +568,7 @@ impl PluginStore {
     }
 
     /// Expose current in-memory quota stats for diagnostics and testing.
+    #[cfg(test)]
     pub fn quota_stats(&self, owner_namedomain: &str, store: StoreKind) -> QuotaStats {
         match store {
             StoreKind::Persist => self
@@ -752,10 +758,22 @@ impl PluginStore {
         owner_namedomain: &str,
         owner_defaults: &BTreeMap<String, serde_json::Value>,
     ) -> Result<BTreeMap<String, ConfigEntryView>, PluginApiError> {
+        let parsed = Arc::new(parse_defaults_map(owner_defaults, owner_namedomain));
+        self.get_merged_config_cached(caller_namedomain, owner_namedomain, &parsed)
+            .await
+    }
+
+    /// Read merged configuration view using pre-parsed `defaults`.
+    pub async fn get_merged_config_cached(
+        &self,
+        caller_namedomain: &str,
+        owner_namedomain: &str,
+        parsed_defaults: &Arc<BTreeMap<String, TypedEntry>>,
+    ) -> Result<BTreeMap<String, ConfigEntryView>, PluginApiError> {
         let db = self.db.clone();
         let caller = caller_namedomain.to_string();
         let owner = owner_namedomain.to_string();
-        let raw_defaults = owner_defaults.clone();
+        let parsed_defaults = Arc::clone(parsed_defaults);
         let this = self.clone_handles();
         self.run_blocking(move || {
             this.require_data_access_sync(
@@ -765,11 +783,10 @@ impl PluginStore {
                 CONFIG_NAMESPACE,
                 AclLevel::Read,
             )?;
-            let parsed_defaults = parse_defaults_map(&raw_defaults, &owner);
             let stored = this.read_namespace_persist_sync(&db, &owner, CONFIG_NAMESPACE, None)?;
 
             let mut result = BTreeMap::new();
-            for (k, def_entry) in &parsed_defaults {
+            for (k, def_entry) in parsed_defaults.iter() {
                 let (merged, is_overridden) =
                     resolve_config_override(k, def_entry, stored.get(k), &owner);
                 result.insert(
@@ -805,6 +822,25 @@ impl PluginStore {
         key: &str,
         owner_defaults: &BTreeMap<String, serde_json::Value>,
     ) -> Result<TypedEntry, PluginApiError> {
+        let parsed = if store == StoreKind::Persist && ns == CONFIG_NAMESPACE {
+            Arc::new(parse_defaults_map(owner_defaults, owner_namedomain))
+        } else {
+            Arc::new(BTreeMap::new())
+        };
+        self.get_entry_cached(caller_namedomain, owner_namedomain, store, ns, key, &parsed)
+            .await
+    }
+
+    /// Get a single entry envelope using pre-parsed `defaults`.
+    pub async fn get_entry_cached(
+        &self,
+        caller_namedomain: &str,
+        owner_namedomain: &str,
+        store: StoreKind,
+        ns: &str,
+        key: &str,
+        parsed_defaults: &Arc<BTreeMap<String, TypedEntry>>,
+    ) -> Result<TypedEntry, PluginApiError> {
         if !is_valid_key(key) {
             return Err(PluginApiError::invalid_argument(format!(
                 "Invalid key '{}'",
@@ -820,11 +856,7 @@ impl PluginStore {
                 let owner = owner_namedomain.to_string();
                 let ns_str = ns.to_string();
                 let key_str = key.to_string();
-                let raw_defaults = if is_config {
-                    Some(owner_defaults.clone())
-                } else {
-                    None
-                };
+                let defs_arc = is_config.then(|| Arc::clone(parsed_defaults));
                 self.run_blocking(move || {
                     this.require_data_access_sync(
                         &caller,
@@ -834,17 +866,12 @@ impl PluginStore {
                         AclLevel::Read,
                     )?;
                     let stored = this.read_single_persist_sync(&owner, &ns_str, &key_str)?;
-                    if let Some(ref raw_defs) = raw_defaults {
-                        let parsed_defs = parse_defaults_map(raw_defs, &owner);
-                        if let Some(def_entry) = parsed_defs.get(&key_str) {
-                            let (resolved, _) = resolve_config_override(
-                                &key_str,
-                                def_entry,
-                                stored.as_ref(),
-                                &owner,
-                            );
-                            return Ok(resolved);
-                        }
+                    if let Some(ref parsed_defs) = defs_arc
+                        && let Some(def_entry) = parsed_defs.get(&key_str)
+                    {
+                        let (resolved, _) =
+                            resolve_config_override(&key_str, def_entry, stored.as_ref(), &owner);
+                        return Ok(resolved);
                     }
                     stored.ok_or_else(|| {
                         PluginApiError::key_not_found(format!(
@@ -856,6 +883,15 @@ impl PluginStore {
                 .await
             }
             StoreKind::Memory => {
+                if caller_namedomain == owner_namedomain {
+                    if !is_valid_namespace(ns) {
+                        return Err(PluginApiError::invalid_argument(format!(
+                            "Invalid namespace '{}': must match [A-Za-z0-9_.-] (1..=128 bytes)",
+                            ns
+                        )));
+                    }
+                    return self.read_single_memory_sync(owner_namedomain, ns, key);
+                }
                 let this = self.clone_handles();
                 let caller = caller_namedomain.to_string();
                 let owner = owner_namedomain.to_string();
@@ -869,19 +905,7 @@ impl PluginStore {
                         &ns_str,
                         AclLevel::Read,
                     )?;
-                    let mem = this
-                        .memory
-                        .read()
-                        .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
-                    mem.entries
-                        .get(&(owner.clone(), ns_str.clone(), key_str.clone()))
-                        .map(|(entry, _)| entry.clone())
-                        .ok_or_else(|| {
-                            PluginApiError::key_not_found(format!(
-                                "Key '{}/{}' not found in memory store for '{}'",
-                                ns_str, key_str, owner
-                            ))
-                        })
+                    this.read_single_memory_sync(&owner, &ns_str, &key_str)
                 })
                 .await
             }
@@ -900,6 +924,37 @@ impl PluginStore {
         keys_filter: Option<&[String]>,
         limit: Option<usize>,
         owner_defaults: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<BTreeMap<String, TypedEntry>, PluginApiError> {
+        let parsed = if store == StoreKind::Persist && ns == CONFIG_NAMESPACE {
+            Arc::new(parse_defaults_map(owner_defaults, owner_namedomain))
+        } else {
+            Arc::new(BTreeMap::new())
+        };
+        self.list_entries_cached(
+            caller_namedomain,
+            owner_namedomain,
+            store,
+            ns,
+            prefix,
+            keys_filter,
+            limit,
+            &parsed,
+        )
+        .await
+    }
+
+    /// List entries in a namespace using pre-parsed `defaults`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_entries_cached(
+        &self,
+        caller_namedomain: &str,
+        owner_namedomain: &str,
+        store: StoreKind,
+        ns: &str,
+        prefix: Option<&str>,
+        keys_filter: Option<&[String]>,
+        limit: Option<usize>,
+        parsed_defaults: &Arc<BTreeMap<String, TypedEntry>>,
     ) -> Result<BTreeMap<String, TypedEntry>, PluginApiError> {
         if let Some(keys) = keys_filter {
             for k in keys {
@@ -922,11 +977,7 @@ impl PluginStore {
                 let ns_str = ns.to_string();
                 let prefix_owned = prefix.map(|s| s.to_string());
                 let keys_owned = keys_filter.map(|k| k.to_vec());
-                let raw_defaults = if is_config {
-                    Some(owner_defaults.clone())
-                } else {
-                    None
-                };
+                let defs_arc = is_config.then(|| Arc::clone(parsed_defaults));
 
                 self.run_blocking(move || {
                     this.require_data_access_sync(
@@ -947,10 +998,9 @@ impl PluginStore {
                         },
                     )?;
 
-                    if let Some(ref raw_defs) = raw_defaults {
-                        let parsed_defs = parse_defaults_map(raw_defs, &owner);
+                    if let Some(ref parsed_defs) = defs_arc {
                         let mut merged = BTreeMap::new();
-                        for (k, def_entry) in &parsed_defs {
+                        for (k, def_entry) in parsed_defs.iter() {
                             if let Some(pfx) = prefix_owned.as_deref()
                                 && !k.starts_with(pfx)
                             {
@@ -982,6 +1032,21 @@ impl PluginStore {
                 .await
             }
             StoreKind::Memory => {
+                if caller_namedomain == owner_namedomain {
+                    if !is_valid_namespace(ns) {
+                        return Err(PluginApiError::invalid_argument(format!(
+                            "Invalid namespace '{}': must match [A-Za-z0-9_.-] (1..=128 bytes)",
+                            ns
+                        )));
+                    }
+                    return self.list_entries_memory_sync(
+                        owner_namedomain,
+                        ns,
+                        prefix,
+                        keys_filter,
+                        max_items,
+                    );
+                }
                 let this = self.clone_handles();
                 let caller = caller_namedomain.to_string();
                 let owner = owner_namedomain.to_string();
@@ -997,28 +1062,13 @@ impl PluginStore {
                         &ns_str,
                         AclLevel::Read,
                     )?;
-                    let mem = this
-                        .memory
-                        .read()
-                        .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
-                    let mut map = BTreeMap::new();
-                    let ns_end = exclusive_prefix_end(&ns_str);
-                    for ((_, _, k), (entry, _)) in mem.entries.range(
-                        (owner.clone(), ns_str.clone(), String::new())
-                            ..(owner, ns_end, String::new()),
-                    ) {
-                        if let Some(pfx) = prefix_owned.as_deref()
-                            && !k.starts_with(pfx)
-                        {
-                            continue;
-                        }
-                        map.insert(k.clone(), entry.clone());
-                    }
-                    Ok(filter_and_limit_entries(
-                        map,
+                    this.list_entries_memory_sync(
+                        &owner,
+                        &ns_str,
+                        prefix_owned.as_deref(),
                         keys_owned.as_deref(),
                         max_items,
-                    ))
+                    )
                 })
                 .await
             }
@@ -1037,6 +1087,35 @@ impl PluginStore {
         input: WriteEntryInput,
         owner_defaults: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(TypedEntry, DataMutationResult), PluginApiError> {
+        let parsed = if store == StoreKind::Persist && ns == CONFIG_NAMESPACE {
+            Arc::new(parse_defaults_map(owner_defaults, owner_namedomain))
+        } else {
+            Arc::new(BTreeMap::new())
+        };
+        self.put_entry_cached(
+            caller_namedomain,
+            owner_namedomain,
+            store,
+            ns,
+            key,
+            input,
+            &parsed,
+        )
+        .await
+    }
+
+    /// Write or schema-define a single KV entry using pre-parsed `defaults`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_entry_cached(
+        &self,
+        caller_namedomain: &str,
+        owner_namedomain: &str,
+        store: StoreKind,
+        ns: &str,
+        key: &str,
+        input: WriteEntryInput,
+        parsed_defaults: &Arc<BTreeMap<String, TypedEntry>>,
+    ) -> Result<(TypedEntry, DataMutationResult), PluginApiError> {
         if !is_valid_key(key) {
             return Err(PluginApiError::invalid_argument(format!(
                 "Invalid key '{}'",
@@ -1045,23 +1124,27 @@ impl PluginStore {
         }
 
         let is_owner = caller_namedomain == owner_namedomain;
+        if store == StoreKind::Memory && is_owner {
+            if !is_valid_namespace(ns) {
+                return Err(PluginApiError::invalid_argument(format!(
+                    "Invalid namespace '{}': must match [A-Za-z0-9_.-] (1..=128 bytes)",
+                    ns
+                )));
+            }
+            return self.put_entry_memory_sync(true, owner_namedomain, ns, key, input);
+        }
+
         let is_config = store == StoreKind::Persist && ns == CONFIG_NAMESPACE;
         let caller = caller_namedomain.to_string();
         let owner = owner_namedomain.to_string();
         let ns_str = ns.to_string();
         let key_str = key.to_string();
-        let raw_defaults = if is_config {
-            Some(owner_defaults.clone())
-        } else {
-            None
-        };
+        let defs_arc = is_config.then(|| Arc::clone(parsed_defaults));
         let this = self.clone_handles();
 
         self.run_blocking(move || {
             this.require_data_access_sync(&caller, &owner, store, &ns_str, AclLevel::Write)?;
-            let default_entry = raw_defaults
-                .as_ref()
-                .and_then(|d| parse_defaults_map(d, &owner).remove(&key_str));
+            let default_entry = defs_arc.as_ref().and_then(|d| d.get(&key_str));
             let is_default_locked = default_entry.is_some();
 
             match store {
@@ -1085,7 +1168,7 @@ impl PluginStore {
                             .map_err(|e| {
                                 PluginApiError::internal(format!("Corrupt redb entry: {}", e))
                             })?;
-                        let schema_basis = default_entry.as_ref().or(existing_stored.as_ref());
+                        let schema_basis = default_entry.or(existing_stored.as_ref());
 
                         let (entry, serialized) = build_updated_entry(
                             is_owner,
@@ -1141,43 +1224,7 @@ impl PluginStore {
                     ))
                 }
                 StoreKind::Memory => {
-                    let mut mem = this
-                        .memory
-                        .write()
-                        .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
-                    let map_key = (owner.clone(), ns_str.clone(), key_str.clone());
-                    let existing = mem.entries.get(&map_key).map(|(e, len)| (e, *len));
-                    let old_bytes = existing.map(|(_, len)| len);
-                    let schema_basis = existing.map(|(e, _)| e);
-
-                    let (entry, serialized) =
-                        build_updated_entry(is_owner, false, schema_basis, input, &key_str)?;
-                    let current_quota = mem.quotas.get(&owner).copied().unwrap_or_default();
-                    let next_quota = adjust_quota_check(
-                        current_quota,
-                        old_bytes,
-                        serialized.len(),
-                        &owner,
-                        StoreKind::Memory,
-                    )?;
-                    mem.quotas.insert(owner.clone(), next_quota);
-                    mem.entries
-                        .insert(map_key, (entry.clone(), serialized.len()));
-
-                    let mut val_map = BTreeMap::new();
-                    val_map.insert(key_str.clone(), entry.clone());
-                    let inline_values = compute_inline_values(&val_map);
-                    Ok((
-                        entry,
-                        DataMutationResult {
-                            store: StoreKind::Memory,
-                            owner_namedomain: owner,
-                            namespace: ns_str,
-                            op: MutationOp::Set,
-                            keys: vec![key_str],
-                            inline_values,
-                        },
-                    ))
+                    this.put_entry_memory_sync(is_owner, &owner, &ns_str, &key_str, input)
                 }
             }
         })
@@ -1194,6 +1241,32 @@ impl PluginStore {
         entries: BTreeMap<String, WriteEntryInput>,
         owner_defaults: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(BTreeMap<String, TypedEntry>, Option<DataMutationResult>), PluginApiError> {
+        let parsed = if store == StoreKind::Persist && ns == CONFIG_NAMESPACE {
+            Arc::new(parse_defaults_map(owner_defaults, owner_namedomain))
+        } else {
+            Arc::new(BTreeMap::new())
+        };
+        self.mset_entries_cached(
+            caller_namedomain,
+            owner_namedomain,
+            store,
+            ns,
+            entries,
+            &parsed,
+        )
+        .await
+    }
+
+    /// Atomically validate and batch-write entries using pre-parsed `defaults`.
+    pub async fn mset_entries_cached(
+        &self,
+        caller_namedomain: &str,
+        owner_namedomain: &str,
+        store: StoreKind,
+        ns: &str,
+        entries: BTreeMap<String, WriteEntryInput>,
+        parsed_defaults: &Arc<BTreeMap<String, TypedEntry>>,
+    ) -> Result<(BTreeMap<String, TypedEntry>, Option<DataMutationResult>), PluginApiError> {
         for key in entries.keys() {
             if !is_valid_key(key) {
                 return Err(PluginApiError::invalid_argument(format!(
@@ -1207,23 +1280,25 @@ impl PluginStore {
         }
 
         let is_owner = caller_namedomain == owner_namedomain;
+        if store == StoreKind::Memory && is_owner {
+            if !is_valid_namespace(ns) {
+                return Err(PluginApiError::invalid_argument(format!(
+                    "Invalid namespace '{}': must match [A-Za-z0-9_.-] (1..=128 bytes)",
+                    ns
+                )));
+            }
+            return self.mset_entries_memory_sync(true, owner_namedomain, ns, entries);
+        }
+
         let is_config = store == StoreKind::Persist && ns == CONFIG_NAMESPACE;
         let caller = caller_namedomain.to_string();
         let owner = owner_namedomain.to_string();
         let ns_str = ns.to_string();
-        let raw_defaults = if is_config {
-            Some(owner_defaults.clone())
-        } else {
-            None
-        };
+        let defs_arc = is_config.then(|| Arc::clone(parsed_defaults));
         let this = self.clone_handles();
 
         self.run_blocking(move || {
             this.require_data_access_sync(&caller, &owner, store, &ns_str, AclLevel::Write)?;
-            let parsed_defaults = raw_defaults
-                .as_ref()
-                .map(|d| parse_defaults_map(d, &owner))
-                .unwrap_or_default();
 
             match store {
                 StoreKind::Persist => {
@@ -1257,7 +1332,7 @@ impl PluginStore {
                                 .map_err(|e| {
                                     PluginApiError::internal(format!("Corrupt redb entry: {}", e))
                                 })?;
-                            let default_entry = parsed_defaults.get(&k);
+                            let default_entry = defs_arc.as_ref().and_then(|d| d.get(&k));
                             let is_default_locked = default_entry.is_some();
                             let schema_basis = default_entry.or(existing_stored.as_ref());
 
@@ -1314,54 +1389,7 @@ impl PluginStore {
                     ))
                 }
                 StoreKind::Memory => {
-                    let mut mem = this
-                        .memory
-                        .write()
-                        .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
-                    let mut running_quota = mem.quotas.get(&owner).copied().unwrap_or_default();
-                    let mut staged: Vec<(String, TypedEntry, Vec<u8>)> =
-                        Vec::with_capacity(entries.len());
-
-                    for (k, input) in entries {
-                        let map_key = (owner.clone(), ns_str.clone(), k.clone());
-                        let existing = mem.entries.get(&map_key).map(|(e, len)| (e, *len));
-                        let old_bytes = existing.map(|(_, len)| len);
-                        let schema_basis = existing.map(|(e, _)| e);
-
-                        let (entry, serialized) =
-                            build_updated_entry(is_owner, false, schema_basis, input, &k)?;
-                        running_quota = adjust_quota_check(
-                            running_quota,
-                            old_bytes,
-                            serialized.len(),
-                            &owner,
-                            StoreKind::Memory,
-                        )?;
-                        staged.push((k, entry, serialized));
-                    }
-
-                    mem.quotas.insert(owner.clone(), running_quota);
-                    let mut committed = BTreeMap::new();
-                    for (k, entry, serialized) in staged {
-                        let map_key = (owner.clone(), ns_str.clone(), k.clone());
-                        mem.entries
-                            .insert(map_key, (entry.clone(), serialized.len()));
-                        committed.insert(k, entry);
-                    }
-
-                    let keys: Vec<String> = committed.keys().cloned().collect();
-                    let inline_values = compute_inline_values(&committed);
-                    Ok((
-                        committed,
-                        Some(DataMutationResult {
-                            store: StoreKind::Memory,
-                            owner_namedomain: owner,
-                            namespace: ns_str,
-                            op: MutationOp::Mset,
-                            keys,
-                            inline_values,
-                        }),
-                    ))
+                    this.mset_entries_memory_sync(is_owner, &owner, &ns_str, entries)
                 }
             }
         })
@@ -1382,6 +1410,16 @@ impl PluginStore {
                 "Invalid key '{}'",
                 key
             )));
+        }
+
+        if store == StoreKind::Memory && caller_namedomain == owner_namedomain {
+            if !is_valid_namespace(ns) {
+                return Err(PluginApiError::invalid_argument(format!(
+                    "Invalid namespace '{}': must match [A-Za-z0-9_.-] (1..=128 bytes)",
+                    ns
+                )));
+            }
+            return self.delete_entry_memory_sync(owner_namedomain, ns, key);
         }
 
         let caller = caller_namedomain.to_string();
@@ -1432,29 +1470,7 @@ impl PluginStore {
                         Ok((false, None))
                     }
                 }
-                StoreKind::Memory => {
-                    let mut mem = this
-                        .memory
-                        .write()
-                        .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
-                    let map_key = (owner.clone(), ns_str.clone(), key_str.clone());
-                    if let Some((_, len)) = mem.entries.remove(&map_key) {
-                        apply_delete_quota(&mut mem.quotas, &owner, len);
-                        Ok((
-                            true,
-                            Some(DataMutationResult {
-                                store: StoreKind::Memory,
-                                owner_namedomain: owner,
-                                namespace: ns_str,
-                                op: MutationOp::Delete,
-                                keys: vec![key_str],
-                                inline_values: None,
-                            }),
-                        ))
-                    } else {
-                        Ok((false, None))
-                    }
-                }
+                StoreKind::Memory => this.delete_entry_memory_sync(&owner, &ns_str, &key_str),
             }
         })
         .await
@@ -1468,6 +1484,16 @@ impl PluginStore {
         store: StoreKind,
         ns: &str,
     ) -> Result<(usize, Option<DataMutationResult>), PluginApiError> {
+        if store == StoreKind::Memory && caller_namedomain == owner_namedomain {
+            if !is_valid_namespace(ns) {
+                return Err(PluginApiError::invalid_argument(format!(
+                    "Invalid namespace '{}': must match [A-Za-z0-9_.-] (1..=128 bytes)",
+                    ns
+                )));
+            }
+            return self.clear_namespace_memory_sync(owner_namedomain, ns);
+        }
+
         let caller = caller_namedomain.to_string();
         let owner = owner_namedomain.to_string();
         let ns_str = ns.to_string();
@@ -1549,42 +1575,7 @@ impl PluginStore {
                         Ok((0, None))
                     }
                 }
-                StoreKind::Memory => {
-                    let mut mem = this
-                        .memory
-                        .write()
-                        .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
-                    let ns_end = exclusive_prefix_end(&ns_str);
-                    let to_delete: Vec<(String, String, String)> = mem
-                        .entries
-                        .range(
-                            (owner.clone(), ns_str.clone(), String::new())
-                                ..(owner.clone(), ns_end, String::new()),
-                        )
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    let mut removed_keys = Vec::with_capacity(to_delete.len());
-                    for k in to_delete {
-                        if let Some((_, len)) = mem.entries.remove(&k) {
-                            apply_delete_quota(&mut mem.quotas, &owner, len);
-                            removed_keys.push(k.2);
-                        }
-                    }
-                    let count = removed_keys.len();
-                    let mutation = if count > 0 {
-                        Some(DataMutationResult {
-                            store: StoreKind::Memory,
-                            owner_namedomain: owner,
-                            namespace: ns_str,
-                            op: MutationOp::Clear,
-                            keys: removed_keys,
-                            inline_values: None,
-                        })
-                    } else {
-                        None
-                    };
-                    Ok((count, mutation))
-                }
+                StoreKind::Memory => this.clear_namespace_memory_sync(&owner, &ns_str),
             }
         })
         .await
@@ -1622,6 +1613,45 @@ impl PluginStore {
                 is_self: false,
                 effective_level: eff.as_str().to_string(),
             })
+        })
+        .await
+    }
+
+    /// Evaluate a batch of `(caller_namedomain, owner_namedomain, ParsedAclResource)` checks in a single
+    /// `redb` read transaction (or in-memory with zero `redb` access when all checks are self-owned).
+    pub async fn check_effective_acl_batch(
+        &self,
+        queries: Vec<(String, String, ParsedAclResource)>,
+    ) -> Result<Vec<AclLevel>, PluginApiError> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if queries.iter().all(|(caller, owner, _)| caller == owner) {
+            return Ok(queries
+                .into_iter()
+                .map(|(_, _, parsed)| match parsed.kind {
+                    AclResourceKind::Persist | AclResourceKind::Memory => AclLevel::Write,
+                    AclResourceKind::Topic => AclLevel::Subscribe,
+                })
+                .collect());
+        }
+        let db = self.db.clone();
+        self.run_blocking(move || {
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| PluginApiError::internal(format!("redb begin_read failed: {}", e)))?;
+            let acl_table = read_txn.open_table(ACL_RECORDS_TABLE).map_err(|e| {
+                PluginApiError::internal(format!("redb open acl_records failed: {}", e))
+            })?;
+            let topic_table = read_txn.open_table(TOPIC_META_TABLE).map_err(|e| {
+                PluginApiError::internal(format!("redb open topic_meta failed: {}", e))
+            })?;
+            let mut results = Vec::with_capacity(queries.len());
+            for (caller, owner, parsed) in &queries {
+                let eff = check_acl_in_read_txn(&acl_table, &topic_table, caller, owner, parsed)?;
+                results.push(eff);
+            }
+            Ok(results)
         })
         .await
     }
@@ -2105,21 +2135,11 @@ impl PluginStore {
         .await
     }
 
-    /// Look up a single topic's metadata for `owner_namedomain`.
-    pub async fn get_topic(
+    /// List all persisted topics across all plugin owners in a single `redb` read transaction.
+    pub async fn list_all_topics_grouped(
         &self,
-        owner_namedomain: &str,
-        topic_name: &str,
-    ) -> Result<Option<TopicMeta>, PluginApiError> {
-        if !is_valid_topic_name(topic_name) {
-            return Err(PluginApiError::invalid_argument(format!(
-                "Invalid topic name '{}'",
-                topic_name
-            )));
-        }
+    ) -> Result<HashMap<String, Vec<TopicMeta>>, PluginApiError> {
         let db = self.db.clone();
-        let owner = owner_namedomain.to_string();
-        let name = topic_name.to_string();
         self.run_blocking(move || {
             let read_txn = db
                 .begin_read()
@@ -2127,24 +2147,251 @@ impl PluginStore {
             let table = read_txn.open_table(TOPIC_META_TABLE).map_err(|e| {
                 PluginApiError::internal(format!("redb open topic_meta failed: {}", e))
             })?;
-            let guard = table
-                .get((owner.as_str(), name.as_str()))
-                .map_err(|e| PluginApiError::internal(format!("redb get failed: {}", e)))?;
-            guard
-                .map(|g| {
-                    let val: TopicMetaValue = serde_json::from_slice(g.value()).map_err(|e| {
-                        PluginApiError::internal(format!("Corrupt topic_meta JSON: {}", e))
-                    })?;
-                    Ok(TopicMeta {
-                        name,
+            let mut grouped: HashMap<String, Vec<TopicMeta>> = HashMap::new();
+            for item in table
+                .iter()
+                .map_err(|e| PluginApiError::internal(format!("redb iter failed: {}", e)))?
+            {
+                let (k_guard, v_guard) = item
+                    .map_err(|e| PluginApiError::internal(format!("redb entry failed: {}", e)))?;
+                let (owner, topic_name) = k_guard.value();
+                let val: TopicMetaValue = serde_json::from_slice(v_guard.value()).map_err(|e| {
+                    PluginApiError::internal(format!("Corrupt topic_meta JSON: {}", e))
+                })?;
+                grouped
+                    .entry(owner.to_string())
+                    .or_default()
+                    .push(TopicMeta {
+                        name: topic_name.to_string(),
                         public: val.public,
                         description: val.description,
                         updated_at: val.updated_at,
-                    })
-                })
-                .transpose()
+                    });
+            }
+            Ok(grouped)
         })
         .await
+    }
+
+    fn read_single_memory_sync(
+        &self,
+        owner: &str,
+        ns: &str,
+        key: &str,
+    ) -> Result<TypedEntry, PluginApiError> {
+        let mem = self
+            .memory
+            .read()
+            .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
+        mem.entries
+            .get(&(owner.to_string(), ns.to_string(), key.to_string()))
+            .map(|(entry, _)| entry.clone())
+            .ok_or_else(|| {
+                PluginApiError::key_not_found(format!(
+                    "Key '{}/{}' not found in memory store for '{}'",
+                    ns, key, owner
+                ))
+            })
+    }
+
+    fn list_entries_memory_sync(
+        &self,
+        owner: &str,
+        ns: &str,
+        prefix: Option<&str>,
+        keys_filter: Option<&[String]>,
+        max_items: usize,
+    ) -> Result<BTreeMap<String, TypedEntry>, PluginApiError> {
+        let mem = self
+            .memory
+            .read()
+            .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
+        let mut map = BTreeMap::new();
+        let ns_end = exclusive_prefix_end(ns);
+        for ((_, _, k), (entry, _)) in mem.entries.range(
+            (owner.to_string(), ns.to_string(), String::new())
+                ..(owner.to_string(), ns_end, String::new()),
+        ) {
+            if let Some(pfx) = prefix
+                && !k.starts_with(pfx)
+            {
+                continue;
+            }
+            map.insert(k.clone(), entry.clone());
+        }
+        Ok(filter_and_limit_entries(map, keys_filter, max_items))
+    }
+
+    fn put_entry_memory_sync(
+        &self,
+        is_owner: bool,
+        owner: &str,
+        ns: &str,
+        key: &str,
+        input: WriteEntryInput,
+    ) -> Result<(TypedEntry, DataMutationResult), PluginApiError> {
+        let mut mem = self
+            .memory
+            .write()
+            .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
+        let map_key = (owner.to_string(), ns.to_string(), key.to_string());
+        let existing = mem.entries.get(&map_key).map(|(e, len)| (e, *len));
+        let old_bytes = existing.map(|(_, len)| len);
+        let schema_basis = existing.map(|(e, _)| e);
+
+        let (entry, serialized) = build_updated_entry(is_owner, false, schema_basis, input, key)?;
+        let current_quota = mem.quotas.get(owner).copied().unwrap_or_default();
+        let next_quota = adjust_quota_check(
+            current_quota,
+            old_bytes,
+            serialized.len(),
+            owner,
+            StoreKind::Memory,
+        )?;
+        mem.quotas.insert(owner.to_string(), next_quota);
+        mem.entries
+            .insert(map_key, (entry.clone(), serialized.len()));
+
+        let mut val_map = BTreeMap::new();
+        val_map.insert(key.to_string(), entry.clone());
+        let inline_values = compute_inline_values(&val_map);
+        Ok((
+            entry,
+            DataMutationResult {
+                store: StoreKind::Memory,
+                owner_namedomain: owner.to_string(),
+                namespace: ns.to_string(),
+                op: MutationOp::Set,
+                keys: vec![key.to_string()],
+                inline_values,
+            },
+        ))
+    }
+
+    fn mset_entries_memory_sync(
+        &self,
+        is_owner: bool,
+        owner: &str,
+        ns: &str,
+        entries: BTreeMap<String, WriteEntryInput>,
+    ) -> Result<(BTreeMap<String, TypedEntry>, Option<DataMutationResult>), PluginApiError> {
+        let mut mem = self
+            .memory
+            .write()
+            .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
+        let mut running_quota = mem.quotas.get(owner).copied().unwrap_or_default();
+        let mut staged: Vec<(String, TypedEntry, Vec<u8>)> = Vec::with_capacity(entries.len());
+
+        for (k, input) in entries {
+            let map_key = (owner.to_string(), ns.to_string(), k.clone());
+            let existing = mem.entries.get(&map_key).map(|(e, len)| (e, *len));
+            let old_bytes = existing.map(|(_, len)| len);
+            let schema_basis = existing.map(|(e, _)| e);
+
+            let (entry, serialized) =
+                build_updated_entry(is_owner, false, schema_basis, input, &k)?;
+            running_quota = adjust_quota_check(
+                running_quota,
+                old_bytes,
+                serialized.len(),
+                owner,
+                StoreKind::Memory,
+            )?;
+            staged.push((k, entry, serialized));
+        }
+
+        mem.quotas.insert(owner.to_string(), running_quota);
+        let mut committed = BTreeMap::new();
+        for (k, entry, serialized) in staged {
+            let map_key = (owner.to_string(), ns.to_string(), k.clone());
+            mem.entries
+                .insert(map_key, (entry.clone(), serialized.len()));
+            committed.insert(k, entry);
+        }
+
+        let keys: Vec<String> = committed.keys().cloned().collect();
+        let inline_values = compute_inline_values(&committed);
+        Ok((
+            committed,
+            Some(DataMutationResult {
+                store: StoreKind::Memory,
+                owner_namedomain: owner.to_string(),
+                namespace: ns.to_string(),
+                op: MutationOp::Mset,
+                keys,
+                inline_values,
+            }),
+        ))
+    }
+
+    fn delete_entry_memory_sync(
+        &self,
+        owner: &str,
+        ns: &str,
+        key: &str,
+    ) -> Result<(bool, Option<DataMutationResult>), PluginApiError> {
+        let mut mem = self
+            .memory
+            .write()
+            .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
+        let map_key = (owner.to_string(), ns.to_string(), key.to_string());
+        if let Some((_, len)) = mem.entries.remove(&map_key) {
+            apply_delete_quota(&mut mem.quotas, owner, len);
+            Ok((
+                true,
+                Some(DataMutationResult {
+                    store: StoreKind::Memory,
+                    owner_namedomain: owner.to_string(),
+                    namespace: ns.to_string(),
+                    op: MutationOp::Delete,
+                    keys: vec![key.to_string()],
+                    inline_values: None,
+                }),
+            ))
+        } else {
+            Ok((false, None))
+        }
+    }
+
+    fn clear_namespace_memory_sync(
+        &self,
+        owner: &str,
+        ns: &str,
+    ) -> Result<(usize, Option<DataMutationResult>), PluginApiError> {
+        let mut mem = self
+            .memory
+            .write()
+            .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
+        let ns_end = exclusive_prefix_end(ns);
+        let to_delete: Vec<(String, String, String)> = mem
+            .entries
+            .range(
+                (owner.to_string(), ns.to_string(), String::new())
+                    ..(owner.to_string(), ns_end, String::new()),
+            )
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut removed_keys = Vec::with_capacity(to_delete.len());
+        for k in to_delete {
+            if let Some((_, len)) = mem.entries.remove(&k) {
+                apply_delete_quota(&mut mem.quotas, owner, len);
+                removed_keys.push(k.2);
+            }
+        }
+        let count = removed_keys.len();
+        let mutation = if count > 0 {
+            Some(DataMutationResult {
+                store: StoreKind::Memory,
+                owner_namedomain: owner.to_string(),
+                namespace: ns.to_string(),
+                op: MutationOp::Clear,
+                keys: removed_keys,
+                inline_values: None,
+            })
+        } else {
+            None
+        };
+        Ok((count, mutation))
     }
 
     fn clone_handles(&self) -> Self {
