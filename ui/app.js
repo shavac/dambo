@@ -23,9 +23,11 @@ let lastRoomOptions = null;
 let recordRawEnabled = false;
 let activeRoomLabel = "";
 let pendingRoomDraft = null;
+let skipNextRoomInputMouseUp = false;
+let suppressRoomBlurRevert = false;
 let isConnecting = false;
 let connectingTimeoutId = null;
-let isAlwaysOnTop = false;
+let isAlwaysOnTop = true;
 let toastTimer = null;
 let pluginViewMode = "list";
 let qrTarget = "__admin__";
@@ -1033,7 +1035,7 @@ async function selectAndConnectRoom(roomId) {
     if (roomInput) {
         roomInput.value = idStr;
         roomInput.title = idStr;
-        roomInput.blur();
+        blurRoomInputWithoutRevert();
     }
     setDropdownOpen(false);
     await connectTarget(idStr);
@@ -1565,6 +1567,44 @@ podContainerEl?.addEventListener('pointerdown', (e) => {
 });
 
 const roomInputEl = document.getElementById('room-input');
+const roomSwitchBtnEl = document.getElementById('room-switch-btn');
+
+function restoreRoomInputToActive() {
+    if (!roomInputEl) return;
+    pendingRoomDraft = null;
+    roomInputEl.value = activeRoomLabel;
+    roomInputEl.title = activeRoomLabel;
+    syncRoomActionButton();
+}
+
+function blurRoomInputWithoutRevert() {
+    if (!roomInputEl) return;
+    suppressRoomBlurRevert = true;
+    try {
+        roomInputEl.blur();
+    } finally {
+        suppressRoomBlurRevert = false;
+    }
+}
+
+roomInputEl?.addEventListener('focus', () => {
+    skipNextRoomInputMouseUp = true;
+    roomInputEl.select();
+});
+
+roomInputEl?.addEventListener('mouseup', (e) => {
+    if (skipNextRoomInputMouseUp) {
+        skipNextRoomInputMouseUp = false;
+        e.preventDefault();
+    }
+});
+
+roomInputEl?.addEventListener('blur', () => {
+    skipNextRoomInputMouseUp = false;
+    if (!suppressRoomBlurRevert && !isConnecting) {
+        restoreRoomInputToActive();
+    }
+});
 
 roomInputEl?.addEventListener('input', () => {
     pendingRoomDraft = roomInputEl.value;
@@ -1572,14 +1612,18 @@ roomInputEl?.addEventListener('input', () => {
 });
 
 roomInputEl?.addEventListener('keydown', async (e) => {
-    if (e.key === 'Enter') {
+    skipNextRoomInputMouseUp = false;
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
         const input = roomInputEl.value.trim();
         setDropdownOpen(false);
         if (input && !isConnecting) {
-            roomInputEl.blur();
+            blurRoomInputWithoutRevert();
             await connectTarget(input);
         }
+    } else if (e.key === 'Escape') {
+        e.preventDefault();
+        roomInputEl.blur();
     }
 });
 
@@ -1597,7 +1641,14 @@ document.getElementById('room-dropdown-btn')?.addEventListener('click', async ()
     }
 });
 
-document.getElementById('room-switch-btn')?.addEventListener('click', async () => {
+roomSwitchBtnEl?.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+});
+roomSwitchBtnEl?.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+});
+
+roomSwitchBtnEl?.addEventListener('click', async () => {
     if (!invoke || isConnecting) return;
     const input = (roomInputEl?.value || '').trim();
     setDropdownOpen(false);
@@ -1607,8 +1658,10 @@ document.getElementById('room-switch-btn')?.addEventListener('click', async () =
     ) {
         pendingRoomDraft = null;
         setConnectingState(false);
+        roomInputEl?.blur();
         await invoke('disconnect_room').catch(console.error);
     } else if (input) {
+        blurRoomInputWithoutRevert();
         await connectTarget(input);
     }
 });
@@ -1898,6 +1951,9 @@ window.addEventListener('blur', () => {
     stopPointerEastResize();
     stopPointerPanelMove();
     closeAllMenus();
+    if (document.activeElement === roomInputEl) {
+        roomInputEl.blur();
+    }
 });
 
 document.addEventListener('DOMContentLoaded', hydrateInitialState);
