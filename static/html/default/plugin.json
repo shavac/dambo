@@ -2,7 +2,7 @@
   "plugin_id": "default",
   "version": "1.0.0",
   "name": "OBS 透明弹幕挂件",
-  "description": "Default transparent OBS overlay with pinned SuperChat/Guard bar, danmaku stream, and enter dock.",
+  "description": "主力透明 OBS 弹幕挂件：顶部置顶 SC/大航海卡片、实时弹幕与礼物连击归并，以及底部观众进房停靠栏。",
   "obs": {
     "width": 420,
     "height": 720

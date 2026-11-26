@@ -2,7 +2,7 @@
   "plugin_id": "list",
   "version": "1.0.0",
   "name": "弹幕监看列表",
-  "description": "Interactive web danmaku monitor with smart scroll lock, sticky SuperChat/Guard header, and filters.",
+  "description": "主播与房管专用的互动弹幕监看列表：支持分类筛选、向上滚动自动锁定防跳动与顶部吸顶 SC/大航海提示。",
   "obs": {
     "width": 480,
     "height": 800

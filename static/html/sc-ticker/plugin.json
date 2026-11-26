@@ -2,7 +2,7 @@
   "plugin_id": "sc-ticker",
   "version": "1.0.0",
   "name": "SC 与大航海卡片",
-  "description": "Minimal OBS overlay displaying timed countdown cards exclusively for SuperChat and Guard events.",
+  "description": "极简 OBS 角落挂件：专注展示醒目留言（SC）与大航海（舰长/提督/总督）倒计时卡片。",
   "obs": {
     "width": 420,
     "height": 320

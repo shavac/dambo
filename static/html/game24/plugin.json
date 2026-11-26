@@ -2,7 +2,7 @@
   "plugin_id": "game24",
   "version": "1.0.0",
   "name": "扑克24点弹幕互动",
-  "description": "A-K扑克牌24点直播互动游戏：弹幕发送算式抢答，自动校验与计分，无解/超时自动切题 (支持管理页配置或 query 参数: ?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5)",
+  "description": "A–K 扑克牌 24 点弹幕互动小游戏：观众发送算式实时抢答并自动计分，支持无解与超时自动切题。",
   "obs": {
     "width": 560,
     "height": 420

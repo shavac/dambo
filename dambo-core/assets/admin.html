@@ -207,8 +207,87 @@
     }
     .grid-cards {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
       gap: 14px;
+    }
+    code {
+      font-family: var(--mono);
+      font-size: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 1px 6px;
+      border-radius: 5px;
+      color: #cbd5e1;
+    }
+    .seg-group {
+      display: inline-flex;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .seg-btn {
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+      padding: 4px 10px;
+      font-size: 12px;
+      border-radius: 6px;
+    }
+    .seg-btn:hover {
+      border-color: transparent;
+      color: var(--text);
+    }
+    .seg-btn.active {
+      background: rgba(56, 189, 248, 0.16);
+      color: #e0f2fe;
+      border-color: rgba(56, 189, 248, 0.4);
+    }
+    .plugin-card {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .plugin-title {
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+    .plugin-desc {
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.55;
+      margin: 0;
+    }
+    .obs-url-row {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .obs-url-code {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #bae6fd;
+      background: transparent;
+      border: none;
+      padding: 0;
+      word-break: break-all;
+      flex: 1;
+      min-width: 0;
+    }
+    .plugin-foot {
+      margin-top: auto;
+      padding-top: 4px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
     }
     @media (max-width: 960px) {
       .grid-3 { grid-template-columns: 1fr; }
@@ -445,7 +524,7 @@
       display: flex;
     }
     .drawer-panel {
-      width: min(760px, 100vw);
+      width: min(860px, 96vw);
       height: 100%;
       background: var(--bg-elev);
       border-left: 1px solid var(--border);
@@ -526,10 +605,7 @@
   <div id="dambo-admin-root">
     <aside class="sidebar" aria-label="主导航">
       <div class="brand">
-        <div class="between">
-          <h1>Dambo Admin</h1>
-          <span id="sidebar-mode-badge" class="badge">加载中</span>
-        </div>
+        <h1>Dambo Admin</h1>
         <span class="muted">统一服务管理控制台</span>
       </div>
       <nav class="nav-list" id="desktop-nav">
@@ -537,7 +613,7 @@
           <span>实时概览</span>
         </button>
         <button type="button" class="nav-btn" data-view="plugins">
-          <span>插件控制台</span>
+          <span>插件中心</span>
           <span id="nav-plugin-count" class="badge">0</span>
         </button>
         <button type="button" class="nav-btn" data-view="acl">
@@ -566,7 +642,6 @@
           <span id="topbar-auth-pill" class="badge">管理员未解锁</span>
         </div>
         <div class="row">
-          <span id="topbar-conn-summary" class="muted">SSE / WS 初始化中</span>
           <button type="button" id="btn-open-auth" class="sm">解锁口令</button>
           <button type="button" id="btn-refresh-all" class="sm">刷新全部</button>
         </div>
@@ -577,7 +652,7 @@
           <div class="between">
             <div>
               <strong id="global-pending-text">有待审批的跨插件权限请求</strong>
-              <div class="muted">跨插件 Write / Publish 操作需管理员明确批准后才会放行。</div>
+              <div class="muted">跨插件写权限（<code>Write</code>）始终需管理员明确批准后才会放行。</div>
             </div>
             <button type="button" id="btn-jump-acl" class="warn sm">前往权限中心处理</button>
           </div>
@@ -632,7 +707,7 @@
               <div class="between">
                 <div>
                   <h3>Channel B 实时弹幕 / SC / 礼物观察流</h3>
-                  <div class="muted">仅使用单一 WebSocket (`/ws/event`) 观察实时广播事件</div>
+                  <div class="muted">仅使用单一 WebSocket (<code>/ws/event</code>) 观察实时广播事件</div>
                 </div>
                 <div class="row">
                   <select id="feed-filter" aria-label="事件过滤">
@@ -673,14 +748,19 @@
           </div>
         </section>
 
-        <!-- 2. 插件控制台 -->
+        <!-- 2. 插件中心 -->
         <section id="view-plugins" class="view-panel">
           <div class="card between">
             <div>
-              <h3>已发现插件控制台</h3>
-              <div class="muted">点击“打开控制面板”将在本页右侧抽屉加载插件 `/{id}/m`，也可复制 OBS 源地址 `/{id}/`。</div>
+              <h3>插件中心</h3>
+              <div class="muted">查看各插件介绍、OBS 浏览器源地址（<code>/{id}/</code>）与配置规模；点击「配置与控制」可在右侧抽屉打开 <code>/{id}/m</code>。</div>
             </div>
             <div class="row">
+              <div class="seg-group" id="plugin-origin-filter" role="group" aria-label="插件来源筛选">
+                <button type="button" class="seg-btn active" data-origin="all">全部</button>
+                <button type="button" class="seg-btn" data-origin="builtin">内置</button>
+                <button type="button" class="seg-btn" data-origin="custom">扩展</button>
+              </div>
               <input id="plugin-search" type="search" placeholder="搜索插件 ID、名称或描述…" />
               <button type="button" id="btn-reload-plugins" class="sm">刷新插件</button>
             </div>
@@ -695,7 +775,7 @@
           <div class="card between">
             <div>
               <h3>跨插件权限中心</h3>
-              <div class="muted">明确区分 `AutoGranted`（Open 模式自动放行读/订阅）与 `Granted`（管理员明确授权），跨插件 `Write` / `Publish` 始终待审批。</div>
+              <div class="muted">明确区分 <code>AutoGranted</code>（Open 模式自动放行读/订阅）与 <code>Granted</code>（管理员明确授权）；跨插件写权限（<code>Write</code>）始终需管理员明确批准。</div>
             </div>
             <div class="row">
               <select id="acl-filter" aria-label="权限状态过滤">
@@ -736,7 +816,7 @@
             <div class="between">
               <div>
                 <h3>KV 数据检视器与 Topic 测试发布</h3>
-                <div class="muted">按插件域查看或编辑 `persist`（持久化）/ `memory`（内存）数据，或向指定 Topic 推送测试 JSON。</div>
+                <div class="muted">按插件域查看或编辑 <code>persist</code>（持久化）/ <code>memory</code>（内存）数据，或向指定 Topic 推送测试 JSON。</div>
               </div>
               <button type="button" id="btn-reload-data" class="sm">刷新数据</button>
             </div>
@@ -833,7 +913,7 @@
                 <div class="row">
                   <label class="row" style="cursor: pointer;">
                     <input id="topic-public-check" type="checkbox" checked />
-                    <span>声明为公开可订阅 (`public`)</span>
+                    <span>声明为公开可订阅 (<code>public</code>)</span>
                   </label>
                   <input id="topic-desc-input" type="text" placeholder="可选 Topic 描述" style="flex: 1; min-width: 150px;" />
                 </div>
@@ -874,6 +954,8 @@
           <div id="drawer-subtitle" class="muted mono">-</div>
         </div>
         <div class="row">
+          <button type="button" id="drawer-copy-obs" class="sm">复制 OBS 地址</button>
+          <a id="drawer-preview-link" class="btn-link sm" href="/" target="_blank" rel="noopener">预览挂件</a>
           <a id="drawer-external-link" class="btn-link sm" href="/" target="_blank" rel="noopener">新标签打开</a>
           <button type="button" id="btn-close-drawer" class="sm">关闭</button>
         </div>
@@ -890,7 +972,7 @@
         <button type="button" id="btn-close-auth" class="sm">关闭</button>
       </div>
       <p class="muted" style="margin: 0;">
-        当前模式或来源要求验证 `admin_token`（可在 `config.toml` 或程序启动日志中找到；若通过二维码打开则会自动携带并清理 `#t=`）。
+        当前模式或来源要求验证 <code>admin_token</code>（可在 <code>config.toml</code> 或程序启动日志中找到；若通过二维码打开则会自动携带并清理 <code>#t=</code>）。
       </p>
       <form id="auth-form" class="stack">
         <input id="auth-token-input" type="password" autocomplete="current-password" placeholder="粘贴 admin_token…" />
@@ -912,6 +994,8 @@
         activeView: 'overview',
         status: null,
         plugins: [],
+        pluginOriginFilter: 'all',
+        drawerPlugin: null,
         aclRecords: [],
         securityMode: 'open',
         adminUnlocked: false,
@@ -986,6 +1070,13 @@
         });
       }
 
+      function syncAuthControls() {
+        var btn = $('btn-open-auth');
+        if (!btn) return;
+        var shouldHide = state.adminUnlocked && state.securityMode !== 'strict';
+        btn.style.display = shouldHide ? 'none' : '';
+      }
+
       function setAuthLocked(locked) {
         state.adminUnlocked = !locked;
         if (locked) {
@@ -994,6 +1085,7 @@
         } else {
           setBadge($('topbar-auth-pill'), '管理会话已就绪', 'ok');
         }
+        syncAuthControls();
       }
 
       function openAuthModal() {
@@ -1064,7 +1156,7 @@
         state.activeView = viewName;
         var titleMap = {
           overview: '实时概览',
-          plugins: '插件控制台',
+          plugins: '插件中心',
           acl: '权限中心',
           data: '数据检视器'
         };
@@ -1087,9 +1179,9 @@
         state.securityMode = mode;
         var modeLabel = mode === 'strict' ? 'Strict' : 'Open';
         var modeTone = mode === 'strict' ? 'warn' : 'ok';
-        setBadge($('sidebar-mode-badge'), modeLabel, modeTone);
         setBadge($('topbar-mode-pill'), '模式: ' + modeLabel, modeTone);
         setBadge($('ov-mode-badge'), modeLabel + ' 模式', modeTone);
+        syncAuthControls();
 
         var rs = st.room_state || {};
         var ri = st.room_info || {};
@@ -1239,17 +1331,23 @@
       }
 
       function openPluginDrawer(plugin) {
+        state.drawerPlugin = plugin || null;
         var routeName = plugin.plugin_name || plugin.plugin_id || '';
-        var manageUrl = plugin.manage_route || ('/' + encodeURIComponent(routeName) + '/m');
-        $('drawer-title').textContent = (plugin.name || routeName) + ' · 控制面板';
-        $('drawer-subtitle').textContent = manageUrl + ' (' + (plugin.namedomain || routeName) + ')';
-        $('drawer-external-link').setAttribute('href', manageUrl);
-        $('drawer-iframe').setAttribute('src', manageUrl);
+        var manageBase = plugin.manage_route || ('/' + encodeURIComponent(routeName) + '/m');
+        var embedUrl = manageBase + (manageBase.indexOf('?') === -1 ? '?embed=1' : '&embed=1');
+        var viewUrl = '/' + encodeURIComponent(routeName) + '/';
+        var manageModeText = plugin.has_custom_manage ? '自定义管理页' : '内置配置页';
+        $('drawer-title').textContent = (plugin.name || routeName) + ' · 配置与控制';
+        $('drawer-subtitle').textContent = manageBase + ' · ' + manageModeText + ' · ' + (plugin.namedomain || routeName);
+        $('drawer-preview-link').setAttribute('href', viewUrl);
+        $('drawer-external-link').setAttribute('href', manageBase);
+        $('drawer-iframe').setAttribute('src', embedUrl);
         $('plugin-drawer').classList.add('open');
         $('plugin-drawer').setAttribute('aria-hidden', 'false');
       }
 
       function closePluginDrawer() {
+        state.drawerPlugin = null;
         $('plugin-drawer').classList.remove('open');
         $('plugin-drawer').setAttribute('aria-hidden', 'true');
         $('drawer-iframe').setAttribute('src', 'about:blank');
@@ -1259,9 +1357,12 @@
         var grid = $('plugins-grid');
         grid.replaceChildren();
         var q = String($('plugin-search').value || '').trim().toLowerCase();
+        var originFilter = state.pluginOriginFilter || 'all';
         $('nav-plugin-count').textContent = String(state.plugins.length);
 
         var filtered = state.plugins.filter(function (p) {
+          if (originFilter === 'builtin' && !p.is_builtin) return false;
+          if (originFilter === 'custom' && p.is_builtin) return false;
           if (!q) return true;
           return [p.plugin_id, p.plugin_name, p.name, p.description]
             .filter(Boolean)
@@ -1271,34 +1372,40 @@
         if (filtered.length === 0) {
           var empty = document.createElement('div');
           empty.className = 'empty-state';
-          empty.textContent = q ? '没有匹配的插件' : '未发现插件';
+          empty.textContent = (q || originFilter !== 'all') ? '没有符合筛选条件的插件' : '未发现插件';
           grid.appendChild(empty);
           return;
         }
 
         filtered.forEach(function (plugin) {
+          var routeName = plugin.plugin_name || plugin.plugin_id || '';
+          var obsUrl = buildObsPluginUrl(plugin);
+          var cfgCount = plugin.defaults ? Object.keys(plugin.defaults).length : 0;
+          var topicCount = Array.isArray(plugin.topics) ? plugin.topics.length : 0;
+
           var card = document.createElement('div');
-          card.className = 'card stack';
+          card.className = 'card plugin-card';
 
           var top = document.createElement('div');
           top.className = 'between';
           var titleWrap = document.createElement('div');
-          var title = document.createElement('strong');
-          title.textContent = plugin.name || plugin.plugin_id;
-          var sub = document.createElement('div');
-          sub.className = 'muted mono';
-          sub.textContent = plugin.plugin_id + ' · v' + (plugin.version || '1.0.0');
+          var title = document.createElement('div');
+          title.className = 'plugin-title';
+          title.textContent = plugin.name || routeName;
           titleWrap.appendChild(title);
-          titleWrap.appendChild(sub);
 
           var badges = document.createElement('div');
           badges.className = 'row';
+          var verBadge = document.createElement('span');
+          verBadge.className = 'badge';
+          verBadge.textContent = 'v' + (plugin.version || '1.0.0');
           var originBadge = document.createElement('span');
           originBadge.className = 'badge' + (plugin.is_builtin ? '' : ' accent');
-          originBadge.textContent = plugin.is_builtin ? '内置' : '外部';
+          originBadge.textContent = plugin.is_builtin ? '内置' : '扩展';
           var manageBadge = document.createElement('span');
           manageBadge.className = 'badge' + (plugin.has_custom_manage ? ' ok' : '');
-          manageBadge.textContent = plugin.has_custom_manage ? '自定义管理页' : '内置兜底';
+          manageBadge.textContent = plugin.has_custom_manage ? '自定义面板' : '内置配置页';
+          badges.appendChild(verBadge);
           badges.appendChild(originBadge);
           badges.appendChild(manageBadge);
 
@@ -1306,43 +1413,67 @@
           top.appendChild(badges);
           card.appendChild(top);
 
-          var desc = document.createElement('div');
-          desc.className = 'muted';
-          desc.textContent = plugin.description || '无插件描述。';
+          var desc = document.createElement('p');
+          desc.className = 'plugin-desc';
+          desc.textContent = plugin.description || '该插件未填写说明，可在 plugin.json 的 description 字段补充。';
           card.appendChild(desc);
 
-          var metaRow = document.createElement('div');
-          metaRow.className = 'row muted';
-          var obsText = plugin.obs && plugin.obs.width && plugin.obs.height
-            ? ('建议 OBS: ' + plugin.obs.width + '×' + plugin.obs.height)
-            : 'OBS 源: /' + (plugin.plugin_name || plugin.plugin_id) + '/';
-          var topicCount = Array.isArray(plugin.topics) ? plugin.topics.length : 0;
-          metaRow.textContent = obsText + ' · Topics: ' + topicCount;
-          card.appendChild(metaRow);
+          var obsRow = document.createElement('div');
+          obsRow.className = 'obs-url-row';
+          var obsLabel = document.createElement('span');
+          obsLabel.className = 'muted';
+          obsLabel.textContent = 'OBS 源';
+          var obsCode = document.createElement('code');
+          obsCode.className = 'obs-url-code';
+          obsCode.textContent = obsUrl;
+          var btnInlineCopy = document.createElement('button');
+          btnInlineCopy.type = 'button';
+          btnInlineCopy.className = 'sm';
+          btnInlineCopy.textContent = '复制';
+          btnInlineCopy.addEventListener('click', function () {
+            copyText(obsUrl, 'OBS 浏览器源 URL');
+          });
+          obsRow.appendChild(obsLabel);
+          obsRow.appendChild(obsCode);
+          obsRow.appendChild(btnInlineCopy);
+          card.appendChild(obsRow);
+
+          var specs = document.createElement('div');
+          specs.className = 'row';
+          if (plugin.obs && (plugin.obs.width || plugin.obs.height)) {
+            var sizeBadge = document.createElement('span');
+            sizeBadge.className = 'badge';
+            sizeBadge.textContent = '画幅 ' + (plugin.obs.width || '?') + '×' + (plugin.obs.height || '?');
+            specs.appendChild(sizeBadge);
+          }
+          var cfgBadge = document.createElement('span');
+          cfgBadge.className = 'badge';
+          cfgBadge.textContent = cfgCount + ' 项配置';
+          var topicBadge = document.createElement('span');
+          topicBadge.className = 'badge';
+          topicBadge.textContent = topicCount + ' 个 Topic';
+          var domainBadge = document.createElement('span');
+          domainBadge.className = 'badge mono';
+          domainBadge.textContent = '/' + routeName + '/ · ' + (plugin.namedomain || routeName);
+          specs.appendChild(cfgBadge);
+          specs.appendChild(topicBadge);
+          specs.appendChild(domainBadge);
+          card.appendChild(specs);
 
           var actions = document.createElement('div');
-          actions.className = 'row';
+          actions.className = 'plugin-foot';
 
           var btnManage = document.createElement('button');
           btnManage.type = 'button';
           btnManage.className = 'primary sm';
-          btnManage.textContent = '打开控制面板';
+          btnManage.textContent = '配置与控制';
           btnManage.addEventListener('click', function () {
             openPluginDrawer(plugin);
           });
 
-          var obsUrl = buildObsPluginUrl(plugin);
-          var btnCopy = document.createElement('button');
-          btnCopy.type = 'button';
-          btnCopy.className = 'sm';
-          btnCopy.textContent = '复制 OBS URL';
-          btnCopy.addEventListener('click', function () {
-            copyText(obsUrl, 'OBS 浏览器源 URL');
-          });
-
           var linkPreview = document.createElement('a');
           linkPreview.className = 'btn-link sm';
-          linkPreview.href = '/' + encodeURIComponent(plugin.plugin_name || plugin.plugin_id) + '/';
+          linkPreview.href = '/' + encodeURIComponent(routeName) + '/';
           linkPreview.target = '_blank';
           linkPreview.rel = 'noopener';
           linkPreview.textContent = '预览挂件';
@@ -1350,7 +1481,7 @@
           var btnInspect = document.createElement('button');
           btnInspect.type = 'button';
           btnInspect.className = 'sm';
-          btnInspect.textContent = '查数据';
+          btnInspect.textContent = '检视数据';
           btnInspect.addEventListener('click', function () {
             var ownerDomain = plugin.namedomain || plugin.plugin_id;
             state.selectedOwner = ownerDomain;
@@ -1361,7 +1492,6 @@
           });
 
           actions.appendChild(btnManage);
-          actions.appendChild(btnCopy);
           actions.appendChild(linkPreview);
           actions.appendChild(btnInspect);
           card.appendChild(actions);
@@ -1948,7 +2078,6 @@
         var wsText = state.wsConnected ? 'WS: 已连接' : 'WS: 断开';
         setBadge($('sse-badge-side'), sseText, state.sseConnected ? 'ok' : 'warn');
         setBadge($('ws-badge-side'), wsText, state.wsConnected ? 'ok' : 'warn');
-        $('topbar-conn-summary').textContent = sseText + ' · ' + wsText;
       }
 
       function connectAdminSse() {
@@ -2216,10 +2345,29 @@
         });
 
         $('plugin-search').addEventListener('input', renderPlugins);
+        document.querySelectorAll('#plugin-origin-filter .seg-btn').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            state.pluginOriginFilter = btn.getAttribute('data-origin') || 'all';
+            document.querySelectorAll('#plugin-origin-filter .seg-btn').forEach(function (b) {
+              b.classList.toggle('active', b === btn);
+            });
+            renderPlugins();
+          });
+        });
         $('btn-reload-plugins').addEventListener('click', refreshPlugins);
+        $('drawer-copy-obs').addEventListener('click', function () {
+          if (state.drawerPlugin) {
+            copyText(buildObsPluginUrl(state.drawerPlugin), 'OBS 浏览器源 URL');
+          }
+        });
         $('btn-close-drawer').addEventListener('click', closePluginDrawer);
         $('plugin-drawer').addEventListener('click', function (e) {
           if (e.target === $('plugin-drawer')) closePluginDrawer();
+        });
+        window.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape' && $('plugin-drawer').classList.contains('open')) {
+            closePluginDrawer();
+          }
         });
 
         $('acl-filter').addEventListener('change', renderAcl);

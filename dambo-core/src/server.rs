@@ -1000,6 +1000,8 @@ mod tests {
         assert!(MANAGE_FALLBACK_HTML.contains("Dambo.storage"));
         assert!(MANAGE_FALLBACK_HTML.contains("Dambo.memory"));
         assert!(MANAGE_FALLBACK_HTML.contains("Dambo.plugin.unlockManage"));
+        assert!(MANAGE_FALLBACK_HTML.contains("is-embedded"));
+        assert!(MANAGE_FALLBACK_HTML.contains("data-main-tab"));
         // Strict XSS & Referer safety guarantees
         assert!(!MANAGE_FALLBACK_HTML.contains("innerHTML"));
         assert!(!MANAGE_FALLBACK_HTML.contains("no-referrer"));
@@ -1015,6 +1017,8 @@ mod tests {
 
         assert!(ADMIN_CONSOLE_HTML.contains("id=\"dambo-admin-root\""));
         assert!(ADMIN_CONSOLE_HTML.contains("hashchange"));
+        assert!(ADMIN_CONSOLE_HTML.contains("plugin-origin-filter"));
+        assert!(ADMIN_CONSOLE_HTML.contains("embed=1"));
         assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/events?mode=admin"));
         assert!(ADMIN_CONSOLE_HTML.contains("/ws/event"));
         assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/system/status"));

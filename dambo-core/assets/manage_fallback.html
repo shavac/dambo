@@ -20,29 +20,50 @@
       --danger: #ef4444;
       --radius: 10px;
       --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      padding: 20px;
+      padding: 18px 20px 36px;
       background: var(--bg);
       color: var(--text);
       font-family: var(--font);
       font-size: 14px;
       line-height: 1.5;
     }
+    body.is-embedded {
+      padding: 12px 14px 28px;
+    }
+    body.is-embedded .standalone-only {
+      display: none !important;
+    }
+    body:not(.is-embedded) .embed-only {
+      display: none !important;
+    }
     #dambo-manage-root {
-      max-width: 1120px;
+      max-width: 1060px;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 18px;
+      gap: 14px;
+    }
+    body.is-embedded #dambo-manage-root {
+      max-width: none;
+      gap: 12px;
+    }
+    .top-nav {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
     }
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 18px 20px;
+      padding: 16px 18px;
     }
     .card-header {
       display: flex;
@@ -54,37 +75,39 @@
     }
     .card-title {
       margin: 0;
-      font-size: 17px;
+      font-size: 16px;
       font-weight: 600;
     }
     .muted { color: var(--muted); font-size: 12px; }
-    .meta-badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 8px 0;
-    }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: var(--panel-alt);
-      border: 1px solid var(--border);
-      font-size: 12px;
-      color: var(--text);
-    }
-    .badge.ok { border-color: rgba(34, 197, 94, 0.45); color: #86efac; }
-    .badge.warn { border-color: rgba(245, 158, 11, 0.45); color: #fcd34d; }
-    .badge.danger { border-color: rgba(239, 68, 68, 0.45); color: #fca5a5; }
-    .badge.accent { border-color: rgba(56, 189, 248, 0.45); color: #7dd3fc; }
     .row {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 8px;
     }
+    .between {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 9px;
+      border-radius: 999px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .badge.ok { border-color: rgba(34, 197, 94, 0.45); color: #86efac; }
+    .badge.warn { border-color: rgba(245, 158, 11, 0.45); color: #fcd34d; }
+    .badge.danger { border-color: rgba(239, 68, 68, 0.45); color: #fca5a5; }
+    .badge.accent { border-color: rgba(56, 189, 248, 0.45); color: #7dd3fc; }
     button, .btn-link {
       appearance: none;
       border: 1px solid var(--border);
@@ -98,13 +121,15 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
+      font-family: inherit;
     }
     button:hover, .btn-link:hover { border-color: var(--accent); }
+    button:disabled { opacity: 0.48; cursor: not-allowed; }
     button.primary { background: var(--accent); color: #082f49; border-color: var(--accent); font-weight: 600; }
     button.primary:hover { background: var(--accent-hover); }
     button.danger { border-color: rgba(239, 68, 68, 0.5); color: #fca5a5; }
     button.danger:hover { background: rgba(239, 68, 68, 0.15); }
-    button.small { padding: 4px 9px; font-size: 12px; }
+    button.small, .btn-link.small { padding: 4px 9px; font-size: 12px; }
     input, select, textarea {
       background: var(--panel-alt);
       color: var(--text);
@@ -117,6 +142,140 @@
     input[type="color"] { padding: 2px; width: 46px; height: 32px; }
     input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
     textarea { min-height: 68px; resize: vertical; width: 100%; }
+    .intro-title {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .intro-desc {
+      margin: 8px 0 0;
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.55;
+    }
+    .obs-bar {
+      margin-top: 12px;
+      padding: 9px 12px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .obs-url-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1 1 280px;
+    }
+    .obs-url-code {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #bae6fd;
+      word-break: break-all;
+      background: rgba(15, 23, 42, 0.8);
+      padding: 3px 8px;
+      border-radius: 5px;
+      border: 1px solid rgba(51, 65, 85, 0.8);
+    }
+    .tech-line {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      word-break: break-word;
+    }
+    .lan-box {
+      margin-top: 12px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .lan-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+      flex: 1 1 260px;
+    }
+    .lan-url-code {
+      display: inline-block;
+      word-break: break-all;
+      max-width: 100%;
+    }
+    .lan-ip-btn.active {
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.16);
+      color: #7dd3fc;
+      font-weight: 600;
+    }
+    .lan-qr-img {
+      width: 96px;
+      height: 96px;
+      border-radius: 6px;
+      background: #ffffff;
+      padding: 4px;
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+      display: block;
+    }
+    .main-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 5px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .main-tab-btn {
+      flex: 1 1 120px;
+      justify-content: center;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 600;
+      padding: 8px 10px;
+    }
+    .main-tab-btn:hover {
+      color: var(--text);
+      background: var(--panel-alt);
+      border-color: transparent;
+    }
+    .main-tab-btn.active {
+      background: rgba(56, 189, 248, 0.16);
+      border-color: rgba(56, 189, 248, 0.45);
+      color: #e0f2fe;
+    }
+    .tab-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 5px;
+      border-radius: 999px;
+      font-size: 11px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .tab-badge.warn {
+      background: rgba(245, 158, 11, 0.2);
+      border-color: rgba(245, 158, 11, 0.55);
+      color: #fcd34d;
+    }
     .config-list, .kv-list, .acl-list, .topic-list {
       display: flex;
       flex-direction: column;
@@ -197,65 +356,8 @@
       gap: 12px;
     }
     .hidden { display: none !important; }
-    .info-header {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 14px;
-    }
-    .info-main {
-      flex: 1 1 320px;
-      min-width: 0;
-    }
-    .info-right {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 10px;
-      max-width: 100%;
-    }
-    .lan-box {
-      background: var(--panel-alt);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px 12px;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 12px;
-      max-width: 100%;
-    }
-    .lan-meta {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      min-width: 0;
-      max-width: 340px;
-    }
-    .lan-url-code {
-      display: inline-block;
-      word-break: break-all;
-      max-width: 100%;
-    }
-    .lan-ip-btn.active {
-      border-color: var(--accent);
-      background: rgba(56, 189, 248, 0.16);
-      color: #7dd3fc;
-      font-weight: 600;
-    }
-    .lan-qr-img {
-      width: 92px;
-      height: 92px;
-      border-radius: 6px;
-      background: #ffffff;
-      padding: 4px;
-      border: 1px solid var(--border);
-      flex-shrink: 0;
-      display: block;
-    }
     code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: var(--mono);
       font-size: 12px;
       background: rgba(15, 23, 42, 0.7);
       padding: 1px 5px;
@@ -265,45 +367,86 @@
 </head>
 <body>
   <main id="dambo-manage-root">
-    <!-- 1. Plugin Info Header -->
+    <!-- Top Bar (Standalone only) -->
+    <nav class="top-nav standalone-only" aria-label="导航栏">
+      <div class="row">
+        <a class="btn-link small" href="/admin">← 返回管理后台 (/admin)</a>
+        <a class="btn-link small" href="/">服务门户 (/)</a>
+      </div>
+      <div class="row">
+        <button type="button" class="small" id="toggle-lan-btn">局域网扫码</button>
+        <button type="button" class="small" id="reload-all-btn">刷新</button>
+      </div>
+    </nav>
+
+    <!-- 1. Plugin Introduction Header -->
     <section class="card" id="sec-info">
-      <div class="info-header">
-        <div class="info-main">
-          <h1 class="card-title" id="plugin-title">正在加载插件信息…</h1>
-          <div class="muted" id="plugin-desc"></div>
-          <div class="meta-badges" id="plugin-badges"></div>
+      <div class="between">
+        <div class="row">
+          <h1 class="intro-title" id="plugin-title">正在加载插件信息…</h1>
+          <div class="row" id="plugin-badges"></div>
         </div>
-        <div class="info-right">
+        <div class="row embed-only">
+          <button type="button" class="small" id="reload-embed-btn">刷新面板</button>
+        </div>
+      </div>
+
+      <p class="intro-desc" id="plugin-desc"></p>
+
+      <div class="obs-bar">
+        <div class="obs-url-wrap">
+          <span class="muted">OBS 浏览器源</span>
+          <code class="obs-url-code" id="obs-url-code">-</code>
+        </div>
+        <div class="row">
+          <button type="button" class="primary small" id="copy-view-btn">复制 OBS 地址</button>
+          <a class="btn-link small" id="open-view-link" href="./" target="_blank" rel="noopener">浏览器预览</a>
+        </div>
+      </div>
+
+      <div class="tech-line" id="plugin-tech-meta">-</div>
+
+      <div class="lan-box standalone-only hidden" id="lan-box">
+        <div class="lan-meta">
           <div class="row">
-            <a class="btn-link primary" id="open-view-link" href="./" target="_blank" rel="noopener">打开展示页</a>
-            <button type="button" id="copy-view-btn">复制展示页地址</button>
-            <button type="button" id="toggle-lan-btn">局域网链接 / 二维码</button>
-            <button type="button" id="reload-all-btn">刷新面板</button>
+            <strong style="font-size: 12px;">局域网管理入口</strong>
+            <span class="badge" id="lan-mode-badge">检测中</span>
           </div>
-          <div class="lan-box" id="lan-box">
-            <div class="lan-meta">
-              <div class="row">
-                <strong style="font-size: 12px;">局域网管理入口</strong>
-                <span class="badge" id="lan-mode-badge">检测中</span>
-              </div>
-              <div class="row hidden" id="lan-ip-tabs"></div>
-              <div class="row">
-                <code class="lan-url-code" id="lan-url-code">正在扫描本机局域网地址…</code>
-                <button type="button" class="small" id="lan-copy-btn">复制</button>
-              </div>
-              <div class="muted hidden" id="lan-local-note"></div>
-            </div>
-            <img class="lan-qr-img hidden" id="lan-qr-img" alt="局域网访问二维码" />
+          <div class="row hidden" id="lan-ip-tabs"></div>
+          <div class="row">
+            <code class="lan-url-code" id="lan-url-code">正在扫描本机局域网地址…</code>
+            <button type="button" class="small" id="lan-copy-btn">复制</button>
           </div>
+          <div class="muted hidden" id="lan-local-note"></div>
         </div>
+        <img class="lan-qr-img hidden" id="lan-qr-img" alt="局域网访问二维码" />
       </div>
     </section>
 
+    <!-- Main Workspace Tabs -->
+    <nav class="main-tabs" role="tablist" aria-label="功能分区">
+      <button type="button" class="main-tab-btn active" role="tab" data-main-tab="config">
+        <span>参数配置</span>
+        <span class="tab-badge" id="tab-count-config">0</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="acl">
+        <span>跨插件权限</span>
+        <span class="tab-badge warn hidden" id="tab-count-acl">0</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="topics">
+        <span>订阅源</span>
+        <span class="tab-badge" id="tab-count-topics">0</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="data">
+        <span>数据存储</span>
+      </button>
+    </nav>
+
     <!-- 2. Typed Default Config Form -->
-    <section class="card hidden" id="sec-config">
+    <section class="card" id="sec-config">
       <div class="card-header">
         <div>
-          <h2 class="card-title">默认配置（plugin.json defaults + persist/config）</h2>
+          <h2 class="card-title">参数配置（<code>defaults</code> + <code>persist/config</code>）</h2>
           <div class="muted">修改立即持久化并实时推送到在线展示页；未覆盖项保持插件默认定义</div>
         </div>
         <div class="row">
@@ -314,7 +457,7 @@
     </section>
 
     <!-- 3. Unified ACL Management -->
-    <section class="card" id="sec-acl">
+    <section class="card hidden" id="sec-acl">
       <div class="card-header">
         <div>
           <h2 class="card-title">跨插件权限管理（ACL）</h2>
@@ -330,7 +473,7 @@
     </section>
 
     <!-- 4. Topics Management -->
-    <section class="card" id="sec-topics">
+    <section class="card hidden" id="sec-topics">
       <div class="card-header">
         <div>
           <h2 class="card-title">插件归属订阅源（Topics）</h2>
@@ -341,11 +484,11 @@
     </section>
 
     <!-- 5. Persist / Memory Data Browser & Editor -->
-    <section class="card" id="sec-data">
+    <section class="card hidden" id="sec-data">
       <div class="card-header">
         <div>
           <h2 class="card-title">存储浏览与强类型编辑器</h2>
-          <div class="muted">直接查看、修改或新增当前插件的持久化（persist）与内存态（memory）键值对</div>
+          <div class="muted">直接查看、修改或新增当前插件的持久化（<code>persist</code>）与内存态（<code>memory</code>）键值对</div>
         </div>
         <div class="tabs">
           <button type="button" class="active" data-store-tab="persist">持久化 (persist)</button>
@@ -395,7 +538,7 @@
   <div class="modal-backdrop" id="auth-modal">
     <form class="modal" id="auth-form">
       <h2 class="card-title">需要远程管理口令</h2>
-      <div class="muted">当前主机开启了 [server].admin_token，请输入管理员口令以解锁管理操作。</div>
+      <div class="muted">当前主机开启了 <code>[server].admin_token</code>，请输入管理员口令以解锁管理操作。</div>
       <input type="password" id="auth-token-input" placeholder="输入 admin_token" autocomplete="current-password" required />
       <div class="muted hidden" id="auth-error-text" style="color: #fca5a5;"></div>
       <div class="row" style="justify-content: flex-end;">
@@ -411,13 +554,29 @@
     (function () {
       'use strict';
 
+      const urlParams = new URLSearchParams(window.location.search || '');
+      const isEmbedded = (function () {
+        if (urlParams.get('embed') === '1') return true;
+        try {
+          return window.self !== window.top;
+        } catch (_) {
+          return true;
+        }
+      })();
+      if (isEmbedded) {
+        document.body.classList.add('is-embedded');
+      }
+
       const pluginTitleEl = document.getElementById('plugin-title');
       const pluginDescEl = document.getElementById('plugin-desc');
       const pluginBadgesEl = document.getElementById('plugin-badges');
+      const obsUrlCodeEl = document.getElementById('obs-url-code');
+      const pluginTechMetaEl = document.getElementById('plugin-tech-meta');
       const openViewLinkEl = document.getElementById('open-view-link');
       const copyViewBtnEl = document.getElementById('copy-view-btn');
       const toggleLanBtnEl = document.getElementById('toggle-lan-btn');
       const reloadAllBtnEl = document.getElementById('reload-all-btn');
+      const reloadEmbedBtnEl = document.getElementById('reload-embed-btn');
       const lanBoxEl = document.getElementById('lan-box');
       const lanModeBadgeEl = document.getElementById('lan-mode-badge');
       const lanIpTabsEl = document.getElementById('lan-ip-tabs');
@@ -426,7 +585,15 @@
       const lanLocalNoteEl = document.getElementById('lan-local-note');
       const lanQrImgEl = document.getElementById('lan-qr-img');
 
+      const mainTabBtns = Array.from(document.querySelectorAll('[data-main-tab]'));
+      const tabCountConfigEl = document.getElementById('tab-count-config');
+      const tabCountAclEl = document.getElementById('tab-count-acl');
+      const tabCountTopicsEl = document.getElementById('tab-count-topics');
+
       const secConfigEl = document.getElementById('sec-config');
+      const secAclEl = document.getElementById('sec-acl');
+      const secTopicsEl = document.getElementById('sec-topics');
+      const secDataEl = document.getElementById('sec-data');
       const configListEl = document.getElementById('config-list');
       const resetAllCfgBtnEl = document.getElementById('reset-all-cfg-btn');
 
@@ -460,13 +627,26 @@
       let currentMeta = null;
       let lanPayload = null;
       let lanSelectedIdx = 0;
-      let lanExpanded = true;
+      let lanExpanded = false;
+      let activeMainTab = 'config';
       let activeStore = 'persist';
       let activeNs = '';
       let toastTimer = null;
       let offDataWatch = null;
       let offCfgWatch = null;
       let offAclWatch = null;
+
+      function switchMainTab(tabName) {
+        const validTabs = ['config', 'acl', 'topics', 'data'];
+        activeMainTab = validTabs.includes(tabName) ? tabName : 'config';
+        for (const btn of mainTabBtns) {
+          btn.classList.toggle('active', btn.getAttribute('data-main-tab') === activeMainTab);
+        }
+        secConfigEl.classList.toggle('hidden', activeMainTab !== 'config');
+        secAclEl.classList.toggle('hidden', activeMainTab !== 'acl');
+        secTopicsEl.classList.toggle('hidden', activeMainTab !== 'topics');
+        secDataEl.classList.toggle('hidden', activeMainTab !== 'data');
+      }
 
       function showToast(msg, isError) {
         if (toastTimer) clearTimeout(toastTimer);
@@ -608,7 +788,6 @@
           return wrap;
         }
 
-        // list / struct -> JSON editor (multi-checkbox if list of enum)
         if (t === 'list' && meta.item && meta.item.type === 'enum' && meta.item.meta && Array.isArray(meta.item.meta.options)) {
           const selected = new Set(Array.isArray(entry.value) ? entry.value : []);
           const checkboxes = [];
@@ -638,34 +817,49 @@
         return wrap;
       }
 
+      function resolveCanonicalObsUrl(meta) {
+        const rel = (meta && meta.route) ? meta.route : `/${Dambo.plugin.name}/`;
+        return new URL(rel, window.location.origin).toString();
+      }
+
       function renderMetaHeader(meta) {
         if (!meta) return;
         currentMeta = meta;
-        pluginTitleEl.textContent = `${meta.name || meta.plugin_name} 管理控制台`;
-        pluginDescEl.textContent = meta.description || '无描述信息';
+        const displayTitle = meta.name || meta.plugin_name;
+        pluginTitleEl.textContent = displayTitle;
+        document.title = `${displayTitle} · Dambo 插件设置`;
+        pluginDescEl.textContent = meta.description || '该插件未填写说明，可在 plugin.json 的 description 字段补充。';
+
+        const obsUrl = resolveCanonicalObsUrl(meta);
+        obsUrlCodeEl.textContent = obsUrl;
         openViewLinkEl.href = meta.route || `/${meta.plugin_name}/`;
 
         clearChildren(pluginBadgesEl);
-        pluginBadgesEl.appendChild(makeBadge(`目录: ${meta.plugin_name}`, 'accent'));
-        pluginBadgesEl.appendChild(makeBadge(`plugin_id: ${meta.plugin_id}`));
-        pluginBadgesEl.appendChild(makeBadge(`version: ${meta.version}`));
-        pluginBadgesEl.appendChild(makeBadge(`namedomain: ${meta.namedomain}`, 'ok'));
-        if (lanPayload && lanPayload.security_mode) {
+        pluginBadgesEl.appendChild(makeBadge(`v${meta.version}`, 'accent'));
+        pluginBadgesEl.appendChild(makeBadge(meta.is_builtin ? '内置' : '扩展'));
+        if (meta.obs && (meta.obs.width || meta.obs.height)) {
+          pluginBadgesEl.appendChild(makeBadge(`OBS ${meta.obs.width || '?'}×${meta.obs.height || '?'}`));
+        }
+        if (!isEmbedded && lanPayload && lanPayload.security_mode) {
           const isOpen = lanPayload.security_mode === 'open';
           pluginBadgesEl.appendChild(
             makeBadge(
-              isOpen ? '安全模式: Open (局域网便利)' : '安全模式: Strict (零信任)',
-              isOpen ? 'warn' : 'accent'
+              isOpen ? 'Open 模式' : 'Strict 模式',
+              isOpen ? 'warn' : 'ok'
             )
           );
         }
-        if (meta.obs && (meta.obs.width || meta.obs.height)) {
-          pluginBadgesEl.appendChild(makeBadge(`OBS: ${meta.obs.width || '?'}×${meta.obs.height || '?'}`));
-        }
+
+        const cfgCount = Object.keys(meta.config || {}).length;
+        const topicCount = Array.isArray(meta.topics) ? meta.topics.length : 0;
+        pluginTechMetaEl.textContent = `目录: ${meta.plugin_name} · ID: ${meta.plugin_id} · 数据域: ${meta.namedomain} · 配置项: ${cfgCount} · Topics: ${topicCount}`;
       }
 
       function renderLanBox() {
-        lanBoxEl.classList.toggle('hidden', !lanExpanded);
+        lanBoxEl.classList.toggle('hidden', isEmbedded || !lanExpanded);
+        if (toggleLanBtnEl) {
+          toggleLanBtnEl.classList.toggle('primary', lanExpanded);
+        }
         if (!lanPayload) {
           lanModeBadgeEl.textContent = '检测中';
           lanModeBadgeEl.className = 'badge';
@@ -721,6 +915,7 @@
       }
 
       async function loadLanPanel() {
+        if (isEmbedded) return;
         try {
           const payload = await Dambo.system.lanUrls(window.location.pathname);
           lanPayload = payload;
@@ -740,12 +935,26 @@
           renderMetaHeader(meta);
           const cfg = meta.config || {};
           const keys = Object.keys(cfg);
+          tabCountConfigEl.textContent = String(keys.length);
+          resetAllCfgBtnEl.disabled = keys.length === 0;
+          clearChildren(configListEl);
+
           if (keys.length === 0) {
-            secConfigEl.classList.add('hidden');
+            const box = document.createElement('div');
+            box.className = 'item-box';
+            const msg = document.createElement('div');
+            msg.className = 'muted';
+            msg.textContent = '当前插件未在 plugin.json 中定义可调 defaults 参数。';
+            box.appendChild(msg);
+            const row = document.createElement('div');
+            row.className = 'row';
+            row.appendChild(
+              makeBtn('查看数据存储', 'small', () => switchMainTab('data'))
+            );
+            box.appendChild(row);
+            configListEl.appendChild(box);
             return;
           }
-          secConfigEl.classList.remove('hidden');
-          clearChildren(configListEl);
 
           for (const key of keys) {
             const entry = cfg[key];
@@ -840,6 +1049,9 @@
 
           const pending = incoming.filter((r) => r.status === 'pending');
           const resolved = incoming.filter((r) => r.status !== 'pending');
+
+          tabCountAclEl.textContent = String(pending.length);
+          tabCountAclEl.classList.toggle('hidden', pending.length === 0);
 
           if (pending.length === 0) {
             renderEmpty(aclPendingEl, '暂无待审批申请');
@@ -1043,6 +1255,7 @@
       async function loadTopicsPanel() {
         try {
           const list = await Dambo.topics.list('@self');
+          tabCountTopicsEl.textContent = String(Array.isArray(list) ? list.length : 0);
           if (!list || list.length === 0) {
             renderEmpty(topicListEl, '当前插件尚未声明任何订阅源（首次 publish 或 configure 后自动列出）');
             return;
@@ -1243,10 +1456,14 @@
         return rawText;
       }
 
-      // Wire UI actions
+      for (const btn of mainTabBtns) {
+        btn.addEventListener('click', () => {
+          switchMainTab(btn.getAttribute('data-main-tab'));
+        });
+      }
+
       copyViewBtnEl.addEventListener('click', async () => {
-        const rel = (currentMeta && currentMeta.route) ? currentMeta.route : `/${Dambo.plugin.name}/`;
-        const fullUrl = new URL(rel, window.location.origin).toString();
+        const fullUrl = resolveCanonicalObsUrl(currentMeta);
         try {
           await navigator.clipboard.writeText(fullUrl);
           showToast('已复制展示页地址: ' + fullUrl);
@@ -1255,10 +1472,12 @@
         }
       });
 
-      toggleLanBtnEl.addEventListener('click', () => {
-        lanExpanded = !lanExpanded;
-        renderLanBox();
-      });
+      if (toggleLanBtnEl) {
+        toggleLanBtnEl.addEventListener('click', () => {
+          lanExpanded = !lanExpanded;
+          renderLanBox();
+        });
+      }
 
       lanCopyBtnEl.addEventListener('click', async () => {
         const text = lanUrlCodeEl.textContent ? lanUrlCodeEl.textContent.trim() : '';
@@ -1271,9 +1490,16 @@
         }
       });
 
-      reloadAllBtnEl.addEventListener('click', () => {
-        initManagePage();
-      });
+      if (reloadAllBtnEl) {
+        reloadAllBtnEl.addEventListener('click', () => {
+          initManagePage();
+        });
+      }
+      if (reloadEmbedBtnEl) {
+        reloadEmbedBtnEl.addEventListener('click', () => {
+          initManagePage();
+        });
+      }
 
       resetAllCfgBtnEl.addEventListener('click', async () => {
         try {
@@ -1372,6 +1598,22 @@
         }
       });
 
+      function applyInitialTabFromUrl() {
+        const qTab = urlParams.get('tab');
+        if (qTab) {
+          switchMainTab(qTab);
+          return;
+        }
+        const rawHash = window.location.hash || '';
+        if (rawHash.startsWith('#')) {
+          const hParams = new URLSearchParams(rawHash.slice(1));
+          const hTab = hParams.get('tab');
+          if (hTab) {
+            switchMainTab(hTab);
+          }
+        }
+      }
+
       async function tryHashTokenUnlock() {
         const rawHash = window.location.hash || '';
         if (!rawHash) return;
@@ -1413,6 +1655,7 @@
       }
 
       (async function bootManagePage() {
+        applyInitialTabFromUrl();
         try {
           await tryHashTokenUnlock();
         } catch (_) {
