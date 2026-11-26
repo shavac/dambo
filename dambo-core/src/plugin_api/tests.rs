@@ -72,6 +72,9 @@ impl TestServer {
             event_tx,
             recorder: None,
             auth: None,
+            collector: None,
+            event_engine: None,
+            state_store: None,
             last_danmaku_sent_at: Arc::new(std::sync::Mutex::new(None)),
             html_dir,
             cancel: cancel.clone(),
@@ -2308,4 +2311,223 @@ async fn test_system_status_global_acl_admin_guard_and_admin_sse() {
     assert_eq!(ev_name, "plugins.changed");
 
     srv.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_system_controls_require_admin_and_update_runtime_state() {
+    use crate::auth::{AuthManager, SessionData};
+    use crate::collector::CollectorManager;
+    use crate::config::EventConfig;
+    use crate::db::open_database;
+    use crate::event_engine::EventEngine;
+    use crate::recorder::Recorder;
+    use crate::state::StateStore;
+
+    let id = API_TEST_ID.fetch_add(1, Ordering::Relaxed);
+    let temp_dir =
+        std::env::temp_dir().join(format!("dambo_sys_ctrl_test_{}_{}", std::process::id(), id));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let html_dir = temp_dir.join("html");
+    fs::create_dir_all(html_dir.join("default")).unwrap();
+    fs::write(html_dir.join("default/plugin.html"), "<html>default</html>").unwrap();
+
+    let mut cfg = Config::default();
+    cfg.server.host = "0.0.0.0".to_string();
+    cfg.server.security_mode = SecurityMode::Strict;
+    cfg.server.admin_token = Some("sys-secret".to_string());
+    cfg.server.html_dir = html_dir.to_string_lossy().to_string();
+    cfg.record.enabled = true;
+    cfg.record.record_raw = false;
+
+    let db = open_database(&temp_dir.join("dambo.redb")).unwrap();
+    let state_store = Arc::new(StateStore::from_db(db.clone(), None));
+    state_store
+        .record_room_visit(12345, "主播甲", "测试标题")
+        .unwrap();
+
+    let auth = Arc::new(AuthManager::from_db(db.clone(), None));
+    auth.save_session(
+        SessionData {
+            sessdata: "sess".to_string(),
+            bili_jct: "jct".to_string(),
+            dede_user_id: "9999".to_string(),
+            uname: "TestUser".to_string(),
+            face: String::new(),
+        },
+        "TestUser".to_string(),
+        String::new(),
+    )
+    .unwrap();
+
+    let plugins = Arc::new(PluginRegistry::new(html_dir.clone()));
+    let plugin_store =
+        Arc::new(PluginStore::from_database_with_mode(db, cfg.server.security_mode).unwrap());
+    let plugin_hub = Arc::new(PluginEventHub::new());
+    let admin_sessions = Arc::new(AdminSessionStore::new());
+    let hub = Arc::new(StateHub::new(&FeedConfig::default()));
+    let (event_tx, _) = broadcast::channel(32);
+    let cancel = CancellationToken::new();
+    let collector = Arc::new(CollectorManager::with_cancel(cancel.child_token()));
+    let event_engine = Arc::new(EventEngine::new(&EventConfig::default()));
+    let recorder = Arc::new(Recorder::new(
+        cfg.record.enabled,
+        cfg.record.record_raw,
+        temp_dir.join("records"),
+        cfg.record.filename_pattern.clone(),
+    ));
+
+    let state = Arc::new(AppState {
+        config: Arc::new(cfg),
+        plugins,
+        plugin_store,
+        plugin_hub,
+        admin_sessions,
+        hub: hub.clone(),
+        event_tx,
+        recorder: Some(recorder.clone()),
+        auth: Some(auth.clone()),
+        collector: Some(collector.clone()),
+        event_engine: Some(event_engine),
+        state_store: Some(state_store.clone()),
+        last_danmaku_sent_at: Arc::new(std::sync::Mutex::new(None)),
+        html_dir,
+        cancel: cancel.clone(),
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+    let make_svc = build_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    let srv_cancel = cancel.clone();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, make_svc)
+            .with_graceful_shutdown(srv_cancel.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // 1. Strict unauthenticated requests must all fail with 401
+    for (method, path) in [
+        (reqwest::Method::GET, "/api/v1/system/room/options"),
+        (reqwest::Method::POST, "/api/v1/system/room/connect"),
+        (reqwest::Method::POST, "/api/v1/system/room/disconnect"),
+        (reqwest::Method::DELETE, "/api/v1/system/room/history/12345"),
+        (reqwest::Method::PUT, "/api/v1/system/record-raw"),
+        (reqwest::Method::POST, "/api/v1/system/auth/qr"),
+        (reqwest::Method::POST, "/api/v1/system/auth/qr/poll"),
+        (reqwest::Method::POST, "/api/v1/system/auth/logout"),
+    ] {
+        let mut req = client.request(method, format!("{}{}", base_url, path));
+        if path.ends_with("connect") {
+            req = req.json(&json!({ "target": "12345" }));
+        } else if path.ends_with("record-raw") {
+            req = req.json(&json!({ "enabled": true }));
+        } else if path.ends_with("poll") {
+            req = req.json(&json!({ "qrcode_key": "k" }));
+        }
+        assert_eq!(
+            req.send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+            "Expected 401 for {}",
+            path
+        );
+    }
+
+    // 2. Unlock admin cookie
+    let auth_res = client
+        .post(format!("{}/api/v1/auth/manage", base_url))
+        .header(header::ORIGIN, base_url.clone())
+        .json(&json!({ "token": "sys-secret" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(auth_res.status(), StatusCode::OK);
+    let cookie_pair = auth_res
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let admin_referer = format!("{}/", base_url);
+
+    // 3. Toggle record_raw
+    let rec_res = client
+        .put(format!("{}/api/v1/system/record-raw", base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, base_url.clone())
+        .json(&json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rec_res.status(), StatusCode::OK);
+    let rec_json: Value = rec_res.json().await.unwrap();
+    assert_eq!(rec_json["record_raw"], true);
+    assert!(recorder.is_record_raw_enabled());
+    assert_eq!(state_store.record_raw(), Some(true));
+
+    // 4. Delete history room & connect/disconnect room
+    let del_res = client
+        .delete(format!("{}/api/v1/system/room/history/12345", base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, base_url.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_res.status(), StatusCode::OK);
+    let del_json: Value = del_res.json().await.unwrap();
+    assert_eq!(del_json["history_rooms"].as_array().unwrap().len(), 0);
+
+    let conn_res = client
+        .post(format!("{}/api/v1/system/room/connect", base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, base_url.clone())
+        .json(&json!({ "target": "https://live.bilibili.com/21452505?from=test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conn_res.status(), StatusCode::OK);
+    let conn_json: Value = conn_res.json().await.unwrap();
+    assert_eq!(conn_json["room_id"], 21452505);
+    assert_eq!(state_store.current_room_id(), Some(21452505));
+
+    let disc_res = client
+        .post(format!("{}/api/v1/system/room/disconnect", base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, base_url.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disc_res.status(), StatusCode::OK);
+    assert_eq!(state_store.current_room_id(), None);
+    assert_eq!(hub.room_state().room_id, 0);
+
+    // 5. Logout Bilibili session
+    let logout_res = client
+        .post(format!("{}/api/v1/system/auth/logout", base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, base_url.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout_res.status(), StatusCode::OK);
+    assert!(!auth.current_state().is_login);
+
+    cancel.cancel();
+    collector.shutdown_and_wait().await;
+    let _ = handle.await;
+    let _ = fs::remove_dir_all(&temp_dir);
 }

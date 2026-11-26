@@ -169,8 +169,7 @@ async fn run_headless(
 
     log::info!("🚀 dambo-cli headless node started:");
     log::info!("   • Listen Address  : {}:{}", listen_host, cfg.server.port);
-    log::info!("   • Service Portal  : {}/", base_http);
-    log::info!("   • Admin Console   : {}/admin", base_http);
+    log::info!("   • Control Panel   : {}/", base_http);
     log::info!("   • OBS Overlay     : {}/default/", base_http);
     log::info!("   • Danmaku Monitor : {}/list/", base_http);
     log::info!("   • Plugin Manage   : {}/<plugin>/m", base_http);

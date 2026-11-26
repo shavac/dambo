@@ -9,28 +9,10 @@
   "app": {
     "withGlobalTauri": true,
     "macOSPrivateApi": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "Dambo Control Capsule",
-        "x": 100,
-        "y": 100,
-        "width": 580,
-        "minWidth": 520,
-        "maxWidth": 860,
-        "height": 56,
-        "minHeight": 56,
-        "maxHeight": 420,
-        "resizable": true,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": false,
-        "shadow": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:;",
-      "capabilities": ["default", "plugin-overlay"]
+      "capabilities": ["default", "admin-window", "plugin-overlay"]
     }
   },
   "bundle": {

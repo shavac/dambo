@@ -35,12 +35,6 @@
     body.is-embedded {
       padding: 12px 14px 28px;
     }
-    body.is-embedded .standalone-only {
-      display: none !important;
-    }
-    body:not(.is-embedded) .embed-only {
-      display: none !important;
-    }
     #dambo-manage-root {
       max-width: 1060px;
       margin: 0 auto;
@@ -51,13 +45,6 @@
     body.is-embedded #dambo-manage-root {
       max-width: none;
       gap: 12px;
-    }
-    .top-nav {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
     }
     .card {
       background: var(--panel);
@@ -116,20 +103,59 @@
       padding: 6px 12px;
       border-radius: 7px;
       font-size: 13px;
+      font-weight: 500;
+      line-height: 1.35;
       cursor: pointer;
       text-decoration: none;
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 6px;
       font-family: inherit;
+      transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
     }
-    button:hover, .btn-link:hover { border-color: var(--accent); }
+    button:hover, .btn-link:hover {
+      border-color: rgba(148, 163, 184, 0.65);
+      background: #223047;
+      color: #f8fafc;
+    }
     button:disabled { opacity: 0.48; cursor: not-allowed; }
+    button.active,
+    button.active:hover {
+      border-color: rgba(148, 163, 184, 0.5);
+      background: rgba(148, 163, 184, 0.18);
+      color: #f8fafc;
+      font-weight: 600;
+    }
     button.primary { background: var(--accent); color: #082f49; border-color: var(--accent); font-weight: 600; }
-    button.primary:hover { background: var(--accent-hover); }
+    button.primary:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+      color: #082f49;
+    }
+    button.primary:disabled {
+      background: var(--panel-alt);
+      border-color: var(--border);
+      color: var(--muted);
+      opacity: 0.65;
+    }
+    button.ok {
+      background: rgba(34, 197, 94, 0.16);
+      border-color: rgba(34, 197, 94, 0.5);
+      color: #86efac;
+    }
+    button.ok:hover {
+      background: rgba(34, 197, 94, 0.24);
+      border-color: rgba(34, 197, 94, 0.72);
+      color: #bbf7d0;
+    }
     button.danger { border-color: rgba(239, 68, 68, 0.5); color: #fca5a5; }
-    button.danger:hover { background: rgba(239, 68, 68, 0.15); }
-    button.small, .btn-link.small { padding: 4px 9px; font-size: 12px; }
+    button.danger:hover {
+      background: rgba(239, 68, 68, 0.16);
+      border-color: rgba(239, 68, 68, 0.75);
+      color: #fecaca;
+    }
+    button.small, .btn-link.small { padding: 5px 10px; font-size: 12px; line-height: 1.35; }
     input, select, textarea {
       background: var(--panel-alt);
       color: var(--text);
@@ -190,46 +216,6 @@
       color: var(--muted);
       word-break: break-word;
     }
-    .lan-box {
-      margin-top: 12px;
-      background: var(--panel-alt);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px 14px;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .lan-meta {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      min-width: 0;
-      flex: 1 1 260px;
-    }
-    .lan-url-code {
-      display: inline-block;
-      word-break: break-all;
-      max-width: 100%;
-    }
-    .lan-ip-btn.active {
-      border-color: var(--accent);
-      background: rgba(56, 189, 248, 0.16);
-      color: #7dd3fc;
-      font-weight: 600;
-    }
-    .lan-qr-img {
-      width: 96px;
-      height: 96px;
-      border-radius: 6px;
-      background: #ffffff;
-      padding: 4px;
-      border: 1px solid var(--border);
-      flex-shrink: 0;
-      display: block;
-    }
     .main-tabs {
       display: flex;
       flex-wrap: wrap;
@@ -253,8 +239,9 @@
       background: var(--panel-alt);
       border-color: transparent;
     }
-    .main-tab-btn.active {
-      background: rgba(56, 189, 248, 0.16);
+    button.main-tab-btn.active,
+    button.main-tab-btn.active:hover {
+      background: rgba(56, 189, 248, 0.14);
       border-color: rgba(56, 189, 248, 0.45);
       color: #e0f2fe;
     }
@@ -305,16 +292,31 @@
     }
     .tabs {
       display: inline-flex;
-      background: var(--panel-alt);
+      background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 3px;
-      gap: 4px;
+      padding: 2px;
+      gap: 2px;
     }
-    .tabs button.active {
-      background: var(--accent);
-      color: #082f49;
-      border-color: var(--accent);
+    .tabs button {
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+      padding: 5px 10px;
+      font-size: 12px;
+      line-height: 1.35;
+      border-radius: 6px;
+    }
+    .tabs button:hover {
+      border-color: transparent;
+      background: transparent;
+      color: var(--text);
+    }
+    .tabs button.active,
+    .tabs button.active:hover {
+      background: rgba(148, 163, 184, 0.18);
+      color: #f8fafc;
+      border-color: rgba(148, 163, 184, 0.5);
       font-weight: 600;
     }
     .toast {
@@ -367,18 +369,6 @@
 </head>
 <body>
   <main id="dambo-manage-root">
-    <!-- Top Bar (Standalone only) -->
-    <nav class="top-nav standalone-only" aria-label="导航栏">
-      <div class="row">
-        <a class="btn-link small" href="/admin">← 返回管理后台 (/admin)</a>
-        <a class="btn-link small" href="/">服务门户 (/)</a>
-      </div>
-      <div class="row">
-        <button type="button" class="small" id="toggle-lan-btn">局域网扫码</button>
-        <button type="button" class="small" id="reload-all-btn">刷新</button>
-      </div>
-    </nav>
-
     <!-- 1. Plugin Introduction Header -->
     <section class="card" id="sec-info">
       <div class="between">
@@ -386,8 +376,8 @@
           <h1 class="intro-title" id="plugin-title">正在加载插件信息…</h1>
           <div class="row" id="plugin-badges"></div>
         </div>
-        <div class="row embed-only">
-          <button type="button" class="small" id="reload-embed-btn">刷新面板</button>
+        <div class="row">
+          <button type="button" class="small" id="reload-all-btn">刷新</button>
         </div>
       </div>
 
@@ -399,28 +389,11 @@
           <code class="obs-url-code" id="obs-url-code">-</code>
         </div>
         <div class="row">
-          <button type="button" class="primary small" id="copy-view-btn">复制 OBS 地址</button>
-          <a class="btn-link small" id="open-view-link" href="./" target="_blank" rel="noopener">浏览器预览</a>
+          <button type="button" class="small" id="copy-view-btn">复制 OBS 链接</button>
         </div>
       </div>
 
       <div class="tech-line" id="plugin-tech-meta">-</div>
-
-      <div class="lan-box standalone-only hidden" id="lan-box">
-        <div class="lan-meta">
-          <div class="row">
-            <strong style="font-size: 12px;">局域网管理入口</strong>
-            <span class="badge" id="lan-mode-badge">检测中</span>
-          </div>
-          <div class="row hidden" id="lan-ip-tabs"></div>
-          <div class="row">
-            <code class="lan-url-code" id="lan-url-code">正在扫描本机局域网地址…</code>
-            <button type="button" class="small" id="lan-copy-btn">复制</button>
-          </div>
-          <div class="muted hidden" id="lan-local-note"></div>
-        </div>
-        <img class="lan-qr-img hidden" id="lan-qr-img" alt="局域网访问二维码" />
-      </div>
     </section>
 
     <!-- Main Workspace Tabs -->
@@ -502,7 +475,7 @@
         </label>
         <input type="text" id="ns-custom-input" placeholder="或输入新命名空间" style="width: 170px;" />
         <input type="text" id="prefix-filter-input" placeholder="前缀过滤 (prefix)" style="width: 160px;" />
-        <button type="button" id="refresh-data-btn">加载</button>
+        <button type="button" class="small" id="refresh-data-btn">加载</button>
         <button type="button" class="danger small" id="clear-ns-btn">清空当前命名空间</button>
       </div>
 
@@ -527,7 +500,7 @@
             <label>值 (JSON 或文本)<br /><input type="text" id="new-val-input" placeholder="例如 hello / 100 / true" style="width: 100%;" /></label>
           </div>
           <div class="row">
-            <button type="button" class="primary small" id="add-kv-btn">写入条目</button>
+            <button type="button" class="small" id="add-kv-btn">写入条目</button>
           </div>
         </div>
       </details>
@@ -572,18 +545,8 @@
       const pluginBadgesEl = document.getElementById('plugin-badges');
       const obsUrlCodeEl = document.getElementById('obs-url-code');
       const pluginTechMetaEl = document.getElementById('plugin-tech-meta');
-      const openViewLinkEl = document.getElementById('open-view-link');
       const copyViewBtnEl = document.getElementById('copy-view-btn');
-      const toggleLanBtnEl = document.getElementById('toggle-lan-btn');
       const reloadAllBtnEl = document.getElementById('reload-all-btn');
-      const reloadEmbedBtnEl = document.getElementById('reload-embed-btn');
-      const lanBoxEl = document.getElementById('lan-box');
-      const lanModeBadgeEl = document.getElementById('lan-mode-badge');
-      const lanIpTabsEl = document.getElementById('lan-ip-tabs');
-      const lanUrlCodeEl = document.getElementById('lan-url-code');
-      const lanCopyBtnEl = document.getElementById('lan-copy-btn');
-      const lanLocalNoteEl = document.getElementById('lan-local-note');
-      const lanQrImgEl = document.getElementById('lan-qr-img');
 
       const mainTabBtns = Array.from(document.querySelectorAll('[data-main-tab]'));
       const tabCountConfigEl = document.getElementById('tab-count-config');
@@ -625,9 +588,6 @@
       const toastEl = document.getElementById('toast');
 
       let currentMeta = null;
-      let lanPayload = null;
-      let lanSelectedIdx = 0;
-      let lanExpanded = false;
       let activeMainTab = 'config';
       let activeStore = 'persist';
       let activeNs = '';
@@ -708,9 +668,10 @@
         container.appendChild(div);
       }
 
-      function createTypedInput(entry, readValueOut) {
+      function createTypedInput(entry, readValueOut, onChange) {
         const t = entry.type;
         const meta = entry.meta || {};
+        const notifyChange = typeof onChange === 'function' ? onChange : null;
         const wrap = document.createElement('div');
         wrap.className = 'row';
         wrap.style.flex = '1';
@@ -719,6 +680,7 @@
           const cb = document.createElement('input');
           cb.type = 'checkbox';
           cb.checked = Boolean(entry.value);
+          if (notifyChange) cb.addEventListener('change', notifyChange);
           wrap.appendChild(cb);
           readValueOut.get = () => cb.checked;
           return wrap;
@@ -743,6 +705,10 @@
             });
             wrap.appendChild(numReadout);
           }
+          if (notifyChange) {
+            inp.addEventListener('input', notifyChange);
+            inp.addEventListener('change', notifyChange);
+          }
           readValueOut.get = () => Number(inp.value);
           return wrap;
         }
@@ -762,6 +728,7 @@
             if (o.value === String(entry.value)) o.selected = true;
             sel.appendChild(o);
           }
+          if (notifyChange) sel.addEventListener('change', notifyChange);
           wrap.appendChild(sel);
           readValueOut.get = () => sel.value;
           return wrap;
@@ -772,6 +739,10 @@
             const ta = document.createElement('textarea');
             ta.value = String(entry.value ?? '');
             if (meta.placeholder) ta.placeholder = meta.placeholder;
+            if (notifyChange) {
+              ta.addEventListener('input', notifyChange);
+              ta.addEventListener('change', notifyChange);
+            }
             wrap.appendChild(ta);
             readValueOut.get = () => ta.value;
             return wrap;
@@ -783,6 +754,10 @@
           inp.value = String(entry.value ?? '');
           if (meta.placeholder) inp.placeholder = meta.placeholder;
           if (meta.format !== 'color') inp.style.minWidth = '240px';
+          if (notifyChange) {
+            inp.addEventListener('input', notifyChange);
+            inp.addEventListener('change', notifyChange);
+          }
           wrap.appendChild(inp);
           readValueOut.get = () => inp.value;
           return wrap;
@@ -799,6 +774,7 @@
             const cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.checked = selected.has(val);
+            if (notifyChange) cb.addEventListener('change', notifyChange);
             const span = document.createElement('span');
             span.textContent = labelText;
             lbl.appendChild(cb);
@@ -812,6 +788,10 @@
 
         const ta = document.createElement('textarea');
         ta.value = JSON.stringify(entry.value, null, 2);
+        if (notifyChange) {
+          ta.addEventListener('input', notifyChange);
+          ta.addEventListener('change', notifyChange);
+        }
         wrap.appendChild(ta);
         readValueOut.get = () => JSON.parse(ta.value);
         return wrap;
@@ -832,7 +812,6 @@
 
         const obsUrl = resolveCanonicalObsUrl(meta);
         obsUrlCodeEl.textContent = obsUrl;
-        openViewLinkEl.href = meta.route || `/${meta.plugin_name}/`;
 
         clearChildren(pluginBadgesEl);
         pluginBadgesEl.appendChild(makeBadge(`v${meta.version}`, 'accent'));
@@ -840,93 +819,10 @@
         if (meta.obs && (meta.obs.width || meta.obs.height)) {
           pluginBadgesEl.appendChild(makeBadge(`OBS ${meta.obs.width || '?'}×${meta.obs.height || '?'}`));
         }
-        if (!isEmbedded && lanPayload && lanPayload.security_mode) {
-          const isOpen = lanPayload.security_mode === 'open';
-          pluginBadgesEl.appendChild(
-            makeBadge(
-              isOpen ? 'Open 模式' : 'Strict 模式',
-              isOpen ? 'warn' : 'ok'
-            )
-          );
-        }
 
         const cfgCount = Object.keys(meta.config || {}).length;
         const topicCount = Array.isArray(meta.topics) ? meta.topics.length : 0;
         pluginTechMetaEl.textContent = `目录: ${meta.plugin_name} · ID: ${meta.plugin_id} · 数据域: ${meta.namedomain} · 配置项: ${cfgCount} · Topics: ${topicCount}`;
-      }
-
-      function renderLanBox() {
-        lanBoxEl.classList.toggle('hidden', isEmbedded || !lanExpanded);
-        if (toggleLanBtnEl) {
-          toggleLanBtnEl.classList.toggle('primary', lanExpanded);
-        }
-        if (!lanPayload) {
-          lanModeBadgeEl.textContent = '检测中';
-          lanModeBadgeEl.className = 'badge';
-          lanUrlCodeEl.textContent = '正在获取局域网地址…';
-          lanIpTabsEl.classList.add('hidden');
-          lanLocalNoteEl.classList.add('hidden');
-          lanQrImgEl.classList.add('hidden');
-          return;
-        }
-
-        const isOpen = lanPayload.security_mode === 'open';
-        lanModeBadgeEl.textContent = isOpen ? 'Open 模式' : 'Strict 模式';
-        lanModeBadgeEl.className = isOpen ? 'badge warn' : 'badge accent';
-
-        const urls = Array.isArray(lanPayload.urls) ? lanPayload.urls : [];
-        if (lanPayload.local_only || urls.length === 0) {
-          clearChildren(lanIpTabsEl);
-          lanIpTabsEl.classList.add('hidden');
-          lanUrlCodeEl.textContent = lanPayload.local_url || window.location.href;
-          lanLocalNoteEl.textContent = '仅限本机访问（当前监听回环地址或未检测到局域网私网 IPv4）';
-          lanLocalNoteEl.classList.remove('hidden');
-          lanQrImgEl.classList.add('hidden');
-          return;
-        }
-
-        if (lanSelectedIdx >= urls.length) {
-          lanSelectedIdx = 0;
-        }
-        const activeEntry = urls[lanSelectedIdx];
-        lanLocalNoteEl.classList.add('hidden');
-        lanUrlCodeEl.textContent = activeEntry.url;
-
-        if (activeEntry.qr_svg) {
-          lanQrImgEl.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(activeEntry.qr_svg);
-          lanQrImgEl.classList.remove('hidden');
-        } else {
-          lanQrImgEl.classList.add('hidden');
-        }
-
-        clearChildren(lanIpTabsEl);
-        if (urls.length > 1) {
-          lanIpTabsEl.classList.remove('hidden');
-          urls.forEach((entry, idx) => {
-            const btn = makeBtn(entry.ip, idx === lanSelectedIdx ? 'small lan-ip-btn active' : 'small lan-ip-btn', () => {
-              lanSelectedIdx = idx;
-              renderLanBox();
-            });
-            lanIpTabsEl.appendChild(btn);
-          });
-        } else {
-          lanIpTabsEl.classList.add('hidden');
-        }
-      }
-
-      async function loadLanPanel() {
-        if (isEmbedded) return;
-        try {
-          const payload = await Dambo.system.lanUrls(window.location.pathname);
-          lanPayload = payload;
-          renderLanBox();
-          if (currentMeta) {
-            renderMetaHeader(currentMeta);
-          }
-        } catch (err) {
-          lanLocalNoteEl.textContent = (err && err.message) ? err.message : '获取局域网地址失败';
-          lanLocalNoteEl.classList.remove('hidden');
-        }
       }
 
       async function loadConfigPanel(forceMeta) {
@@ -981,20 +877,29 @@
             const actions = document.createElement('div');
             actions.className = 'row';
             const reader = {};
-            const inputNode = createTypedInput(entry, reader);
+            const initialSnapshot = JSON.stringify(entry.value);
+            const saveBtn = makeBtn('保存', 'small', async () => {
+              try {
+                const nextVal = reader.get();
+                await Dambo.config.set(key, nextVal);
+                showToast(`已保存配置 ${key}`);
+                await loadConfigPanel(true);
+              } catch (err) {
+                handleApiError(err, '保存配置失败');
+              }
+            });
+            const syncDirty = () => {
+              let dirty = true;
+              try {
+                dirty = JSON.stringify(reader.get()) !== initialSnapshot;
+              } catch (_) {
+                dirty = true;
+              }
+              saveBtn.classList.toggle('primary', dirty);
+            };
+            const inputNode = createTypedInput(entry, reader, syncDirty);
 
-            actions.appendChild(
-              makeBtn('保存', 'primary small', async () => {
-                try {
-                  const nextVal = reader.get();
-                  await Dambo.config.set(key, nextVal);
-                  showToast(`已保存配置 ${key}`);
-                  await loadConfigPanel(true);
-                } catch (err) {
-                  handleApiError(err, '保存配置失败');
-                }
-              })
-            );
+            actions.appendChild(saveBtn);
 
             if (entry.is_overridden) {
               actions.appendChild(
@@ -1080,7 +985,7 @@
               const controls = document.createElement('div');
               controls.className = 'row';
               const sel = makeLevelSelect(allowedGrantLevels(rec.resource), rec.requested_level);
-              const approveBtn = makeBtn('批准', 'primary small', async () => {
+              const approveBtn = makeBtn('批准', 'ok small', async () => {
                 try {
                   await Dambo.acl.set(rec.requester, { resource: rec.resource, level: sel.value });
                   showToast(`已授予 ${rec.requester} -> ${rec.resource} (${sel.value})`);
@@ -1147,7 +1052,7 @@
               controls.className = 'row';
               if (isAuto) {
                 controls.appendChild(
-                  makeBtn('转为明确授权', 'primary small', async () => {
+                  makeBtn('转为明确授权', 'ok small', async () => {
                     try {
                       await Dambo.acl.set(rec.requester, {
                         resource: rec.resource,
@@ -1405,17 +1310,29 @@
             const controls = document.createElement('div');
             controls.className = 'row';
             const reader = {};
-            const inputNode = createTypedInput(entry, reader);
+            let initialSnapshot = JSON.stringify(entry.value);
 
-            const saveBtn = makeBtn('更新', 'primary small', async () => {
+            const saveBtn = makeBtn('更新', 'small', async () => {
               try {
                 const nextVal = reader.get();
                 await currentStoreHandle().set(ns, key, nextVal);
+                initialSnapshot = JSON.stringify(nextVal);
+                saveBtn.classList.remove('primary');
                 showToast(`已更新 ${ns}/${key}`);
               } catch (err) {
                 handleApiError(err, '更新失败');
               }
             });
+            const syncDirty = () => {
+              let dirty = true;
+              try {
+                dirty = JSON.stringify(reader.get()) !== initialSnapshot;
+              } catch (_) {
+                dirty = true;
+              }
+              saveBtn.classList.toggle('primary', dirty);
+            };
+            const inputNode = createTypedInput(entry, reader, syncDirty);
             const delBtn = makeBtn('删除', 'danger small', async () => {
               try {
                 await currentStoreHandle().delete(ns, key);
@@ -1466,37 +1383,14 @@
         const fullUrl = resolveCanonicalObsUrl(currentMeta);
         try {
           await navigator.clipboard.writeText(fullUrl);
-          showToast('已复制展示页地址: ' + fullUrl);
+          showToast('已复制，请粘贴到 OBS 浏览器源');
         } catch (_) {
-          showToast('展示页地址: ' + fullUrl);
-        }
-      });
-
-      if (toggleLanBtnEl) {
-        toggleLanBtnEl.addEventListener('click', () => {
-          lanExpanded = !lanExpanded;
-          renderLanBox();
-        });
-      }
-
-      lanCopyBtnEl.addEventListener('click', async () => {
-        const text = lanUrlCodeEl.textContent ? lanUrlCodeEl.textContent.trim() : '';
-        if (!text) return;
-        try {
-          await navigator.clipboard.writeText(text);
-          showToast('已复制局域网访问地址: ' + text);
-        } catch (_) {
-          showToast('局域网访问地址: ' + text);
+          showToast('OBS 浏览器源: ' + fullUrl);
         }
       });
 
       if (reloadAllBtnEl) {
         reloadAllBtnEl.addEventListener('click', () => {
-          initManagePage();
-        });
-      }
-      if (reloadEmbedBtnEl) {
-        reloadEmbedBtnEl.addEventListener('click', () => {
           initManagePage();
         });
       }
@@ -1647,7 +1541,6 @@
         }
         await loadConfigPanel(true);
         await Promise.all([
-          loadLanPanel(),
           loadAclPanel(),
           loadTopicsPanel(),
           loadNamespacesAndEntries(),

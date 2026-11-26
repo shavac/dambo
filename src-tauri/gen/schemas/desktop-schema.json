@@ -177,6 +177,114 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the close_plugin_desktop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-close-plugin-desktop",
+          "markdownDescription": "Enables the close_plugin_desktop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_i18n command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-i18n",
+          "markdownDescription": "Enables the get_i18n command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_plugins command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-plugins",
+          "markdownDescription": "Enables the get_plugins command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-folder",
+          "markdownDescription": "Enables the open_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_in_browser command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-in-browser",
+          "markdownDescription": "Enables the open_in_browser command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_plugin_desktop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-plugin-desktop",
+          "markdownDescription": "Enables the open_plugin_desktop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_plugins_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-plugins-dir",
+          "markdownDescription": "Enables the open_plugins_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the refresh_qr_code command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-refresh-qr-code",
+          "markdownDescription": "Enables the refresh_qr_code command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_always_on_top command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-always-on-top",
+          "markdownDescription": "Enables the set_always_on_top command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the close_plugin_desktop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-close-plugin-desktop",
+          "markdownDescription": "Denies the close_plugin_desktop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_i18n command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-i18n",
+          "markdownDescription": "Denies the get_i18n command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_plugins command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-plugins",
+          "markdownDescription": "Denies the get_plugins command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_folder command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-folder",
+          "markdownDescription": "Denies the open_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_in_browser command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-in-browser",
+          "markdownDescription": "Denies the open_in_browser command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_plugin_desktop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-plugin-desktop",
+          "markdownDescription": "Denies the open_plugin_desktop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_plugins_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-plugins-dir",
+          "markdownDescription": "Denies the open_plugins_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the refresh_qr_code command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-refresh-qr-code",
+          "markdownDescription": "Denies the refresh_qr_code command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_always_on_top command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-always-on-top",
+          "markdownDescription": "Denies the set_always_on_top command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

@@ -1,7 +1,6 @@
 {
-  "tray.toggle_panel": "パネルを表示 / 非表示",
-  "tray.open_admin": "管理コンソールを開く",
-  "tray.open_portal": "プラグインポータルを開く",
+  "tray.toggle_panel": "メインウィンドウを表示 / 非表示",
+  "tray.open_admin": "コントロールパネルを開く",
   "tray.recent_rooms": "履歴ルーム",
   "tray.recent_empty": "履歴ルームがありません",
   "tray.plugin_menu": "プラグイン",

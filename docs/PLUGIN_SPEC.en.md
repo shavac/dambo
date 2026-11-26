@@ -337,4 +337,4 @@ Verify all 5 points before outputting the code:
 5. End with a clear 3-step install guide:
    - In Dambo's capsule, click **Plugins -> Open Plugins Folder** (`static/html/`), create `<plugin-name>/`, and drop all generated files inside;
    - No restart needed (~200ms hot-reload)—click **Open on Desktop** or **Copy OBS URL** (such as `http://localhost:3838/default/` for the default overlay or `http://localhost:3838/<plugin-name>/`) and add it as an OBS Browser Source;
-   - Click **Manage** in Dambo or open the unified Admin Console (`http://localhost:3838/admin`), or visit `http://localhost:<port>/<plugin-name>/m` to edit settings, manage ACLs, or use your custom control panel.
+   - In the unified control panel (`http://localhost:3838/`), click **Settings / Setup** (or **Manage** in Developer View, or visit `http://localhost:<port>/<plugin-name>/m` directly) to edit settings, manage ACLs, or use your custom control panel.

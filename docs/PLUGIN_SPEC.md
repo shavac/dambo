@@ -337,4 +337,4 @@ await Dambo.plugin.unlockManage(token)
 5. 在回答最后附上清晰的 3 步使用指引：
    - 在 Dambo 控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`），新建 `<plugin-name>` 文件夹并将生成的全部文件放入其中；
    - 无需重启 Dambo（约 200ms 自动识别），点击 **桌面打开** 或 **复制 OBS URL**（格式为 `http://localhost:3838/<plugin-name>/`，内置默认挂件示例为 `http://localhost:3838/default/`）添加到 OBS「浏览器」源；
-   - 在控制舱或统一后台 `http://localhost:3838/admin` 点击 **管理页**（或直接访问 `http://localhost:<port>/<plugin-name>/m`）即可实时调整配置、审批跨插件权限或操作自定义管理面板。
+   - 在统一控制面板 `http://localhost:3838/` 点击 **设置 / 玩法**（开发者视图下点击 **管理**，或直接访问 `http://localhost:<port>/<plugin-name>/m`）即可实时调整配置、审批跨插件权限或操作自定义管理面板。

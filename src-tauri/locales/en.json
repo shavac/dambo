@@ -1,7 +1,6 @@
 {
-  "tray.toggle_panel": "Show / Hide Panel",
-  "tray.open_admin": "Open Admin Console",
-  "tray.open_portal": "Open Plugin Portal",
+  "tray.toggle_panel": "Show / Hide Main Window",
+  "tray.open_admin": "Open Control Panel",
   "tray.recent_rooms": "Recent Rooms",
   "tray.recent_empty": "No Recent Rooms",
   "tray.plugin_menu": "Plugins",

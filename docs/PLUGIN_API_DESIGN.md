@@ -30,7 +30,7 @@
 
 ### 2.1 目录结构与文件约定
 所有插件统一存放在 `static/html/{plugin_name}/` 目录下：
-- **`plugin_name`**：严格等于插件目录名，仅允许 ASCII 字母、数字、`-` 与 `_`，且不得与实际占用的 3 个系统保留路由词冲突（`ws`、`api`、`sdk`；不再占用 `static`、`assets`、`health` 等额外顶层路径，健康检查统一挂在 `/api/v1/health`）。
+- **`plugin_name`**：严格等于插件目录名，仅允许 ASCII 字母、数字、`-` 与 `_`，且不得与实际占用的 4 个系统保留路由词冲突（`ws`、`api`、`sdk`、`admin`；不再占用 `static`、`assets`、`health` 等额外顶层路径，健康检查统一挂在 `/api/v1/health`）。
 - **合法插件唯一识别条件**：目录根下存在 `plugin.html`（**不兼容旧 `index.html`**，缺少 `plugin.html` 的目录不会被注册为插件）。
 
 标准目录文件结构如下：
@@ -93,20 +93,22 @@
 ```
 
 ### 2.3 URL 路由规范
-系统保留路径优先匹配（`/sdk/`、`/ws`、`/ws/event`、`/api/`，**不新增 WebSocket 端点**），其余路径按目录与安全规则映射：
+系统保留路径优先匹配（`/`、`/admin`、`/sdk/`、`/ws`、`/ws/event`、`/api/`，**不新增 WebSocket 端点**；`admin` 为严格保留字，**不存在 `/admin/m`**），其余路径按目录与安全规则映射：
 
 | 路由 | 匹配优先级 | 行为 |
 |---|---|---|
-| `GET /` | 系统 / 默认挂件 | 直接返回 `default` 挂件展示页（映射 `static/html/default/plugin.html`，不做 `302` 跳转） |
+| `GET /` | 系统唯一总控入口 | 返回系统唯一完整管理前端（`admin.html`，同时作为桌面端 `dambo-ui` 主窗页面；默认进入极简普通主播模式，可通过右上角「🛠️ 开发者视图」开关展开完整运维面板）。Strict 模式下附加防嵌套响应头 `X-Frame-Options: DENY` 与 `Content-Security-Policy: frame-ancestors 'none'` |
+| `GET /admin` | 系统保留（兼容跳转） | **`301` 永久重定向至 `/`**（完整透传保留原始 Query String）；严格拦截 `/admin/m` 返回 `404` |
+| `GET /admin/` | 系统保留（兼容跳转） | **`301` 永久重定向至 `/`**（完整透传保留原始 Query String） |
 | `GET /sdk/dambo.js` | 系统保留 | 返回内置官方 SDK 脚本 |
 | `GET /ws` | 系统保留 | 既有 Channel A 弹幕 WebSocket |
 | `GET /ws/event` | 系统保留 | 既有 Channel B 聚合事件 WebSocket |
 | `Any /api/v1/*` | 系统保留 | Layer 1 REST + SSE 平台接口 |
 | `GET /{plugin_name}` | 插件入口 | **`301` 永久重定向至 `/{plugin_name}/`**（强制补全尾斜杠并**完整透传保留原始 Query String**，确保页面相对路径与 `?timeout=300` 等查询参数不丢失） |
-| `GET /{plugin_name}/` | 插件展示端 | 映射 `static/html/{plugin_name}/plugin.html` |
-| `GET /{plugin_name}/m` | 插件管理端 | 映射 `static/html/{plugin_name}/manage.html`；文件缺失时返回宿主内置兜底管理页（HTTP `200`，URL 不变）。统一附加防嵌套响应头 `X-Frame-Options: DENY` 与 `Content-Security-Policy: frame-ancestors 'none'`；当来自本机（`127.0.0.1`/`::1`）且为真实文档导航（`Sec-Fetch-Dest: document`）时，通过 `Set-Cookie` 自动签发统一管理态会话 Cookie `dambo_admin`（`Path=/api/v1/; HttpOnly; SameSite=Strict`） |
+| `GET /{plugin_name}/` | 插件展示端 | 映射 `static/html/{plugin_name}/plugin.html`（第三层只读透明画面，仅供 OBS Browser Source 与桌面悬浮窗加载） |
+| `GET /{plugin_name}/m` | 插件管理端 | 纯净的单插件控制面（无全局导航或系统级设置）；映射 `static/html/{plugin_name}/manage.html`，缺失时返回宿主内置兜底页（HTTP `200`，URL 不变）。Strict 模式下附加 `X-Frame-Options: SAMEORIGIN` 与 `Content-Security-Policy: frame-ancestors 'self'`，支持独立标签页打开与被 `/` 右侧抽屉 `<iframe>` 内嵌加载；当来自授权来源且为真实文档/`iframe` 导航时自动签发 `HttpOnly` 会话 Cookie `dambo_admin` |
 | `GET /{plugin_name}/m/` | 插件管理端 | **`301` 永久重定向至 `/{plugin_name}/m`**（去除尾斜杠并**完整透传保留原始 Query String**，使自定义管理页内相对路径如 `manage.css`、`./asset.png` 直接复用同目录） |
-| `GET /{plugin_name}/{*path}` | 插件资源 | 映射 `static/html/{plugin_name}/{path}`（保留路径规范化与目录穿越拦截；`m` 由精确路由优先接管） |
+| `GET /{plugin_name}/{*path}` | 插件资源 | 映射 `static/html/{plugin_name}/{path}`（保留路径规范化与目录穿越拦截；若规范化子路径精确匹配 `manage.html`，则返回 **`301` 重定向至 `/{plugin_name}/m`** 并保留 Query，确保自定义管理页统一经过 `serve_plugin_manage` 安全头与会话保护） |
 
 ---
 

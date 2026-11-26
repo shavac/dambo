@@ -1734,19 +1734,7 @@
         }
         const segments = window.location.pathname.split('/').filter(Boolean);
         if (segments.length === 0) {
-            let rootPlugin = 'default';
-            if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
-                const baseEl = document.querySelector('base[href]');
-                const baseHref = baseEl ? baseEl.getAttribute('href') || '' : '';
-                const baseParts = baseHref.split('/').filter(Boolean);
-                if (baseParts.length > 0) {
-                    const candidate = decodePluginSegment(baseParts[0]);
-                    if (candidate) {
-                        rootPlugin = candidate;
-                    }
-                }
-            }
-            return { pluginName: rootPlugin, mode: 'view' };
+            return { pluginName: '', mode: 'view' };
         }
         const first = decodePluginSegment(segments[0]);
         if (!first) {

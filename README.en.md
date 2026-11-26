@@ -143,10 +143,10 @@ No coding required—turn an idea into a working plugin in two simple steps with
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /` | Open the unified service portal (LAN URLs/QR codes, `/admin` shortcut, and plugin catalog with one-click OBS URL copy such as `http://localhost:3838/default/`) |
-| `GET /admin` | Open the unified Admin Console (live overview, chat input, embedded plugin drawer, ACL approvals, and KV/Topic data inspector) |
+| `GET /` | Open the unified control panel (default Streamer Mode for live room controls, OBS link copy, and plugin settings drawer; toggle `Developer View` for live overview, LAN QR codes, ACL approvals, and KV/Topic data inspector) |
+| `GET /admin` | Compatibility alias (`301` permanent redirect to `/`, preserving query parameters) |
 | `GET /{plugin}/` | Open any built-in or custom plugin view page in a browser / OBS Browser Source (e.g. `http://localhost:3838/default/`) |
-| `GET /{plugin}/m` | Open the plugin configuration, storage & ACL management page in a browser or inside `/admin` |
+| `GET /{plugin}/m` | Open the plugin configuration, storage & ACL management page in a browser or inside the `/` drawer |
 | `GET /sdk/dambo.js` | Embedded zero-dependency Pure-Web Plugin SDK |
 | `GET /api/v1/*` | Layer 1 Plugin Platform HTTP REST + SSE APIs |
 | `GET /ws` | Channel A WebSocket — real-time danmaku & overlay event feed (`Snapshot`, `Event`, `RoomState`) |

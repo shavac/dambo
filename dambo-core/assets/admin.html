@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Dambo · 统一管理后台</title>
+  <title>Dambo · 控制面板</title>
   <style>
     :root {
       color-scheme: dark;
@@ -90,11 +90,17 @@
     }
     .nav-btn:hover {
       background: var(--panel);
+      border-color: transparent;
       color: var(--text);
     }
     .nav-btn.active {
       background: rgba(56, 189, 248, 0.14);
       border-color: rgba(56, 189, 248, 0.45);
+      color: #e0f2fe;
+    }
+    .nav-btn.active:hover {
+      background: rgba(56, 189, 248, 0.18);
+      border-color: rgba(56, 189, 248, 0.5);
       color: #e0f2fe;
     }
     .sidebar-foot {
@@ -233,16 +239,18 @@
       color: var(--muted);
       padding: 4px 10px;
       font-size: 12px;
+      line-height: 1.35;
       border-radius: 6px;
     }
     .seg-btn:hover {
       border-color: transparent;
+      background: transparent;
       color: var(--text);
     }
     .seg-btn.active {
-      background: rgba(56, 189, 248, 0.16);
-      color: #e0f2fe;
-      border-color: rgba(56, 189, 248, 0.4);
+      background: rgba(148, 163, 184, 0.18);
+      color: #f8fafc;
+      border-color: rgba(148, 163, 184, 0.5);
     }
     .plugin-card {
       display: flex;
@@ -351,15 +359,18 @@
       font: inherit;
       font-size: 13px;
       font-weight: 600;
+      line-height: 1.35;
       cursor: pointer;
       text-decoration: none;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
+      transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
     }
     button:hover, .btn-link:hover {
-      border-color: var(--accent);
+      border-color: rgba(148, 163, 184, 0.65);
+      background: #223047;
       color: #fff;
     }
     button:disabled {
@@ -376,24 +387,52 @@
       border-color: var(--accent-hover);
       color: #082f49;
     }
+    button.primary:disabled, .btn-link.primary:disabled {
+      background: var(--panel-alt);
+      border-color: var(--border);
+      color: var(--muted);
+      opacity: 0.65;
+    }
     button.ok {
       background: rgba(34, 197, 94, 0.16);
       border-color: rgba(34, 197, 94, 0.5);
       color: #86efac;
+    }
+    button.ok:hover {
+      background: rgba(34, 197, 94, 0.24);
+      border-color: rgba(34, 197, 94, 0.72);
+      color: #bbf7d0;
     }
     button.danger {
       background: rgba(239, 68, 68, 0.14);
       border-color: rgba(239, 68, 68, 0.5);
       color: #fca5a5;
     }
+    button.danger:hover {
+      background: rgba(239, 68, 68, 0.22);
+      border-color: rgba(239, 68, 68, 0.72);
+      color: #fecaca;
+    }
     button.warn {
       background: rgba(245, 158, 11, 0.14);
       border-color: rgba(245, 158, 11, 0.5);
       color: #fcd34d;
     }
-    button.sm {
-      padding: 4px 10px;
+    button.warn:hover {
+      background: rgba(245, 158, 11, 0.22);
+      border-color: rgba(245, 158, 11, 0.72);
+      color: #fde68a;
+    }
+    button.sm, .btn-link.sm {
+      padding: 5px 10px;
       font-size: 12px;
+      line-height: 1.35;
+    }
+    button.lan-ip-btn.active,
+    button.lan-ip-btn.active:hover {
+      background: rgba(148, 163, 184, 0.18);
+      border-color: rgba(148, 163, 184, 0.5);
+      color: #f8fafc;
     }
     input, select, textarea {
       background: var(--bg);
@@ -599,14 +638,161 @@
       border: 1px dashed var(--border);
       border-radius: 10px;
     }
+    .desktop-only,
+    .desktop-only-block {
+      display: none !important;
+    }
+    body.is-tauri-desktop .desktop-only {
+      display: inline-flex !important;
+    }
+    body.is-tauri-desktop .desktop-only-block {
+      display: flex !important;
+    }
+    #btn-desktop-pin.active,
+    #btn-desktop-pin.active:hover {
+      background: rgba(148, 163, 184, 0.18);
+      border-color: rgba(148, 163, 184, 0.5);
+      color: #f8fafc;
+    }
+    .room-chip-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .room-chip-label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .room-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .room-chip-wrap {
+      display: inline-flex;
+      align-items: stretch;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--panel-alt);
+      max-width: 100%;
+    }
+    .room-chip-wrap.active {
+      border-color: rgba(148, 163, 184, 0.65);
+      background: rgba(148, 163, 184, 0.16);
+    }
+    .room-chip-wrap button {
+      border: none;
+      border-radius: 0;
+      background: transparent;
+    }
+    .room-chip-wrap button.chip-main {
+      max-width: 280px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      justify-content: flex-start;
+    }
+    .room-chip-wrap button.chip-del {
+      border-left: 1px solid var(--border);
+      color: var(--muted);
+      padding: 4px 8px;
+    }
+    .room-chip-wrap button.chip-del:hover {
+      color: #fca5a5;
+      background: rgba(239, 68, 68, 0.16);
+    }
+    .bili-qr-center {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    #bili-qr-box {
+      width: 196px;
+      height: 196px;
+    }
+    .dev-only,
+    .dev-only-block {
+      display: none !important;
+    }
+    body.dev-mode .dev-only {
+      display: inline-flex !important;
+    }
+    body.dev-mode .dev-only-block {
+      display: flex !important;
+    }
+    body.dev-mode .streamer-only {
+      display: none !important;
+    }
+    body:not(.dev-mode) .sidebar,
+    body:not(.dev-mode) .mobile-nav {
+      display: none !important;
+    }
+    body:not(.dev-mode) .main-shell {
+      padding-bottom: 0;
+    }
+    .dev-workspace {
+      display: none;
+      flex-direction: column;
+      gap: 16px;
+    }
+    body.dev-mode .dev-workspace {
+      display: flex;
+    }
+    #btn-dev-mode.active,
+    #btn-dev-mode.active:hover {
+      background: rgba(148, 163, 184, 0.18);
+      border-color: rgba(148, 163, 184, 0.5);
+      color: #f8fafc;
+    }
+    .streamer-home {
+      max-width: 920px;
+      width: 100%;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .streamer-feed-box {
+      max-height: 260px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-right: 4px;
+    }
+    .streamer-acl-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .streamer-acl-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: var(--panel-alt);
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .streamer-plugins-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 14px;
+    }
   </style>
 </head>
 <body>
   <div id="dambo-admin-root">
     <aside class="sidebar" aria-label="主导航">
       <div class="brand">
-        <h1>Dambo Admin</h1>
-        <span class="muted">统一服务管理控制台</span>
+        <h1>Dambo</h1>
+        <span class="muted">服务控制与开发者控制台</span>
       </div>
       <nav class="nav-list" id="desktop-nav">
         <button type="button" class="nav-btn active" data-view="overview">
@@ -629,25 +815,89 @@
           <span id="sse-badge-side" class="badge">SSE: 初始化</span>
           <span id="ws-badge-side" class="badge">WS: 初始化</span>
         </div>
-        <a class="btn-link" href="/">返回服务门户 (/)</a>
+        <div class="row desktop-only-block" aria-label="桌面端快捷目录">
+          <button type="button" id="btn-folder-config" class="sm" style="flex: 1;">配置</button>
+          <button type="button" id="btn-folder-record" class="sm" style="flex: 1;">录制</button>
+          <button type="button" id="btn-folder-log" class="sm" style="flex: 1;">日志</button>
+        </div>
       </div>
     </aside>
 
     <div class="main-shell">
       <header class="topbar">
         <div class="row">
-          <strong id="topbar-view-title">实时概览</strong>
+          <strong class="streamer-only">Dambo</strong>
+          <strong id="topbar-view-title" class="dev-only">实时概览</strong>
           <span id="topbar-room-pill" class="badge">房间状态未知</span>
-          <span id="topbar-mode-pill" class="badge">模式: -</span>
+          <span id="topbar-mode-pill" class="badge dev-only">模式: -</span>
           <span id="topbar-auth-pill" class="badge">管理员未解锁</span>
         </div>
         <div class="row">
+          <button type="button" id="btn-desktop-pin" class="sm desktop-only">窗口置顶</button>
           <button type="button" id="btn-open-auth" class="sm">解锁口令</button>
-          <button type="button" id="btn-refresh-all" class="sm">刷新全部</button>
+          <button type="button" id="btn-refresh-all" class="sm dev-only">刷新全部</button>
+          <button type="button" id="btn-dev-mode" class="sm" role="switch" aria-checked="false">🛠️ 开发者视图</button>
         </div>
       </header>
 
       <main class="content">
+        <!-- 普通主播模式（默认首屏） -->
+        <div id="streamer-home" class="streamer-home streamer-only">
+          <div id="streamer-acl-banner" class="card pending-alert stack" style="display: none;">
+            <div class="between">
+              <strong>插件权限确认</strong>
+              <span id="streamer-acl-count" class="badge warn">0 条待确认</span>
+            </div>
+            <div id="streamer-acl-list" class="streamer-acl-list"></div>
+          </div>
+
+          <section id="streamer-room-card" class="card stack">
+            <div class="between">
+              <div class="row">
+                <h2 style="font-size: 16px;">直播间</h2>
+                <span id="st-room-badge" class="badge">未连接</span>
+                <span id="st-auth-badge" class="badge ok" style="display: none;">已登录</span>
+              </div>
+              <div class="row">
+                <button type="button" id="btn-st-login" class="sm">扫码登录</button>
+                <button type="button" id="btn-st-logout" class="sm" style="display: none;">退出账号</button>
+                <button type="button" id="btn-st-switch" class="sm" style="display: none;">切换房间</button>
+                <button type="button" id="btn-st-leave" class="danger sm" style="display: none;">离开房间</button>
+              </div>
+            </div>
+
+            <div id="st-room-meta" class="muted">输入房间号即可连接直播间；OBS 挂件请点击下方插件卡片「复制 OBS 链接」。</div>
+
+            <form id="st-room-form" class="row" style="align-items: stretch;">
+              <input id="st-room-input" type="text" placeholder="输入房间号或 live.bilibili.com 链接…" style="flex: 1; min-width: 210px;" />
+              <button type="submit" id="btn-st-connect" class="sm">连接</button>
+            </form>
+
+            <div id="st-quick-rooms" class="stack" style="gap: 8px; display: none;"></div>
+
+            <div id="st-live-area" class="stack" style="display: none;">
+              <div id="st-feed-list" class="streamer-feed-box">
+                <div class="empty-state">已连接直播间，等待实时弹幕与礼物…</div>
+              </div>
+              <form id="st-danmaku-form" class="row" style="align-items: stretch;">
+                <input id="st-danmaku-input" type="text" maxlength="40" placeholder="输入弹幕内容，回车发送…" style="flex: 1; min-width: 200px;" />
+                <button type="submit" id="btn-st-danmaku" class="sm">发弹幕</button>
+              </form>
+            </div>
+          </section>
+
+          <section id="streamer-plugins-section" class="stack">
+            <div class="between">
+              <h2 style="font-size: 16px;">插件与 OBS 挂件</h2>
+              <span id="st-plugin-count" class="muted">加载中…</span>
+            </div>
+            <div id="st-plugins-grid" class="streamer-plugins-grid">
+              <div class="empty-state">正在加载插件…</div>
+            </div>
+          </section>
+        </div>
+
+        <div id="dev-workspace" class="dev-workspace">
         <div id="global-pending-banner" class="card pending-alert" style="display: none;">
           <div class="between">
             <div>
@@ -676,6 +926,9 @@
               </div>
               <div id="ov-rec-detail">等待状态同步…</div>
               <div id="ov-rec-file" class="muted mono">-</div>
+              <div class="row">
+                <button type="button" id="btn-toggle-record-raw" class="sm">原始包录制: 未开启</button>
+              </div>
             </div>
             <div class="card stack">
               <div class="between">
@@ -684,7 +937,27 @@
               </div>
               <div id="ov-plugin-summary">活跃插件数：-</div>
               <div id="ov-auth-summary" class="muted">B站账号：未检测</div>
+              <div class="row">
+                <button type="button" id="btn-bili-login" class="sm">扫码登录</button>
+                <button type="button" id="btn-bili-logout" class="danger sm" style="display: none;">退出登录</button>
+              </div>
             </div>
+          </div>
+
+          <div class="card stack">
+            <div class="between">
+              <div>
+                <h3>直播间切换与快速进入</h3>
+                <div class="muted">输入房间号或 <code>live.bilibili.com</code> 链接进入直播间，或从下方列表一键切换。</div>
+              </div>
+              <button type="button" id="btn-room-options-refresh" class="sm">刷新列表</button>
+            </div>
+            <form id="room-switch-form" class="row" style="align-items: stretch;">
+              <input id="room-target-input" type="text" placeholder="输入房间号或 live.bilibili.com 链接…" style="flex: 1; min-width: 220px;" />
+              <button type="submit" id="btn-room-enter" class="sm">进入</button>
+              <button type="button" id="btn-room-leave" class="danger sm" disabled>离开房间</button>
+            </form>
+            <div id="room-quick-area" class="stack" style="gap: 8px;"></div>
           </div>
 
           <div class="card stack">
@@ -728,7 +1001,7 @@
             <div class="card stack">
               <div class="between">
                 <div>
-                  <h3>管理后台局域网链接与二维码</h3>
+                  <h3>控制面板局域网链接与二维码</h3>
                   <div id="lan-hint" class="muted">正在读取局域网地址…</div>
                 </div>
                 <button type="button" id="btn-copy-lan" class="sm">复制当前链接</button>
@@ -762,6 +1035,7 @@
                 <button type="button" class="seg-btn" data-origin="custom">扩展</button>
               </div>
               <input id="plugin-search" type="search" placeholder="搜索插件 ID、名称或描述…" />
+              <button type="button" id="btn-desktop-plugins-dir" class="sm desktop-only">打开插件目录</button>
               <button type="button" id="btn-reload-plugins" class="sm">刷新插件</button>
             </div>
           </div>
@@ -837,7 +1111,7 @@
                 <select id="data-namespace-select"></select>
               </label>
               <input id="data-namespace-custom" type="text" placeholder="或输入新命名空间…" style="min-width: 170px;" />
-              <button type="button" id="btn-load-ns" class="sm primary">载入命名空间</button>
+              <button type="button" id="btn-load-ns" class="sm">载入命名空间</button>
               <button type="button" id="btn-clear-ns" class="sm danger">清空当前命名空间</button>
             </div>
           </div>
@@ -886,7 +1160,7 @@
                   <input id="kv-meta-input" type="text" placeholder='可选 meta JSON，如 {"source":"admin"}（留空不传）' />
                   <div class="between">
                     <span id="kv-form-status" class="muted"></span>
-                    <button type="submit" class="primary sm">保存键值</button>
+                    <button type="submit" class="sm">保存键值</button>
                   </div>
                 </form>
               </div>
@@ -919,12 +1193,13 @@
                 </div>
                 <div class="between">
                   <span id="topic-form-status" class="muted"></span>
-                  <button type="submit" class="primary">发布测试消息</button>
+                  <button type="submit" class="sm">发布测试消息</button>
                 </div>
               </form>
             </div>
           </div>
         </section>
+        </div>
       </main>
     </div>
 
@@ -954,9 +1229,8 @@
           <div id="drawer-subtitle" class="muted mono">-</div>
         </div>
         <div class="row">
-          <button type="button" id="drawer-copy-obs" class="sm">复制 OBS 地址</button>
-          <a id="drawer-preview-link" class="btn-link sm" href="/" target="_blank" rel="noopener">预览挂件</a>
-          <a id="drawer-external-link" class="btn-link sm" href="/" target="_blank" rel="noopener">新标签打开</a>
+          <button type="button" id="drawer-copy-obs" class="sm">复制 OBS 链接</button>
+          <a id="drawer-external-link" class="btn-link sm dev-only" href="/" target="_blank" rel="noopener">新标签打开</a>
           <button type="button" id="btn-close-drawer" class="sm">关闭</button>
         </div>
       </div>
@@ -984,16 +1258,67 @@
     </div>
   </div>
 
+  <!-- B站扫码登录弹窗 -->
+  <div id="bili-qr-modal" class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="bili-qr-title">
+    <div class="auth-card">
+      <div class="between">
+        <h3 id="bili-qr-title">B站扫码登录</h3>
+        <button type="button" id="btn-close-bili-qr" class="sm">关闭</button>
+      </div>
+      <div class="bili-qr-center">
+        <div id="bili-qr-box" class="qr-box">
+          <span class="muted">等待加载…</span>
+        </div>
+        <div id="bili-qr-status" class="muted" style="text-align: center;">请使用哔哩哔哩手机客户端扫码登录</div>
+      </div>
+      <div class="row" style="justify-content: flex-end;">
+        <button type="button" id="btn-bili-qr-refresh" class="sm">刷新二维码</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast-bar" class="toast-bar" aria-live="polite"></div>
 
   <script>
     (function () {
       'use strict';
 
+      var isTauriDesktop = Boolean(
+        window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function'
+      );
+      if (isTauriDesktop) {
+        document.body.classList.add('is-tauri-desktop');
+      }
+
+      function tauriInvoke(cmd, args) {
+        var fn = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+          || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);
+        if (typeof fn !== 'function') {
+          return Promise.reject(new Error('Tauri IPC unavailable'));
+        }
+        return Promise.resolve(fn(cmd, args || {}));
+      }
+
+      function tauriListen(eventName, handler) {
+        var listenFn = window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen;
+        if (typeof listenFn === 'function') {
+          return listenFn(eventName, handler);
+        }
+        return Promise.resolve();
+      }
+
+      var DEV_MODE_STORAGE_KEY = 'dambo_dev_mode';
+
       var state = {
+        devMode: false,
+        streamerSwitchOpen: false,
         activeView: 'overview',
         status: null,
+        roomOptions: { my_room: null, following_live: [], history_rooms: null },
+        roomBusy: false,
         plugins: [],
+        desktopOpenMap: Object.create(null),
+        alwaysOnTop: false,
         pluginOriginFilter: 'all',
         drawerPlugin: null,
         aclRecords: [],
@@ -1014,7 +1339,10 @@
         dataEntries: {},
         selectedOwner: '',
         selectedStore: 'persist',
-        selectedNamespace: ''
+        selectedNamespace: '',
+        qrKey: '',
+        qrPollTimer: null,
+        qrSessionToken: 0
       };
 
       function $(id) {
@@ -1097,12 +1425,39 @@
         $('auth-modal').classList.remove('open');
       }
 
+      function readSavedDevMode() {
+        try {
+          return window.localStorage.getItem(DEV_MODE_STORAGE_KEY) === '1';
+        } catch (_) {
+          return false;
+        }
+      }
+
+      function setDevMode(enabled, persist) {
+        state.devMode = Boolean(enabled);
+        document.body.classList.toggle('dev-mode', state.devMode);
+        var btn = $('btn-dev-mode');
+        if (btn) {
+          btn.classList.toggle('active', state.devMode);
+          btn.setAttribute('aria-checked', state.devMode ? 'true' : 'false');
+        }
+        if (persist) {
+          try {
+            window.localStorage.setItem(DEV_MODE_STORAGE_KEY, state.devMode ? '1' : '0');
+          } catch (_) {}
+        }
+        if (state.devMode && state.activeView === 'data' && state.selectedOwner) {
+          loadNamespaces();
+        }
+      }
+
       function applyHashViewIfPresent() {
         var hash = window.location.hash || '';
         if (!hash.startsWith('#')) return;
         var params = new URLSearchParams(hash.slice(1));
         var view = params.get('view');
         if (view && ['overview', 'plugins', 'acl', 'data'].indexOf(view) !== -1) {
+          setDevMode(true, false);
           switchView(view);
         }
       }
@@ -1113,6 +1468,7 @@
         var params = new URLSearchParams(hash.slice(1));
         var view = params.get('view');
         if (view && ['overview', 'plugins', 'acl', 'data'].indexOf(view) !== -1) {
+          setDevMode(true, false);
           switchView(view);
         }
         var token = params.get('t');
@@ -1217,6 +1573,11 @@
           $('ov-rec-detail').textContent = '配置未开启录制功能';
         }
         $('ov-rec-file').textContent = rec.current_file || '无活跃录制文件';
+        var rawBtn = $('btn-toggle-record-raw');
+        if (rawBtn) {
+          var rawOn = Boolean(rec.record_raw);
+          rawBtn.textContent = rawOn ? '原始包录制: 已开启' : '原始包录制: 未开启';
+        }
 
         $('ov-plugin-summary').textContent = '已发现活跃插件：' + Number(st.plugin_count || 0) + ' 个';
         var auth = st.auth || {};
@@ -1225,11 +1586,243 @@
           setBadge($('danmaku-login-hint'), '已登录可发送', 'ok');
           $('danmaku-submit').disabled = false;
           $('danmaku-input').placeholder = '输入弹幕内容，回车发送…';
+          $('btn-bili-login').textContent = '重新登录';
+          $('btn-bili-logout').style.display = '';
         } else {
           $('ov-auth-summary').textContent = 'B站未登录（只读监听模式）';
           setBadge($('danmaku-login-hint'), '未登录', 'warn');
           $('danmaku-submit').disabled = true;
           $('danmaku-input').placeholder = '请先登录 B 站账号后再发送弹幕';
+          $('btn-bili-login').textContent = '扫码登录';
+          $('btn-bili-logout').style.display = 'none';
+        }
+
+        syncRoomButtons();
+        renderRoomQuickArea();
+        renderStreamerStatus();
+      }
+
+      function renderStreamerStatus() {
+        var st = state.status || {};
+        var rs = st.room_state || {};
+        var ri = st.room_info || {};
+        var auth = st.auth || {};
+        var isConnected = Boolean(rs.connected) && Number(rs.room_id || 0) > 0;
+        var isLive = Boolean(rs.is_live) || Number(ri.live_status) === 1;
+        var roomId = rs.room_id || ri.room_id || '';
+        var title = rs.room_title || ri.title || '直播间';
+        var uname = rs.room_uname || ri.uname || '主播';
+
+        if (!isConnected) {
+          setBadge($('st-room-badge'), '未连接', '');
+          $('st-room-meta').textContent = '输入房间号即可连接；OBS 挂件请点击下方插件卡片「复制 OBS 链接」。';
+        } else if (isLive) {
+          setBadge($('st-room-badge'), '直播中 · ' + roomId, 'ok');
+          $('st-room-meta').textContent = '当前直播间：' + title + ' · 主播：' + uname;
+        } else {
+          setBadge($('st-room-badge'), '已连接(未开播) · ' + roomId, 'accent');
+          $('st-room-meta').textContent = '当前直播间：' + title + ' · 主播：' + uname;
+        }
+
+        if (auth.is_login) {
+          $('st-auth-badge').textContent = '@' + (auth.uname || auth.mid || '已登录');
+          $('st-auth-badge').style.display = '';
+          $('btn-st-login').textContent = '切换账号';
+          $('btn-st-logout').style.display = '';
+          $('btn-st-danmaku').disabled = false;
+          $('st-danmaku-input').disabled = false;
+          $('st-danmaku-input').placeholder = '输入弹幕内容，回车发送…';
+        } else {
+          $('st-auth-badge').style.display = 'none';
+          $('btn-st-login').textContent = '扫码登录';
+          $('btn-st-logout').style.display = 'none';
+          $('btn-st-danmaku').disabled = true;
+          $('st-danmaku-input').disabled = true;
+          $('st-danmaku-input').placeholder = '请先点击右上角「扫码登录」后再发弹幕';
+        }
+
+        var showRoomForm = !isConnected || state.streamerSwitchOpen;
+        $('st-room-form').style.display = showRoomForm ? 'flex' : 'none';
+        $('st-live-area').style.display = isConnected ? 'flex' : 'none';
+        $('btn-st-leave').style.display = isConnected ? '' : 'none';
+        $('btn-st-switch').style.display = isConnected ? '' : 'none';
+        $('btn-st-switch').textContent = state.streamerSwitchOpen ? '收起切换' : '切换房间';
+      }
+
+      function syncRoomButtons() {
+        var st = state.status || {};
+        var rs = st.room_state || {};
+        var isConnected = Boolean(rs.connected) && Number(rs.room_id || 0) > 0;
+        var enterBtn = $('btn-room-enter');
+        var leaveBtn = $('btn-room-leave');
+        var stConnectBtn = $('btn-st-connect');
+        var inputEl = $('room-target-input');
+        if (!enterBtn || !leaveBtn) return;
+
+        if (state.roomBusy) {
+          enterBtn.textContent = '处理中…';
+          enterBtn.disabled = true;
+          leaveBtn.disabled = true;
+          if (stConnectBtn) {
+            stConnectBtn.textContent = '连接中…';
+            stConnectBtn.disabled = true;
+          }
+          return;
+        }
+        var draft = String(inputEl ? inputEl.value : '').trim();
+        enterBtn.disabled = false;
+        if (stConnectBtn) {
+          stConnectBtn.textContent = '连接';
+          stConnectBtn.disabled = false;
+        }
+        if (!isConnected) {
+          enterBtn.textContent = '进入';
+        } else if (draft && draft !== String(rs.room_id || '')) {
+          enterBtn.textContent = '切换';
+        } else {
+          enterBtn.textContent = '进入';
+        }
+        leaveBtn.disabled = !isConnected;
+      }
+
+      function formatQuickRoomLabel(roomId, uname, title) {
+        var head = uname ? (roomId + ' (' + uname + ')') : String(roomId);
+        return title ? (head + ' · ' + title) : head;
+      }
+
+      function buildRoomChipNode(roomId, label, allowDelete) {
+        var st = state.status || {};
+        var rs = st.room_state || {};
+        var isCurrent = Boolean(rs.connected) && Number(rs.room_id) === Number(roomId);
+
+        var wrap = document.createElement('div');
+        wrap.className = 'room-chip-wrap' + (isCurrent ? ' active' : '');
+
+        var mainBtn = document.createElement('button');
+        mainBtn.type = 'button';
+        mainBtn.className = 'sm chip-main';
+        mainBtn.textContent = label;
+        mainBtn.title = label;
+        mainBtn.addEventListener('click', function () {
+          $('room-target-input').value = String(roomId);
+          connectRoomTarget(String(roomId));
+        });
+        wrap.appendChild(mainBtn);
+
+        if (allowDelete) {
+          var delBtn = document.createElement('button');
+          delBtn.type = 'button';
+          delBtn.className = 'sm chip-del';
+          delBtn.textContent = '×';
+          delBtn.title = '移除历史记录';
+          delBtn.setAttribute('aria-label', '移除历史记录');
+          delBtn.addEventListener('click', function () {
+            removeRoomHistory(roomId);
+          });
+          wrap.appendChild(delBtn);
+        }
+        return wrap;
+      }
+
+      function populateQuickRoomContainer(container, allowHistoryDelete, showEmptyPlaceholder) {
+        if (!container) return 0;
+        container.replaceChildren();
+
+        var opts = state.roomOptions || {};
+        var st = state.status || {};
+        var myRoom = opts.my_room || null;
+        var following = Array.isArray(opts.following_live) ? opts.following_live : [];
+        var history = Array.isArray(opts.history_rooms)
+          ? opts.history_rooms
+          : (Array.isArray(st.history_rooms) ? st.history_rooms : []);
+        var groupCount = 0;
+
+        if (myRoom && myRoom.room_id) {
+          groupCount += 1;
+          var gMy = document.createElement('div');
+          gMy.className = 'room-chip-group';
+          var lMy = document.createElement('div');
+          lMy.className = 'room-chip-label';
+          lMy.textContent = '我的直播间';
+          var rMy = document.createElement('div');
+          rMy.className = 'room-chip-row';
+          rMy.appendChild(
+            buildRoomChipNode(
+              myRoom.room_id,
+              formatQuickRoomLabel(myRoom.room_id, myRoom.room_uname, myRoom.title),
+              false
+            )
+          );
+          gMy.appendChild(lMy);
+          gMy.appendChild(rMy);
+          container.appendChild(gMy);
+        }
+
+        if (following.length > 0) {
+          groupCount += 1;
+          var gFol = document.createElement('div');
+          gFol.className = 'room-chip-group';
+          var lFol = document.createElement('div');
+          lFol.className = 'room-chip-label';
+          lFol.textContent = '关注开播中 (' + following.length + ')';
+          var rFol = document.createElement('div');
+          rFol.className = 'room-chip-row';
+          following.forEach(function (item) {
+            if (!item || !item.room_id) return;
+            rFol.appendChild(
+              buildRoomChipNode(
+                item.room_id,
+                formatQuickRoomLabel(item.room_id, item.room_uname, item.title),
+                false
+              )
+            );
+          });
+          gFol.appendChild(lFol);
+          gFol.appendChild(rFol);
+          container.appendChild(gFol);
+        }
+
+        if (history.length > 0 || showEmptyPlaceholder) {
+          if (history.length > 0) groupCount += 1;
+          var gHist = document.createElement('div');
+          gHist.className = 'room-chip-group';
+          var lHist = document.createElement('div');
+          lHist.className = 'room-chip-label';
+          lHist.textContent = '最近进入';
+          var rHist = document.createElement('div');
+          rHist.className = 'room-chip-row';
+          if (history.length === 0) {
+            var emptyHist = document.createElement('span');
+            emptyHist.className = 'muted';
+            emptyHist.textContent = '暂无历史房间记录';
+            rHist.appendChild(emptyHist);
+          } else {
+            history.forEach(function (entry) {
+              var rid = typeof entry === 'number' ? entry : (entry && entry.room_id);
+              if (!rid) return;
+              var uname = (typeof entry === 'object' && entry.uname) ? entry.uname : '';
+              var title = (typeof entry === 'object' && entry.title) ? entry.title : '';
+              rHist.appendChild(
+                buildRoomChipNode(rid, formatQuickRoomLabel(rid, uname, title), allowHistoryDelete)
+              );
+            });
+          }
+          gHist.appendChild(lHist);
+          gHist.appendChild(rHist);
+          container.appendChild(gHist);
+        }
+        return groupCount;
+      }
+
+      function renderRoomQuickArea() {
+        populateQuickRoomContainer($('room-quick-area'), true, true);
+        var stQuick = $('st-quick-rooms');
+        if (stQuick) {
+          var st = state.status || {};
+          var rs = st.room_state || {};
+          var isConnected = Boolean(rs.connected) && Number(rs.room_id || 0) > 0;
+          var count = populateQuickRoomContainer(stQuick, false, false);
+          stQuick.style.display = (count > 0 && (!isConnected || state.streamerSwitchOpen)) ? 'flex' : 'none';
         }
       }
 
@@ -1264,10 +1857,11 @@
         if (!info) return;
         var list = Array.isArray(info.urls) ? info.urls : [];
         if (list.length === 0) {
+          tabs.style.display = 'none';
           $('lan-hint').textContent = info.local_only
             ? '当前监听仅限本机访问，未检测到可用私网 IPv4 地址。'
             : '未检测到局域网私网 IP，使用本机回环地址。';
-          $('lan-url-text').textContent = info.local_url || window.location.origin + '/admin';
+          $('lan-url-text').textContent = info.local_url || window.location.origin + '/';
           $('lan-strict-note').textContent = info.security_mode === 'strict'
             ? 'Strict 模式下可手动附加 #t=<admin_token>'
             : 'Open 模式下局域网私网 IP 可直接访问。';
@@ -1277,18 +1871,24 @@
         if (state.selectedLanIndex >= list.length) {
           state.selectedLanIndex = 0;
         }
-        $('lan-hint').textContent = '检测到 ' + list.length + ' 个可用局域网私网入口，点击切换：';
-        list.forEach(function (item, idx) {
-          var btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'sm' + (idx === state.selectedLanIndex ? ' primary' : '');
-          btn.textContent = item.ip;
-          btn.addEventListener('click', function () {
-            state.selectedLanIndex = idx;
-            renderLanPanel();
+        if (list.length > 1) {
+          tabs.style.display = '';
+          $('lan-hint').textContent = '检测到 ' + list.length + ' 个可用局域网私网入口，点击切换：';
+          list.forEach(function (item, idx) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'sm lan-ip-btn' + (idx === state.selectedLanIndex ? ' active' : '');
+            btn.textContent = item.ip;
+            btn.addEventListener('click', function () {
+              state.selectedLanIndex = idx;
+              renderLanPanel();
+            });
+            tabs.appendChild(btn);
           });
-          tabs.appendChild(btn);
-        });
+        } else {
+          tabs.style.display = 'none';
+          $('lan-hint').textContent = '检测到局域网私网入口，手机扫码或复制下方地址：';
+        }
         var active = list[state.selectedLanIndex];
         $('lan-url-text').textContent = active.url;
         $('lan-strict-note').textContent = info.security_mode === 'strict'
@@ -1302,19 +1902,20 @@
         return new URL('/' + encodeURIComponent(routeName) + '/', window.location.origin).href;
       }
 
-      function copyText(text, label) {
+      function copyText(text, label, fullMessage) {
+        var successMsg = fullMessage || ('已复制' + (label || '内容'));
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(text).then(function () {
-            showToast('已复制' + (label || '内容'), 'ok');
+            showToast(successMsg, 'ok');
           }).catch(function () {
-            fallbackCopy(text, label);
+            fallbackCopy(text, successMsg);
           });
         } else {
-          fallbackCopy(text, label);
+          fallbackCopy(text, successMsg);
         }
       }
 
-      function fallbackCopy(text, label) {
+      function fallbackCopy(text, successMsg) {
         var ta = document.createElement('textarea');
         ta.value = text;
         ta.style.position = 'fixed';
@@ -1323,11 +1924,15 @@
         ta.select();
         try {
           document.execCommand('copy');
-          showToast('已复制' + (label || '内容'), 'ok');
+          showToast(successMsg || '已复制', 'ok');
         } catch (_) {
           showToast('复制失败，请手动复制', 'warn');
         }
         document.body.removeChild(ta);
+      }
+
+      function copyObsUrl(url) {
+        copyText(url, null, '已复制，请粘贴到 OBS 浏览器源');
       }
 
       function openPluginDrawer(plugin) {
@@ -1335,11 +1940,9 @@
         var routeName = plugin.plugin_name || plugin.plugin_id || '';
         var manageBase = plugin.manage_route || ('/' + encodeURIComponent(routeName) + '/m');
         var embedUrl = manageBase + (manageBase.indexOf('?') === -1 ? '?embed=1' : '&embed=1');
-        var viewUrl = '/' + encodeURIComponent(routeName) + '/';
         var manageModeText = plugin.has_custom_manage ? '自定义管理页' : '内置配置页';
-        $('drawer-title').textContent = (plugin.name || routeName) + ' · 配置与控制';
+        $('drawer-title').textContent = (plugin.name || routeName) + ' · 设置与玩法';
         $('drawer-subtitle').textContent = manageBase + ' · ' + manageModeText + ' · ' + (plugin.namedomain || routeName);
-        $('drawer-preview-link').setAttribute('href', viewUrl);
         $('drawer-external-link').setAttribute('href', manageBase);
         $('drawer-iframe').setAttribute('src', embedUrl);
         $('plugin-drawer').classList.add('open');
@@ -1408,6 +2011,13 @@
           badges.appendChild(verBadge);
           badges.appendChild(originBadge);
           badges.appendChild(manageBadge);
+          var isDesktopOpen = isTauriDesktop && Boolean(state.desktopOpenMap[routeName]);
+          if (isDesktopOpen) {
+            var desktopBadge = document.createElement('span');
+            desktopBadge.className = 'badge ok';
+            desktopBadge.textContent = '悬浮窗运行中';
+            badges.appendChild(desktopBadge);
+          }
 
           top.appendChild(titleWrap);
           top.appendChild(badges);
@@ -1431,7 +2041,7 @@
           btnInlineCopy.className = 'sm';
           btnInlineCopy.textContent = '复制';
           btnInlineCopy.addEventListener('click', function () {
-            copyText(obsUrl, 'OBS 浏览器源 URL');
+            copyObsUrl(obsUrl);
           });
           obsRow.appendChild(obsLabel);
           obsRow.appendChild(obsCode);
@@ -1465,18 +2075,19 @@
 
           var btnManage = document.createElement('button');
           btnManage.type = 'button';
-          btnManage.className = 'primary sm';
+          btnManage.className = 'sm';
           btnManage.textContent = '配置与控制';
           btnManage.addEventListener('click', function () {
             openPluginDrawer(plugin);
           });
 
-          var linkPreview = document.createElement('a');
-          linkPreview.className = 'btn-link sm';
-          linkPreview.href = '/' + encodeURIComponent(routeName) + '/';
-          linkPreview.target = '_blank';
-          linkPreview.rel = 'noopener';
-          linkPreview.textContent = '预览挂件';
+          var btnCopyObsDev = document.createElement('button');
+          btnCopyObsDev.type = 'button';
+          btnCopyObsDev.className = 'sm';
+          btnCopyObsDev.textContent = '复制 OBS 链接';
+          btnCopyObsDev.addEventListener('click', function () {
+            copyObsUrl(obsUrl);
+          });
 
           var btnInspect = document.createElement('button');
           btnInspect.type = 'button';
@@ -1492,8 +2103,99 @@
           });
 
           actions.appendChild(btnManage);
-          actions.appendChild(linkPreview);
+          actions.appendChild(btnCopyObsDev);
           actions.appendChild(btnInspect);
+          appendDesktopOverlayButton(actions, plugin, routeName, isDesktopOpen, '打开悬浮窗', '关闭悬浮窗');
+          card.appendChild(actions);
+
+          grid.appendChild(card);
+        });
+        renderStreamerPlugins();
+      }
+
+      function appendDesktopOverlayButton(actionsEl, plugin, routeName, isDesktopOpen, openText, closeText) {
+        if (!isTauriDesktop) return;
+        var btnDesktopToggle = document.createElement('button');
+        btnDesktopToggle.type = 'button';
+        btnDesktopToggle.className = isDesktopOpen ? 'danger sm' : 'sm';
+        btnDesktopToggle.textContent = isDesktopOpen ? closeText : openText;
+        btnDesktopToggle.addEventListener('click', function () {
+          var cmd = isDesktopOpen ? 'close_plugin_desktop' : 'open_plugin_desktop';
+          tauriInvoke(cmd, { pluginName: routeName }).then(function () {
+            showToast((isDesktopOpen ? '已关闭悬浮窗: ' : '已打开悬浮窗: ') + (plugin.name || routeName), 'ok');
+            return syncDesktopPluginStates();
+          }).catch(function (err) {
+            showToast('悬浮窗操作失败: ' + (err && err.message ? err.message : String(err)), 'danger');
+          });
+        });
+        actionsEl.appendChild(btnDesktopToggle);
+      }
+
+      function renderStreamerPlugins() {
+        var grid = $('st-plugins-grid');
+        var countEl = $('st-plugin-count');
+        if (!grid) return;
+        grid.replaceChildren();
+        var list = state.plugins || [];
+        if (countEl) {
+          countEl.textContent = list.length + ' 个可用插件';
+        }
+        if (list.length === 0) {
+          var empty = document.createElement('div');
+          empty.className = 'empty-state';
+          empty.textContent = '未发现插件';
+          grid.appendChild(empty);
+          return;
+        }
+        list.forEach(function (plugin) {
+          var routeName = plugin.plugin_name || plugin.plugin_id || '';
+          var obsUrl = buildObsPluginUrl(plugin);
+          var isDesktopOpen = isTauriDesktop && Boolean(state.desktopOpenMap[routeName]);
+
+          var card = document.createElement('div');
+          card.className = 'card plugin-card';
+
+          var top = document.createElement('div');
+          top.className = 'between';
+          var title = document.createElement('div');
+          title.className = 'plugin-title';
+          title.textContent = plugin.name || routeName;
+          top.appendChild(title);
+          if (isDesktopOpen) {
+            var desktopBadge = document.createElement('span');
+            desktopBadge.className = 'badge ok';
+            desktopBadge.textContent = '悬浮窗运行中';
+            top.appendChild(desktopBadge);
+          }
+          card.appendChild(top);
+
+          var desc = document.createElement('p');
+          desc.className = 'plugin-desc';
+          desc.textContent = plugin.description || '点击下方按钮复制 OBS 浏览器源链接或设置插件玩法。';
+          card.appendChild(desc);
+
+          var actions = document.createElement('div');
+          actions.className = 'plugin-foot';
+
+          var btnCopy = document.createElement('button');
+          btnCopy.type = 'button';
+          btnCopy.className = 'sm';
+          btnCopy.textContent = '复制 OBS 链接';
+          btnCopy.addEventListener('click', function () {
+            copyObsUrl(obsUrl);
+          });
+
+          var btnSetup = document.createElement('button');
+          btnSetup.type = 'button';
+          btnSetup.className = 'sm';
+          btnSetup.textContent = '设置 / 玩法';
+          btnSetup.addEventListener('click', function () {
+            openPluginDrawer(plugin);
+          });
+
+          actions.appendChild(btnCopy);
+          actions.appendChild(btnSetup);
+          appendDesktopOverlayButton(actions, plugin, routeName, isDesktopOpen, '桌面悬浮', '关闭悬浮');
           card.appendChild(actions);
 
           grid.appendChild(card);
@@ -1801,6 +2503,74 @@
             otherList.appendChild(buildAclItemNode(rec));
           });
         }
+        renderStreamerAclBanner(pending);
+      }
+
+      function formatPlainAclSummary(rec) {
+        var reqName = formatDisplay(rec.requester_display, rec.requester);
+        var ownName = formatDisplay(rec.owner_display, rec.owner);
+        var reqLevel = rec.requested_level || rec.level || 'read';
+        var verb = reqLevel === 'write' ? '修改' : (reqLevel === 'subscribe' ? '订阅' : '读取');
+        var res = String(rec.resource || '');
+        var resLabel = res;
+        if (res === 'persist:config') {
+          resLabel = '配置';
+        } else if (res.startsWith('persist:')) {
+          resLabel = '持久化数据';
+        } else if (res.startsWith('memory:')) {
+          resLabel = '实时数据';
+        } else if (res.startsWith('topic:')) {
+          resLabel = '消息订阅';
+        }
+        var text = '插件「' + reqName + '」申请' + verb + '插件「' + ownName + '」的' + resLabel;
+        if (rec.reason) {
+          text += '（' + rec.reason + '）';
+        }
+        return text;
+      }
+
+      function renderStreamerAclBanner(pending) {
+        var banner = $('streamer-acl-banner');
+        var listEl = $('streamer-acl-list');
+        if (!banner || !listEl) return;
+        listEl.replaceChildren();
+        if (!pending || pending.length === 0) {
+          banner.style.display = 'none';
+          return;
+        }
+        banner.style.display = 'flex';
+        $('streamer-acl-count').textContent = pending.length + ' 条待确认';
+        pending.forEach(function (rec) {
+          var row = document.createElement('div');
+          row.className = 'streamer-acl-row';
+          var textEl = document.createElement('div');
+          textEl.textContent = formatPlainAclSummary(rec);
+          var btns = document.createElement('div');
+          btns.className = 'row';
+          var reqLevel = rec.requested_level || rec.level || 'read';
+
+          var btnAllow = document.createElement('button');
+          btnAllow.type = 'button';
+          btnAllow.className = 'ok sm';
+          btnAllow.textContent = '允许';
+          btnAllow.addEventListener('click', function () {
+            sendAdminAclPut(rec.owner, rec.requester, rec.resource, reqLevel, rec.note);
+          });
+
+          var btnDeny = document.createElement('button');
+          btnDeny.type = 'button';
+          btnDeny.className = 'danger sm';
+          btnDeny.textContent = '拒绝';
+          btnDeny.addEventListener('click', function () {
+            sendAdminAclPut(rec.owner, rec.requester, rec.resource, 'none', rec.note);
+          });
+
+          btns.appendChild(btnAllow);
+          btns.appendChild(btnDeny);
+          row.appendChild(textEl);
+          row.appendChild(btns);
+          listEl.appendChild(row);
+        });
       }
 
       function inferEntryType(value) {
@@ -2001,16 +2771,13 @@
         return true;
       }
 
-      function renderFeed() {
-        var box = $('feed-list');
+      function renderFeedToBox(box, items, emptyText) {
+        if (!box) return;
         box.replaceChildren();
-        var items = state.feedItems.filter(function (item) {
-          return matchFeedFilter(String(item.ev.kind || '').toLowerCase(), state.feedFilter);
-        });
         if (items.length === 0) {
           var empty = document.createElement('div');
           empty.className = 'empty-state';
-          empty.textContent = state.wsConnected ? '已连接实时流，等待直播间事件…' : '等待 WebSocket 事件…';
+          empty.textContent = emptyText;
           box.appendChild(empty);
           return;
         }
@@ -2071,6 +2838,22 @@
           }
           box.appendChild(row);
         });
+      }
+
+      function renderFeed() {
+        var devItems = state.feedItems.filter(function (item) {
+          return matchFeedFilter(String(item.ev.kind || '').toLowerCase(), state.feedFilter);
+        });
+        renderFeedToBox(
+          $('feed-list'),
+          devItems,
+          state.wsConnected ? '已连接实时流，等待直播间事件…' : '等待 WebSocket 事件…'
+        );
+        renderFeedToBox(
+          $('st-feed-list'),
+          state.feedItems.slice(0, 60),
+          state.wsConnected ? '已连接直播间，等待实时弹幕与礼物…' : '正在连接实时事件流…'
+        );
       }
 
       function updateConnSummary() {
@@ -2193,8 +2976,246 @@
         });
       }
 
+      function refreshRoomOptions() {
+        return apiFetch('/api/v1/system/room/options').then(function (data) {
+          if (data && typeof data === 'object') {
+            state.roomOptions = {
+              my_room: data.my_room || null,
+              following_live: Array.isArray(data.following_live) ? data.following_live : [],
+              history_rooms: Array.isArray(data.history_rooms) ? data.history_rooms : []
+            };
+            renderRoomQuickArea();
+          }
+        }).catch(function (err) {
+          if (err && err.status !== 401) {
+            showToast('读取直播间列表失败: ' + err.message, 'warn');
+          }
+        });
+      }
+
+      function connectRoomTarget(target) {
+        var clean = String(target || '').trim();
+        if (!clean || state.roomBusy) return;
+        state.roomBusy = true;
+        syncRoomButtons();
+        return apiFetch('/api/v1/system/room/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target: clean })
+        }).then(function (res) {
+          state.streamerSwitchOpen = false;
+          showToast('正在连接直播间 ' + (res && res.room_id ? res.room_id : clean), 'ok');
+          return Promise.all([refreshStatus(), refreshRoomOptions()]);
+        }).catch(function (err) {
+          showToast('切换直播间失败: ' + err.message, 'danger');
+        }).finally(function () {
+          state.roomBusy = false;
+          syncRoomButtons();
+        });
+      }
+
+      function disconnectCurrentRoom() {
+        if (state.roomBusy) return;
+        state.roomBusy = true;
+        syncRoomButtons();
+        return apiFetch('/api/v1/system/room/disconnect', {
+          method: 'POST'
+        }).then(function () {
+          state.streamerSwitchOpen = false;
+          $('room-target-input').value = '';
+          if ($('st-room-input')) $('st-room-input').value = '';
+          showToast('已离开直播间', 'ok');
+          return Promise.all([refreshStatus(), refreshRoomOptions()]);
+        }).catch(function (err) {
+          showToast('离开直播间失败: ' + err.message, 'danger');
+        }).finally(function () {
+          state.roomBusy = false;
+          syncRoomButtons();
+        });
+      }
+
+      function removeRoomHistory(roomId) {
+        return apiFetch('/api/v1/system/room/history/' + encodeURIComponent(String(roomId)), {
+          method: 'DELETE'
+        }).then(function (res) {
+          if (res && Array.isArray(res.history_rooms)) {
+            state.roomOptions.history_rooms = res.history_rooms;
+            if (state.status) {
+              state.status.history_rooms = res.history_rooms;
+            }
+            renderRoomQuickArea();
+          }
+          showToast('已移除历史房间 ' + roomId, 'ok');
+        }).catch(function (err) {
+          showToast('移除历史失败: ' + err.message, 'danger');
+        });
+      }
+
+      function toggleRecordRaw() {
+        var cur = Boolean(state.status && state.status.recording && state.status.recording.record_raw);
+        return apiFetch('/api/v1/system/record-raw', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !cur })
+        }).then(function (res) {
+          var nextOn = Boolean(res && res.record_raw);
+          showToast(nextOn ? '已开启原始包录制 (*_raw.jsonl)' : '已关闭原始包录制', 'ok');
+          return refreshStatus();
+        }).catch(function (err) {
+          showToast('切换录制设置失败: ' + err.message, 'danger');
+        });
+      }
+
+      function clearBiliQrPoll() {
+        state.qrSessionToken += 1;
+        state.qrKey = '';
+        if (state.qrPollTimer) {
+          window.clearTimeout(state.qrPollTimer);
+          state.qrPollTimer = null;
+        }
+      }
+
+      function openBiliQrModal() {
+        $('bili-qr-modal').classList.add('open');
+        loadNewBiliQr();
+      }
+
+      function closeBiliQrModal() {
+        clearBiliQrPoll();
+        $('bili-qr-modal').classList.remove('open');
+      }
+
+      function loadNewBiliQr() {
+        clearBiliQrPoll();
+        var token = state.qrSessionToken;
+        renderQrSvg($('bili-qr-box'), '');
+        $('bili-qr-status').textContent = '正在获取登录二维码…';
+        return apiFetch('/api/v1/system/auth/qr', { method: 'POST' }).then(function (data) {
+          if (token !== state.qrSessionToken || !$('bili-qr-modal').classList.contains('open')) return;
+          state.qrKey = (data && data.qrcode_key) ? String(data.qrcode_key) : '';
+          renderQrSvg($('bili-qr-box'), data && data.svg ? data.svg : '');
+          $('bili-qr-status').textContent = '请使用哔哩哔哩手机客户端扫码登录';
+          scheduleBiliQrPoll(token);
+        }).catch(function (err) {
+          if (token !== state.qrSessionToken) return;
+          $('bili-qr-status').textContent = '获取二维码失败：' + err.message;
+        });
+      }
+
+      function scheduleBiliQrPoll(token) {
+        if (token !== state.qrSessionToken || !state.qrKey || !$('bili-qr-modal').classList.contains('open')) {
+          return;
+        }
+        state.qrPollTimer = window.setTimeout(function () {
+          state.qrPollTimer = null;
+          if (token !== state.qrSessionToken || !state.qrKey || !$('bili-qr-modal').classList.contains('open')) {
+            return;
+          }
+          apiFetch('/api/v1/system/auth/qr/poll', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ qrcode_key: state.qrKey })
+          }).then(function (res) {
+            if (token !== state.qrSessionToken || !$('bili-qr-modal').classList.contains('open')) return;
+            var status = res && res.status;
+            if (status === 'waiting') {
+              scheduleBiliQrPoll(token);
+            } else if (status === 'scanned') {
+              $('bili-qr-status').textContent = '已扫码，请在手机端确认登录…';
+              scheduleBiliQrPoll(token);
+            } else if (status === 'expired') {
+              $('bili-qr-status').textContent = '二维码已过期，正在自动刷新…';
+              loadNewBiliQr();
+            } else if (status === 'success') {
+              closeBiliQrModal();
+              showToast('B站扫码登录成功', 'ok');
+              refreshStatus();
+              refreshRoomOptions();
+            } else {
+              clearBiliQrPoll();
+              $('bili-qr-status').textContent = '登录失败：' + ((res && res.message) || '未知状态');
+            }
+          }).catch(function (err) {
+            if (token !== state.qrSessionToken) return;
+            $('bili-qr-status').textContent = '轮询登录状态失败：' + err.message;
+          });
+        }, 2000);
+      }
+
+      function logoutBiliAccount() {
+        return apiFetch('/api/v1/system/auth/logout', {
+          method: 'POST'
+        }).then(function () {
+          showToast('已退出 B 站账号', 'ok');
+          return Promise.all([refreshStatus(), refreshRoomOptions()]);
+        }).catch(function (err) {
+          showToast('退出登录失败: ' + err.message, 'danger');
+        });
+      }
+
+      function syncDesktopPinButton() {
+        var btn = $('btn-desktop-pin');
+        if (!btn) return;
+        btn.textContent = state.alwaysOnTop ? '取消置顶' : '窗口置顶';
+        btn.classList.toggle('active', Boolean(state.alwaysOnTop));
+      }
+
+      function applyDesktopPluginDtos(list) {
+        var map = Object.create(null);
+        if (Array.isArray(list)) {
+          list.forEach(function (item) {
+            if (item && item.name) {
+              map[item.name] = Boolean(item.is_desktop_open);
+            }
+          });
+        }
+        state.desktopOpenMap = map;
+        renderPlugins();
+      }
+
+      function syncDesktopPluginStates() {
+        if (!isTauriDesktop) return Promise.resolve();
+        return tauriInvoke('get_plugins').then(function (list) {
+          applyDesktopPluginDtos(list);
+        }).catch(function () {});
+      }
+
+      function initDesktopBridge() {
+        if (!isTauriDesktop) return;
+        syncDesktopPluginStates();
+        tauriInvoke('plugin:window|is_always_on_top').then(function (val) {
+          if (typeof val === 'boolean') {
+            state.alwaysOnTop = val;
+            syncDesktopPinButton();
+          }
+        }).catch(function () {});
+        tauriListen('plugins-updated', function (ev) {
+          applyDesktopPluginDtos(ev && ev.payload);
+        });
+        tauriListen('room_state_changed', function () {
+          refreshStatus();
+        });
+        tauriListen('auth_state_changed', function () {
+          refreshStatus();
+          if (state.adminUnlocked) {
+            refreshRoomOptions();
+          }
+        });
+        tauriListen('app_state_changed', function (ev) {
+          var p = ev && ev.payload;
+          if (p && Array.isArray(p.room_history)) {
+            state.roomOptions.history_rooms = p.room_history;
+            renderRoomQuickArea();
+          }
+          refreshStatus();
+        });
+        tauriListen('acl-updated', function () {
+          refreshAcl();
+        });
+      }
+
       function refreshLanUrls() {
-        return apiFetch('/api/v1/system/lan-urls?path=' + encodeURIComponent('/admin')).then(function (data) {
+        return apiFetch('/api/v1/system/lan-urls?path=%2F').then(function (data) {
           state.lanInfo = data;
           renderLanPanel();
         }).catch(function () {});
@@ -2234,7 +3255,8 @@
           refreshStatus(),
           refreshLanUrls(),
           refreshPlugins(),
-          refreshAcl()
+          refreshAcl(),
+          refreshRoomOptions()
         ]).then(function () {
           if (state.adminUnlocked && state.selectedOwner) {
             return loadNamespaces();
@@ -2275,7 +3297,54 @@
         return parsed;
       }
 
+      function submitDanmakuForm(inputEl, submitBtn, statusEl) {
+        var msg = String(inputEl ? inputEl.value : '').trim();
+        if (!msg) return;
+        submitBtn.disabled = true;
+        if (statusEl) statusEl.textContent = '发送中…';
+        apiFetch('/api/v1/system/danmaku', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ msg: msg })
+        }).then(function () {
+          inputEl.value = '';
+          if (statusEl) statusEl.textContent = '弹幕已发送：' + msg;
+          showToast('弹幕发送成功', 'ok');
+        }).catch(function (err) {
+          if (statusEl) statusEl.textContent = '发送失败：' + err.message;
+          showToast('发送失败: ' + err.message, 'danger');
+        }).finally(function () {
+          submitBtn.disabled = false;
+        });
+      }
+
       function bindUiEvents() {
+        $('btn-dev-mode').addEventListener('click', function () {
+          setDevMode(!state.devMode, true);
+        });
+
+        $('btn-st-login').addEventListener('click', openBiliQrModal);
+        $('btn-st-logout').addEventListener('click', logoutBiliAccount);
+        $('btn-st-leave').addEventListener('click', disconnectCurrentRoom);
+        $('btn-st-switch').addEventListener('click', function () {
+          state.streamerSwitchOpen = !state.streamerSwitchOpen;
+          renderStreamerStatus();
+          renderRoomQuickArea();
+        });
+        $('st-room-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var target = $('st-room-input').value.trim();
+          if (!target) {
+            showToast('请输入房间号或直播间链接', 'warn');
+            return;
+          }
+          connectRoomTarget(target);
+        });
+        $('st-danmaku-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          submitDanmakuForm($('st-danmaku-input'), $('btn-st-danmaku'), null);
+        });
+
         document.querySelectorAll('.nav-btn').forEach(function (btn) {
           btn.addEventListener('click', function () {
             switchView(btn.getAttribute('data-view'));
@@ -2288,6 +3357,83 @@
 
         $('btn-refresh-all').addEventListener('click', function () {
           refreshProtectedData();
+        });
+
+        $('btn-toggle-record-raw').addEventListener('click', toggleRecordRaw);
+        $('btn-bili-login').addEventListener('click', openBiliQrModal);
+        $('btn-bili-logout').addEventListener('click', logoutBiliAccount);
+        $('btn-close-bili-qr').addEventListener('click', closeBiliQrModal);
+        $('btn-bili-qr-refresh').addEventListener('click', loadNewBiliQr);
+        $('bili-qr-modal').addEventListener('click', function (e) {
+          if (e.target === $('bili-qr-modal')) closeBiliQrModal();
+        });
+
+        $('room-target-input').addEventListener('input', syncRoomButtons);
+        $('room-switch-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var target = $('room-target-input').value.trim();
+          if (!target) {
+            showToast('请输入房间号或直播间链接', 'warn');
+            return;
+          }
+          connectRoomTarget(target);
+        });
+        $('btn-room-leave').addEventListener('click', disconnectCurrentRoom);
+        $('btn-room-options-refresh').addEventListener('click', refreshRoomOptions);
+
+        $('btn-desktop-pin').addEventListener('click', function () {
+          var nextPin = !state.alwaysOnTop;
+          tauriInvoke('set_always_on_top', { alwaysOnTop: nextPin }).then(function (actual) {
+            state.alwaysOnTop = Boolean(actual);
+            syncDesktopPinButton();
+            showToast(state.alwaysOnTop ? '主窗口已置顶' : '已取消主窗口置顶', 'ok');
+          }).catch(function (err) {
+            showToast('窗口置顶切换失败: ' + (err && err.message ? err.message : String(err)), 'danger');
+          });
+        });
+
+        $('btn-desktop-plugins-dir').addEventListener('click', function () {
+          tauriInvoke('open_plugins_dir').catch(function (err) {
+            showToast('打开插件目录失败: ' + (err && err.message ? err.message : String(err)), 'danger');
+          });
+        });
+        $('btn-folder-config').addEventListener('click', function () {
+          tauriInvoke('open_folder', { kind: 'config' }).catch(function (err) {
+            showToast('打开配置失败: ' + (err && err.message ? err.message : String(err)), 'danger');
+          });
+        });
+        $('btn-folder-record').addEventListener('click', function () {
+          tauriInvoke('open_folder', { kind: 'record' }).catch(function (err) {
+            showToast('打开录制目录失败: ' + (err && err.message ? err.message : String(err)), 'danger');
+          });
+        });
+        $('btn-folder-log').addEventListener('click', function () {
+          tauriInvoke('open_folder', { kind: 'log' }).catch(function (err) {
+            showToast('打开日志目录失败: ' + (err && err.message ? err.message : String(err)), 'danger');
+          });
+        });
+
+        document.addEventListener('click', function (e) {
+          if (!isTauriDesktop) return;
+          var el = e.target;
+          while (el && el.nodeType === 1 && el.tagName !== 'A') {
+            el = el.parentElement;
+          }
+          if (!el || el.tagName !== 'A') return;
+          var isBlank = el.getAttribute('target') === '_blank';
+          if (!isBlank) return;
+          var href = el.getAttribute('href');
+          if (!href) return;
+          try {
+            var parsed = new URL(href, window.location.href);
+            if (parsed.origin === window.location.origin) {
+              e.preventDefault();
+              var relPath = parsed.pathname + parsed.search + parsed.hash;
+              tauriInvoke('open_in_browser', { path: relPath }).catch(function (err) {
+                showToast('无法在默认浏览器打开: ' + (err && err.message ? err.message : String(err)), 'warn');
+              });
+            }
+          } catch (_) {}
         });
 
         $('btn-open-auth').addEventListener('click', openAuthModal);
@@ -2304,24 +3450,7 @@
 
         $('danmaku-form').addEventListener('submit', function (e) {
           e.preventDefault();
-          var msg = $('danmaku-input').value.trim();
-          if (!msg) return;
-          $('danmaku-submit').disabled = true;
-          $('danmaku-status').textContent = '发送中…';
-          apiFetch('/api/v1/system/danmaku', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ msg: msg })
-          }).then(function () {
-            $('danmaku-input').value = '';
-            $('danmaku-status').textContent = '弹幕已发送：' + msg;
-            showToast('弹幕发送成功', 'ok');
-          }).catch(function (err) {
-            $('danmaku-status').textContent = '发送失败：' + err.message;
-            showToast('发送失败: ' + err.message, 'danger');
-          }).finally(function () {
-            $('danmaku-submit').disabled = false;
-          });
+          submitDanmakuForm($('danmaku-input'), $('danmaku-submit'), $('danmaku-status'));
         });
 
         $('feed-filter').addEventListener('change', function () {
@@ -2357,7 +3486,7 @@
         $('btn-reload-plugins').addEventListener('click', refreshPlugins);
         $('drawer-copy-obs').addEventListener('click', function () {
           if (state.drawerPlugin) {
-            copyText(buildObsPluginUrl(state.drawerPlugin), 'OBS 浏览器源 URL');
+            copyObsUrl(buildObsPluginUrl(state.drawerPlugin));
           }
         });
         $('btn-close-drawer').addEventListener('click', closePluginDrawer);
@@ -2365,8 +3494,13 @@
           if (e.target === $('plugin-drawer')) closePluginDrawer();
         });
         window.addEventListener('keydown', function (e) {
-          if (e.key === 'Escape' && $('plugin-drawer').classList.contains('open')) {
-            closePluginDrawer();
+          if (e.key === 'Escape') {
+            if ($('plugin-drawer').classList.contains('open')) {
+              closePluginDrawer();
+            }
+            if ($('bili-qr-modal').classList.contains('open')) {
+              closeBiliQrModal();
+            }
           }
         });
 
@@ -2508,7 +3642,9 @@
         });
       }
 
+      setDevMode(readSavedDevMode(), false);
       bindUiEvents();
+      initDesktopBridge();
       window.addEventListener('hashchange', applyHashViewIfPresent);
       connectLiveWs();
       consumeHashTokenIfPresent().then(function (unlockedByHash) {

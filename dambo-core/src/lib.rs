@@ -227,7 +227,7 @@ impl DamboRuntime {
         format!("http://{}:{}/{}/", host, self.config.server.port, name)
     }
 
-    fn local_http_origin(&self) -> String {
+    pub fn local_http_origin(&self) -> String {
         let host = self
             .local_loopback_host()
             .map(str::to_string)
@@ -243,16 +243,10 @@ impl DamboRuntime {
         format!("{}/{}/m", self.local_http_origin(), name)
     }
 
-    /// Build the canonical service portal URL (`http://{host}:{port}/`),
-    /// preferring a local loopback host when accessible.
-    pub fn portal_url(&self) -> String {
-        format!("{}/", self.local_http_origin())
-    }
-
-    /// Build the unified admin console URL (`http://{host}:{port}/admin[#view=...]`),
+    /// Build the unified control-panel URL (`http://{host}:{port}/[#view=...]`),
     /// preferring a local loopback host when accessible so local admin cookies auto-mint.
     pub fn admin_url(&self, view: Option<&str>) -> String {
-        let base = format!("{}/admin", self.local_http_origin());
+        let base = format!("{}/", self.local_http_origin());
         match view.map(str::trim) {
             Some(v @ ("overview" | "plugins" | "acl" | "data")) => format!("{}#view={}", base, v),
             _ => base,
@@ -276,9 +270,7 @@ impl DamboRuntime {
 
     /// Update and atomically persist the runtime `record_raw` toggle into `redb`.
     pub fn set_record_raw(&self, enabled: bool) -> Result<()> {
-        self.recorder.set_record_raw(enabled);
-        self.state_store.set_record_raw(Some(enabled))?;
-        Ok(())
+        set_record_raw_with(&self.recorder, &self.state_store, enabled)
     }
 
     /// Per-process in-memory override for `[record].record_raw` (e.g. CLI `--record-raw`).
@@ -398,6 +390,9 @@ impl DamboRuntime {
             event_tx: self.event_engine.sender(),
             recorder: Some(self.recorder.clone()),
             auth: Some(self.auth.clone()),
+            collector: Some(self.collector.clone()),
+            event_engine: Some(self.event_engine.clone()),
+            state_store: Some(self.state_store.clone()),
             last_danmaku_sent_at: self.last_danmaku_sent_at.clone(),
             html_dir: self.html_dir.clone(),
             cancel: self.cancel.child_token(),
@@ -446,17 +441,6 @@ impl DamboRuntime {
     }
 
     async fn connect_room_internal(&self, room_id: u64, persist: bool) -> Result<()> {
-        if persist {
-            self.state_store
-                .set_current_room(Some(room_id))
-                .context("Failed to persist room switch")?;
-        }
-
-        if let Err(e) = self.recorder.finish_session() {
-            log::warn!("Failed to finish recorder session before connect: {}", e);
-        }
-
-        self.event_engine.set_room(room_id, String::new());
         let ctx = CollectorContext {
             auth: self.auth.clone(),
             hub: self.hub.clone(),
@@ -464,24 +448,97 @@ impl DamboRuntime {
             event_engine: self.event_engine.clone(),
             avatar_cache_size: self.config.bilibili.avatar_cache_size,
         };
-        self.collector.connect_room(room_id, ctx).await;
-        Ok(())
+        connect_room_with(&self.collector, &self.state_store, ctx, room_id, persist).await
     }
 
     pub async fn disconnect_room(&self) -> Result<()> {
         self.startup_auto_connect.store(false, Ordering::Release);
-        self.collector.disconnect(self.hub.clone()).await;
-        self.event_engine.set_room(0, String::new());
-        self.recorder.finish_session()?;
-
-        self.state_store.set_current_room(None)?;
-        Ok(())
+        disconnect_room_with(
+            &self.collector,
+            &self.hub,
+            &self.recorder,
+            &self.event_engine,
+            &self.state_store,
+        )
+        .await
     }
 
     /// Validate logged-in session and live room connection, enforce cooldown, and send a danmaku message.
     pub async fn send_danmaku(&self, msg: &str) -> std::result::Result<(), SendDanmakuError> {
         send_danmaku_with(&self.hub, &self.auth, &self.last_danmaku_sent_at, msg).await
     }
+}
+
+pub(crate) async fn connect_room_with(
+    collector: &CollectorManager,
+    state_store: &StateStore,
+    ctx: CollectorContext,
+    room_id: u64,
+    persist: bool,
+) -> Result<()> {
+    if persist {
+        state_store
+            .set_current_room(Some(room_id))
+            .context("Failed to persist room switch")?;
+    }
+
+    if let Err(e) = ctx.recorder.finish_session() {
+        log::warn!("Failed to finish recorder session before connect: {}", e);
+    }
+
+    ctx.event_engine.set_room(room_id, String::new());
+    collector.connect_room(room_id, ctx).await;
+    Ok(())
+}
+
+pub(crate) async fn disconnect_room_with(
+    collector: &CollectorManager,
+    hub: &Arc<StateHub>,
+    recorder: &Recorder,
+    event_engine: &EventEngine,
+    state_store: &StateStore,
+) -> Result<()> {
+    collector.disconnect(hub.clone()).await;
+    event_engine.set_room(0, String::new());
+    recorder.finish_session()?;
+    state_store.set_current_room(None)?;
+    Ok(())
+}
+
+pub(crate) async fn fetch_room_options_with(
+    auth: Option<&AuthManager>,
+    state_store: &StateStore,
+) -> RoomOptionsPayload {
+    let (my_room, following_live) = if let Some(auth) = auth {
+        if auth.current_session().is_some() {
+            let auth_state = auth.current_state();
+            if auth_state.uname.trim().is_empty() || auth_state.uname.starts_with("UID:") {
+                let _ = auth.validate_session().await;
+            }
+        }
+        let my_room = auth.fetch_my_room().await.ok().flatten();
+        let following_live = auth.fetch_following_live().await.unwrap_or_default();
+        (my_room, following_live)
+    } else {
+        (None, Vec::new())
+    };
+    let history_rooms = state_store.room_history();
+
+    RoomOptionsPayload {
+        my_room,
+        following_live,
+        history_rooms,
+    }
+}
+
+pub(crate) fn set_record_raw_with(
+    recorder: &Recorder,
+    state_store: &StateStore,
+    enabled: bool,
+) -> Result<()> {
+    recorder.set_record_raw(enabled);
+    state_store.set_record_raw(Some(enabled))?;
+    Ok(())
 }
 
 /// Shared danmaku validation, cooldown enforcement, and upstream dispatch used by both
@@ -542,21 +599,7 @@ impl DamboRuntime {
     }
 
     pub async fn fetch_room_options(&self) -> RoomOptionsPayload {
-        if self.auth.current_session().is_some() {
-            let auth_state = self.auth.current_state();
-            if auth_state.uname.trim().is_empty() || auth_state.uname.starts_with("UID:") {
-                let _ = self.auth.validate_session().await;
-            }
-        }
-        let my_room = self.auth.fetch_my_room().await.ok().flatten();
-        let following_live = self.auth.fetch_following_live().await.unwrap_or_default();
-        let history_rooms = self.state_store.room_history();
-
-        RoomOptionsPayload {
-            my_room,
-            following_live,
-            history_rooms,
-        }
+        fetch_room_options_with(Some(&self.auth), &self.state_store).await
     }
 
     /// Build LAN discovery URLs & SVG/terminal QR codes for the configured server and requested path.
@@ -1157,7 +1200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_portal_and_admin_url_helpers() {
+    async fn test_runtime_url_helpers() {
         let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let temp_dir =
             std::env::temp_dir().join(format!("dambo_rt_urls_{}_{}", std::process::id(), id));
@@ -1183,13 +1226,9 @@ mod tests {
             rt.plugin_manage_url("default"),
             "http://localhost:3948/default/m"
         );
-        assert_eq!(rt.portal_url(), "http://localhost:3948/");
-        assert_eq!(rt.admin_url(None), "http://localhost:3948/admin");
-        assert_eq!(
-            rt.admin_url(Some("acl")),
-            "http://localhost:3948/admin#view=acl"
-        );
-        assert_eq!(rt.admin_url(Some("invalid")), "http://localhost:3948/admin");
+        assert_eq!(rt.admin_url(None), "http://localhost:3948/");
+        assert_eq!(rt.admin_url(Some("acl")), "http://localhost:3948/#view=acl");
+        assert_eq!(rt.admin_url(Some("invalid")), "http://localhost:3948/");
 
         rt.shutdown_and_wait().await;
         let _ = fs::remove_dir_all(&temp_dir);

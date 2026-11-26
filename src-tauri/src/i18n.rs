@@ -201,13 +201,11 @@ mod tests {
         assert_eq!(t(LOCALE_JA, "console.trigger_label"), "コンソール");
         assert_eq!(t(LOCALE_EN, "console.trigger_label"), "Console");
 
-        assert_eq!(t(LOCALE_ZH_CN, "tray.open_admin"), "打开管理后台");
-        assert_eq!(t(LOCALE_JA, "tray.open_admin"), "管理コンソールを開く");
-        assert_eq!(t(LOCALE_EN, "tray.open_admin"), "Open Admin Console");
+        assert_eq!(t(LOCALE_ZH_CN, "tray.open_admin"), "打开控制面板");
+        assert_eq!(t(LOCALE_JA, "tray.open_admin"), "コントロールパネルを開く");
+        assert_eq!(t(LOCALE_EN, "tray.open_admin"), "Open Control Panel");
 
-        assert_eq!(t(LOCALE_ZH_CN, "tray.open_portal"), "打开插件门户");
-        assert_eq!(t(LOCALE_JA, "tray.open_portal"), "プラグインポータルを開く");
-        assert_eq!(t(LOCALE_EN, "tray.open_portal"), "Open Plugin Portal");
+        assert!(!dict_zh_cn().contains_key("tray.open_portal"));
 
         assert_eq!(
             t_fmt(LOCALE_ZH_CN, "console.pending_alert", &[("count", "2")]),

@@ -22,7 +22,7 @@ use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
 use axum::middleware;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use futures_util::stream::{self, Stream};
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use serde::{Deserialize, Serialize};
@@ -244,6 +244,21 @@ struct SystemDanmakuBody {
     msg: String,
 }
 
+#[derive(Deserialize)]
+struct RoomConnectBody {
+    target: String,
+}
+
+#[derive(Deserialize)]
+struct RecordRawBody {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct QrPollBody {
+    qrcode_key: String,
+}
+
 #[derive(Serialize)]
 struct AdminAclItem {
     #[serde(flatten)]
@@ -371,6 +386,11 @@ async fn get_system_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     Json(serde_json::json!({
         "room_state": room_state,
         "room_info": room_info,
+        "history_rooms": state
+            .state_store
+            .as_ref()
+            .map(|s| s.room_history())
+            .unwrap_or_default(),
         "recording": {
             "enabled": rec_enabled,
             "record_raw": rec_raw,
@@ -437,6 +457,194 @@ async fn post_system_danmaku(
             ApiError(api_err)
         })?;
 
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn get_system_room_options(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(state_store) = state.state_store.as_deref() else {
+        return Err(ApiError(PluginApiError::internal(
+            "Room state store is unavailable in this runtime context",
+        )));
+    };
+    let options = crate::fetch_room_options_with(state.auth.as_deref(), state_store).await;
+    Ok(Json(options))
+}
+
+async fn post_system_room_connect(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RoomConnectBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let room_id = crate::collector::parse_room_input(&body.target).ok_or_else(|| {
+        ApiError(PluginApiError::invalid_argument(format!(
+            "Cannot parse room ID or URL: '{}'",
+            body.target.trim()
+        )))
+    })?;
+    let (Some(collector), Some(auth), Some(recorder), Some(event_engine), Some(state_store)) = (
+        state.collector.as_ref(),
+        state.auth.as_ref(),
+        state.recorder.as_ref(),
+        state.event_engine.as_ref(),
+        state.state_store.as_ref(),
+    ) else {
+        return Err(ApiError(PluginApiError::internal(
+            "Room controller is unavailable in this runtime context",
+        )));
+    };
+    let ctx = crate::collector::CollectorContext {
+        auth: auth.clone(),
+        hub: state.hub.clone(),
+        recorder: recorder.clone(),
+        event_engine: event_engine.clone(),
+        avatar_cache_size: state.config.bilibili.avatar_cache_size,
+    };
+    crate::connect_room_with(collector, state_store, ctx, room_id, true)
+        .await
+        .map_err(|e| ApiError(PluginApiError::internal(e.to_string())))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "room_id": room_id
+    })))
+}
+
+async fn post_system_room_disconnect(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (Some(collector), Some(recorder), Some(event_engine), Some(state_store)) = (
+        state.collector.as_ref(),
+        state.recorder.as_ref(),
+        state.event_engine.as_ref(),
+        state.state_store.as_ref(),
+    ) else {
+        return Err(ApiError(PluginApiError::internal(
+            "Room controller is unavailable in this runtime context",
+        )));
+    };
+    crate::disconnect_room_with(collector, &state.hub, recorder, event_engine, state_store)
+        .await
+        .map_err(|e| ApiError(PluginApiError::internal(e.to_string())))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn delete_system_room_history(
+    _: AdminGuard,
+    AxumPath(room_id): AxumPath<u64>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(state_store) = state.state_store.as_ref() else {
+        return Err(ApiError(PluginApiError::internal(
+            "Room state store is unavailable in this runtime context",
+        )));
+    };
+    let history_rooms = state_store
+        .remove_history_room(room_id)
+        .map_err(|e| ApiError(PluginApiError::internal(e.to_string())))?;
+    Ok(Json(serde_json::json!({ "history_rooms": history_rooms })))
+}
+
+async fn put_system_record_raw(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RecordRawBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (Some(recorder), Some(state_store)) = (state.recorder.as_ref(), state.state_store.as_ref())
+    else {
+        return Err(ApiError(PluginApiError::internal(
+            "Recorder controller is unavailable in this runtime context",
+        )));
+    };
+    crate::set_record_raw_with(recorder, state_store, body.enabled)
+        .map_err(|e| ApiError(PluginApiError::internal(e.to_string())))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "record_raw": body.enabled
+    })))
+}
+
+async fn post_system_auth_qr(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(auth) = state.auth.as_ref() else {
+        return Err(ApiError(PluginApiError::internal(
+            "Auth manager is unavailable in this runtime context",
+        )));
+    };
+    let qr = auth.generate_qr().await.map_err(|e| {
+        ApiError(PluginApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "UPSTREAM_ERROR",
+            format!("Failed to generate Bilibili QR code: {}", e),
+        ))
+    })?;
+    Ok(Json(serde_json::json!({
+        "qrcode_key": qr.qrcode_key,
+        "svg": qr.svg,
+        "url": qr.url,
+    })))
+}
+
+async fn post_system_auth_qr_poll(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<QrPollBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let key = body.qrcode_key.trim();
+    if key.is_empty() {
+        return Err(ApiError(PluginApiError::invalid_argument(
+            "Missing required 'qrcode_key'",
+        )));
+    }
+    let Some(auth) = state.auth.as_ref() else {
+        return Err(ApiError(PluginApiError::internal(
+            "Auth manager is unavailable in this runtime context",
+        )));
+    };
+    let status = auth.poll_qr(key).await.map_err(|e| {
+        ApiError(PluginApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "UPSTREAM_ERROR",
+            format!("Failed to poll Bilibili QR login status: {}", e),
+        ))
+    })?;
+    let payload = match status {
+        crate::auth::QrPollStatus::Waiting => serde_json::json!({ "status": "waiting" }),
+        crate::auth::QrPollStatus::Scanned => serde_json::json!({ "status": "scanned" }),
+        crate::auth::QrPollStatus::Expired => serde_json::json!({ "status": "expired" }),
+        crate::auth::QrPollStatus::Success(_) => {
+            let s = auth.current_state();
+            serde_json::json!({
+                "status": "success",
+                "auth": {
+                    "is_login": s.is_login,
+                    "mid": s.mid,
+                    "uname": s.uname,
+                }
+            })
+        }
+        crate::auth::QrPollStatus::Error(message) => {
+            serde_json::json!({ "status": "error", "message": message })
+        }
+    };
+    Ok(Json(payload))
+}
+
+async fn post_system_auth_logout(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(auth) = state.auth.as_ref() else {
+        return Err(ApiError(PluginApiError::internal(
+            "Auth manager is unavailable in this runtime context",
+        )));
+    };
+    auth.logout()
+        .map_err(|e| ApiError(PluginApiError::internal(e.to_string())))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1438,6 +1646,17 @@ pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/system/status", get(get_system_status))
         .route("/system/danmaku", post(post_system_danmaku))
         .route("/system/lan-urls", get(get_system_lan_urls))
+        .route("/system/room/options", get(get_system_room_options))
+        .route("/system/room/connect", post(post_system_room_connect))
+        .route("/system/room/disconnect", post(post_system_room_disconnect))
+        .route(
+            "/system/room/history/{room_id}",
+            delete(delete_system_room_history),
+        )
+        .route("/system/record-raw", put(put_system_record_raw))
+        .route("/system/auth/qr", post(post_system_auth_qr))
+        .route("/system/auth/qr/poll", post(post_system_auth_qr_poll))
+        .route("/system/auth/logout", post(post_system_auth_logout))
         .route("/admin/acl", put(put_admin_acl).delete(delete_admin_acl))
         .route(
             "/admin/data/{store}/{owner}/namespaces",

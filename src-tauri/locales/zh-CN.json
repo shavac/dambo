@@ -1,7 +1,6 @@
 {
-  "tray.toggle_panel": "显示 / 隐藏面板",
-  "tray.open_admin": "打开管理后台",
-  "tray.open_portal": "打开插件门户",
+  "tray.toggle_panel": "显示 / 隐藏主窗口",
+  "tray.open_admin": "打开控制面板",
   "tray.recent_rooms": "历史房间",
   "tray.recent_empty": "暂无历史房间",
   "tray.plugin_menu": "插件",

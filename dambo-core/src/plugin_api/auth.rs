@@ -598,7 +598,7 @@ fn check_referer_matches_manage(
     let expected = format!("/{}/m", plugin_name);
     validate_referer_authority_and_path(
         headers,
-        |p| p == expected || p == "/admin",
+        |p| p == expected || p == "/" || p == "/admin",
         |got| {
             format!(
                 "Management action requires Referer '{}' (got '{}')",
@@ -654,8 +654,8 @@ pub(super) fn require_admin_session(
 
     validate_referer_authority_and_path(
         headers,
-        |p| p == "/admin" || (p.starts_with('/') && p.ends_with("/m")),
-        |got| format!("Admin action requires Referer '/admin' (got '{}')", got),
+        |p| p == "/" || p == "/admin" || (p.starts_with('/') && p.ends_with("/m")),
+        |got| format!("Admin action requires Referer '/' (got '{}')", got),
     )
 }
 
@@ -722,10 +722,10 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for ManageSession {
     }
 }
 
-/// Global admin guard enforcing `dambo_admin` authentication on `/api/v1/admin/*` and `/api/v1/system/danmaku`.
+/// Global admin guard enforcing `dambo_admin` authentication on `/api/v1/admin/*` and `/api/v1/system/*`.
 ///
 /// In `Open` mode, loopback and private-network peers bypass cookie/Referer checks;
-/// in `Strict` mode (or for public IPs), valid `dambo_admin` cookie + `/admin` (or `/{plugin}/m`) Referer are required.
+/// in `Strict` mode (or for public IPs), valid `dambo_admin` cookie + `/` (or `/{plugin}/m`) Referer are required.
 pub struct AdminGuard;
 
 impl axum::extract::FromRequestParts<Arc<AppState>> for AdminGuard {
@@ -828,8 +828,8 @@ pub(super) async fn api_security_middleware(
             .unwrap_or_else(|| req.uri().path().to_string());
         let is_exempt_caller_header = path == "/api/v1/auth/manage"
             || path == "/auth/manage"
-            || path == "/api/v1/system/danmaku"
-            || path == "/system/danmaku"
+            || path.starts_with("/api/v1/system/")
+            || path.starts_with("/system/")
             || path == "/api/v1/admin"
             || path.starts_with("/api/v1/admin/")
             || path == "/admin"

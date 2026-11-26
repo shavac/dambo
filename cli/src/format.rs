@@ -436,13 +436,13 @@ pub fn format_room_info_lines(
     ));
     let service_text = if is_wildcard_host(host) {
         format!(
-            "监听 {}:{} | 本机 OBS http://{}:{}/ | 列表 http://{}:{}/list/ | WS ws://{}:{}/ws",
-            listen_host, port, c_host, port, c_host, port, c_host, port
+            "监听 {}:{} | 控制面板 http://{}:{}/ | 默认 OBS 源 http://{}:{}/default/ | 列表 http://{}:{}/list/ | WS ws://{}:{}/ws",
+            listen_host, port, c_host, port, c_host, port, c_host, port, c_host, port
         )
     } else {
         format!(
-            "OBS http://{}:{}/ | 列表 http://{}:{}/list/ | WS ws://{}:{}/ws",
-            listen_host, port, listen_host, port, listen_host, port
+            "控制面板 http://{}:{}/ | 默认 OBS 源 http://{}:{}/default/ | 列表 http://{}:{}/list/ | WS ws://{}:{}/ws",
+            listen_host, port, listen_host, port, listen_host, port, listen_host, port
         )
     };
     lines.push(card_row(
@@ -1156,6 +1156,8 @@ mod tests {
         assert!(room_joined.contains("主播A"));
         assert!(room_joined.contains("虚拟主播 / 虚拟日常"));
         assert!(room_joined.contains("监听 0.0.0.0:3838"));
+        assert!(room_joined.contains("控制面板 http://localhost:3838/"));
+        assert!(room_joined.contains("默认 OBS 源 http://localhost:3838/default/"));
         assert!(room_joined.contains("http://localhost:3838/list/"));
     }
 
