@@ -56,6 +56,12 @@
   "plugin.copied": "✓ Copied",
   "plugin.open_manage": "Settings",
   "plugin.open_dir": "Open Plugins Folder",
+  "plugin.tab_plugins": "Plugins",
+  "plugin.tab_mobile_qr": "📱 Mobile QR",
+  "plugin.qr_btn_title": "Open on phone via QR",
+  "plugin.qr_target_admin": "Admin (/)",
+  "plugin.qr_mode_view": "Plugin View",
+  "plugin.qr_mode_manage": "Plugin Manage",
 
   "more.title": "More actions",
   "more.always_on_top": "📌 Always on Top",

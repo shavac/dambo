@@ -27,6 +27,12 @@ let isConnecting = false;
 let connectingTimeoutId = null;
 let isAlwaysOnTop = false;
 let toastTimer = null;
+let activePluginTab = "plugins";
+let qrTarget = "__admin__";
+let qrPluginPage = "view";
+let qrSelectedIp = "";
+let lastQrPayload = null;
+let qrFetchSeq = 0;
 
 function t(key, vars) {
     let text = i18nMessages[key] || key;
@@ -97,7 +103,6 @@ function computeRequiredMinPanelWidth() {
     const danmakuToggleBtn = document.getElementById('danmaku-toggle-btn');
     const consoleOpenBtn = document.getElementById('console-open-btn');
     const pluginGroup = document.querySelector('.plugin-menu-group');
-    const pinBtn = document.getElementById('pin-btn');
     const moreGroup = document.querySelector('.more-menu-group');
     const winControls = document.querySelector('.win-controls');
     const resizeHandleRight = document.getElementById('resize-handle-right');
@@ -113,7 +118,6 @@ function computeRequiredMinPanelWidth() {
         danmakuToggleBtn,
         consoleOpenBtn,
         pluginGroup,
-        pinBtn,
         moreGroup,
         winControls,
         resizeHandleRight,
@@ -185,6 +189,9 @@ function applyTranslations(payload) {
     updateAccountDisplay(currentAuthState);
     updateRoomDisplay(currentRoomState, { fromBackendEvent: false });
     renderPlugins(pluginList);
+    if (lastQrPayload) {
+        renderQrPayload(lastQrPayload);
+    }
     updateLanguageButtons(currentLocale);
     syncPinUiState();
     if (lastRoomOptions) {
@@ -322,124 +329,329 @@ function renderPlugins(plugins) {
         empty.className = 'plugin-empty';
         empty.innerText = t('plugin.empty');
         listEl.appendChild(empty);
+    } else {
+        pluginList.forEach((p) => {
+            const isDesktopOpen = Boolean(p.is_desktop_open);
+            const card = document.createElement('div');
+            card.className = `plugin-card${isDesktopOpen ? ' desktop-open' : ''}`;
+
+            const main = document.createElement('div');
+            main.className = 'plugin-card-main';
+
+            const header = document.createElement('div');
+            header.className = 'plugin-card-header';
+
+            const title = document.createElement('span');
+            title.className = 'plugin-title';
+            title.innerText = p.title || p.name;
+            header.appendChild(title);
+
+            const badge = document.createElement('span');
+            badge.className = `plugin-badge${p.is_builtin ? '' : ' custom'}`;
+            badge.innerText = t(p.is_builtin ? 'plugin.badge_builtin' : 'plugin.badge_custom');
+            header.appendChild(badge);
+
+            if (p.obs_width && p.obs_height) {
+                const size = document.createElement('span');
+                size.className = 'plugin-size-badge';
+                size.innerText = `${p.obs_width}×${p.obs_height}`;
+                header.appendChild(size);
+            }
+
+            main.appendChild(header);
+
+            const desc = document.createElement('div');
+            desc.className = 'plugin-desc';
+            desc.innerText = p.description || t('plugin.no_description');
+            desc.title = desc.innerText;
+            main.appendChild(desc);
+
+            const urlEl = document.createElement('div');
+            urlEl.className = 'plugin-url';
+            urlEl.innerText = p.url;
+            urlEl.title = p.url;
+            main.appendChild(urlEl);
+
+            const actions = document.createElement('div');
+            actions.className = 'plugin-card-actions';
+
+            const toggleDesktopBtn = document.createElement('button');
+            toggleDesktopBtn.type = 'button';
+            toggleDesktopBtn.className = `plugin-btn ${isDesktopOpen ? 'danger' : 'primary'}`;
+            toggleDesktopBtn.innerText = t(isDesktopOpen ? 'plugin.close_desktop' : 'plugin.open_desktop');
+            toggleDesktopBtn.onclick = async () => {
+                if (!invoke) return;
+                try {
+                    if (isDesktopOpen) {
+                        await invoke('close_plugin_desktop', { pluginName: p.name });
+                        showToast(t('toast.closed_desktop', { name: p.title || p.name }));
+                    } else {
+                        await invoke('open_plugin_desktop', { pluginName: p.name });
+                        showToast(t('toast.opened_desktop', { name: p.title || p.name }));
+                    }
+                    const fresh = await invoke('get_plugins');
+                    renderPlugins(fresh);
+                } catch (e) {
+                    console.error('toggle_plugin_desktop failed:', e);
+                    showToast(t('toast.error_prefix', { error: String(e) }));
+                }
+            };
+
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'plugin-btn';
+            copyBtn.innerText = t('plugin.copy_url');
+            copyBtn.onclick = async () => {
+                try {
+                    await navigator.clipboard.writeText(p.url);
+                    copyBtn.classList.add('copied');
+                    copyBtn.innerText = t('plugin.copied');
+                    setTimeout(() => {
+                        copyBtn.classList.remove('copied');
+                        copyBtn.innerText = t('plugin.copy_url');
+                    }, 1500);
+                } catch (e) {
+                    console.error('Failed to copy plugin url:', e);
+                    showToast(t('toast.error_prefix', { error: String(e) }));
+                }
+            };
+
+            const manageBtn = document.createElement('button');
+            manageBtn.type = 'button';
+            manageBtn.className = 'plugin-btn';
+            manageBtn.innerText = t('plugin.open_manage');
+            manageBtn.title = p.manage_url || p.manage_route || '';
+            manageBtn.onclick = async () => {
+                if (!invoke) return;
+                try {
+                    await invoke('open_plugin_manage', { pluginName: p.name });
+                    showToast(t('toast.opened_manage', { name: p.title || p.name }));
+                } catch (e) {
+                    console.error('open_plugin_manage failed:', e);
+                    showToast(t('toast.error_prefix', { error: String(e) }));
+                }
+            };
+
+            const qrBtn = document.createElement('button');
+            qrBtn.type = 'button';
+            qrBtn.className = 'plugin-btn plugin-qr-icon-btn';
+            qrBtn.innerText = '📱';
+            qrBtn.title = t('plugin.qr_btn_title');
+            qrBtn.onclick = (e) => {
+                e.stopPropagation();
+                openPluginQrFor(p.name, 'view');
+            };
+
+            const secondaryRow = document.createElement('div');
+            secondaryRow.className = 'plugin-card-actions-row';
+            secondaryRow.appendChild(manageBtn);
+            secondaryRow.appendChild(copyBtn);
+            secondaryRow.appendChild(qrBtn);
+
+            actions.appendChild(toggleDesktopBtn);
+            actions.appendChild(secondaryRow);
+
+            card.appendChild(main);
+            card.appendChild(actions);
+            listEl.appendChild(card);
+        });
+    }
+
+    const targetFellBack = renderQrTargetButtons();
+    if (
+        targetFellBack &&
+        activePluginTab === 'qr' &&
+        !document.getElementById('plugin-dropdown-menu')?.classList.contains('hidden')
+    ) {
+        fetchPluginQrUrls();
+    }
+    scheduleSyncPanelMinWidth();
+}
+
+function resolveQrRequest() {
+    if (qrTarget !== '__admin__') {
+        const matched = pluginList.find((p) => p.name === qrTarget);
+        if (matched) {
+            const title = matched.title || matched.name;
+            if (qrPluginPage === 'manage') {
+                return {
+                    path: `/${matched.name}/m`,
+                    includeToken: true,
+                    label: `${title} · ${t('plugin.qr_mode_manage')}`,
+                };
+            }
+            return {
+                path: `/${matched.name}/`,
+                includeToken: false,
+                label: `${title} · ${t('plugin.qr_mode_view')}`,
+            };
+        }
+    }
+    return {
+        path: '/',
+        includeToken: true,
+        label: t('plugin.qr_target_admin'),
+    };
+}
+
+function renderQrTargetButtons() {
+    let fellBack = false;
+    if (qrTarget !== '__admin__' && !pluginList.some((p) => p.name === qrTarget)) {
+        qrTarget = '__admin__';
+        fellBack = true;
+    }
+
+    const targetsEl = document.getElementById('plugin-qr-targets');
+    if (targetsEl) {
+        targetsEl.replaceChildren();
+        const items = [
+            { id: '__admin__', label: t('plugin.qr_target_admin') },
+            ...pluginList.map((p) => ({ id: p.name, label: p.title || p.name })),
+        ];
+        items.forEach((item) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `plugin-btn qr-pill-btn${qrTarget === item.id ? ' active' : ''}`;
+            btn.setAttribute('data-qr-target', item.id);
+            btn.innerText = item.label;
+            btn.title = item.label;
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                if (qrTarget === item.id) return;
+                qrTarget = item.id;
+                renderQrTargetButtons();
+                fetchPluginQrUrls();
+            };
+            targetsEl.appendChild(btn);
+        });
+    }
+
+    const pageRow = document.getElementById('plugin-qr-page-row');
+    if (pageRow) {
+        pageRow.classList.toggle('hidden', qrTarget === '__admin__');
+    }
+
+    const viewBtn = document.getElementById('qr-mode-view-btn');
+    const manageBtn = document.getElementById('qr-mode-manage-btn');
+    viewBtn?.classList.toggle('active', qrPluginPage !== 'manage');
+    manageBtn?.classList.toggle('active', qrPluginPage === 'manage');
+
+    return fellBack;
+}
+
+function setPluginTab(tab) {
+    activePluginTab = tab === 'qr' ? 'qr' : 'plugins';
+    const isQr = activePluginTab === 'qr';
+    document.getElementById('tab-plugins-btn')?.classList.toggle('active', !isQr);
+    document.getElementById('tab-mobile-qr-btn')?.classList.toggle('active', isQr);
+    document.getElementById('plugin-cards-list')?.classList.toggle('hidden', isQr);
+    document.getElementById('plugin-dropdown-footer')?.classList.toggle('hidden', isQr);
+    document.getElementById('plugin-qr-panel')?.classList.toggle('hidden', !isQr);
+    if (isQr) {
+        renderQrTargetButtons();
+        fetchPluginQrUrls();
+    }
+}
+
+function openPluginQrFor(target, page = 'view') {
+    qrTarget = target || '__admin__';
+    qrPluginPage = page === 'manage' ? 'manage' : 'view';
+    setPluginTab('qr');
+}
+
+function renderQrPayload(payload) {
+    if (!payload) return;
+    lastQrPayload = payload;
+
+    const modeBadge = document.getElementById('plugin-qr-mode-badge');
+    const ipTabsEl = document.getElementById('plugin-qr-ip-tabs');
+    const targetPathEl = document.getElementById('plugin-qr-target-path');
+    const urlTextEl = document.getElementById('plugin-qr-url-text');
+    const localNoteEl = document.getElementById('plugin-qr-local-note');
+    const qrImgEl = document.getElementById('plugin-qr-img');
+    const copyBtn = document.getElementById('plugin-qr-copy-btn');
+
+    const isOpen = payload.security_mode === 'open';
+    if (modeBadge) {
+        modeBadge.innerText = t(isOpen ? 'lan.mode_open' : 'lan.mode_strict');
+        modeBadge.classList.toggle('open', isOpen);
+    }
+
+    const req = resolveQrRequest();
+    if (targetPathEl) {
+        targetPathEl.innerText = `${req.label} (${payload.path || req.path})`;
+        targetPathEl.title = targetPathEl.innerText;
+    }
+
+    const urls = Array.isArray(payload.urls) ? payload.urls : [];
+    if (payload.local_only || urls.length === 0) {
+        const displayUrl = payload.local_url || '';
+        if (ipTabsEl) {
+            ipTabsEl.replaceChildren();
+            ipTabsEl.classList.add('hidden');
+        }
+        if (urlTextEl) urlTextEl.innerText = displayUrl;
+        if (copyBtn) copyBtn.dataset.copyUrl = displayUrl;
+        if (localNoteEl) {
+            localNoteEl.innerText = t('lan.local_only');
+            localNoteEl.classList.remove('hidden');
+        }
+        if (qrImgEl) qrImgEl.classList.add('hidden');
         return;
     }
 
-    pluginList.forEach((p) => {
-        const isDesktopOpen = Boolean(p.is_desktop_open);
-        const card = document.createElement('div');
-        card.className = `plugin-card${isDesktopOpen ? ' desktop-open' : ''}`;
+    if (!urls.some((u) => u.ip === qrSelectedIp)) {
+        qrSelectedIp = urls[0].ip;
+    }
+    const activeEntry = urls.find((u) => u.ip === qrSelectedIp) || urls[0];
 
-        const main = document.createElement('div');
-        main.className = 'plugin-card-main';
-
-        const header = document.createElement('div');
-        header.className = 'plugin-card-header';
-
-        const title = document.createElement('span');
-        title.className = 'plugin-title';
-        title.innerText = p.title || p.name;
-        header.appendChild(title);
-
-        const badge = document.createElement('span');
-        badge.className = `plugin-badge${p.is_builtin ? '' : ' custom'}`;
-        badge.innerText = t(p.is_builtin ? 'plugin.badge_builtin' : 'plugin.badge_custom');
-        header.appendChild(badge);
-
-        if (p.obs_width && p.obs_height) {
-            const size = document.createElement('span');
-            size.className = 'plugin-size-badge';
-            size.innerText = `${p.obs_width}×${p.obs_height}`;
-            header.appendChild(size);
+    if (localNoteEl) localNoteEl.classList.add('hidden');
+    if (urlTextEl) urlTextEl.innerText = activeEntry.url || '';
+    if (copyBtn) copyBtn.dataset.copyUrl = activeEntry.url || '';
+    if (qrImgEl) {
+        if (activeEntry.qr_svg) {
+            qrImgEl.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(activeEntry.qr_svg);
+            qrImgEl.alt = t('lan.qr_alt');
+            qrImgEl.classList.remove('hidden');
+        } else {
+            qrImgEl.classList.add('hidden');
         }
+    }
+    if (ipTabsEl) {
+        ipTabsEl.replaceChildren();
+        if (urls.length > 1) {
+            ipTabsEl.classList.remove('hidden');
+            urls.forEach((u) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = `plugin-btn lan-ip-btn${u.ip === qrSelectedIp ? ' active' : ''}`;
+                btn.innerText = u.ip;
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    qrSelectedIp = u.ip;
+                    renderQrPayload(lastQrPayload);
+                };
+                ipTabsEl.appendChild(btn);
+            });
+        } else {
+            ipTabsEl.classList.add('hidden');
+        }
+    }
+}
 
-        main.appendChild(header);
-
-        const desc = document.createElement('div');
-        desc.className = 'plugin-desc';
-        desc.innerText = p.description || t('plugin.no_description');
-        desc.title = desc.innerText;
-        main.appendChild(desc);
-
-        const urlEl = document.createElement('div');
-        urlEl.className = 'plugin-url';
-        urlEl.innerText = p.url;
-        urlEl.title = p.url;
-        main.appendChild(urlEl);
-
-        const actions = document.createElement('div');
-        actions.className = 'plugin-card-actions';
-
-        const toggleDesktopBtn = document.createElement('button');
-        toggleDesktopBtn.type = 'button';
-        toggleDesktopBtn.className = `plugin-btn ${isDesktopOpen ? 'danger' : 'primary'}`;
-        toggleDesktopBtn.innerText = t(isDesktopOpen ? 'plugin.close_desktop' : 'plugin.open_desktop');
-        toggleDesktopBtn.onclick = async () => {
-            if (!invoke) return;
-            try {
-                if (isDesktopOpen) {
-                    await invoke('close_plugin_desktop', { pluginName: p.name });
-                    showToast(t('toast.closed_desktop', { name: p.title || p.name }));
-                } else {
-                    await invoke('open_plugin_desktop', { pluginName: p.name });
-                    showToast(t('toast.opened_desktop', { name: p.title || p.name }));
-                }
-                const fresh = await invoke('get_plugins');
-                renderPlugins(fresh);
-            } catch (e) {
-                console.error('toggle_plugin_desktop failed:', e);
-                showToast(t('toast.error_prefix', { error: String(e) }));
-            }
-        };
-
-        const copyBtn = document.createElement('button');
-        copyBtn.type = 'button';
-        copyBtn.className = 'plugin-btn';
-        copyBtn.innerText = t('plugin.copy_url');
-        copyBtn.onclick = async () => {
-            try {
-                await navigator.clipboard.writeText(p.url);
-                copyBtn.classList.add('copied');
-                copyBtn.innerText = t('plugin.copied');
-                setTimeout(() => {
-                    copyBtn.classList.remove('copied');
-                    copyBtn.innerText = t('plugin.copy_url');
-                }, 1500);
-            } catch (e) {
-                console.error('Failed to copy plugin url:', e);
-                showToast(t('toast.error_prefix', { error: String(e) }));
-            }
-        };
-
-        const manageBtn = document.createElement('button');
-        manageBtn.type = 'button';
-        manageBtn.className = 'plugin-btn';
-        manageBtn.innerText = t('plugin.open_manage');
-        manageBtn.title = p.manage_url || p.manage_route || '';
-        manageBtn.onclick = async () => {
-            if (!invoke) return;
-            try {
-                await invoke('open_plugin_manage', { pluginName: p.name });
-                showToast(t('toast.opened_manage', { name: p.title || p.name }));
-            } catch (e) {
-                console.error('open_plugin_manage failed:', e);
-                showToast(t('toast.error_prefix', { error: String(e) }));
-            }
-        };
-
-        const secondaryRow = document.createElement('div');
-        secondaryRow.className = 'plugin-card-actions-row';
-        secondaryRow.appendChild(manageBtn);
-        secondaryRow.appendChild(copyBtn);
-
-        actions.appendChild(toggleDesktopBtn);
-        actions.appendChild(secondaryRow);
-
-        card.appendChild(main);
-        card.appendChild(actions);
-        listEl.appendChild(card);
-    });
-    scheduleSyncPanelMinWidth();
+async function fetchPluginQrUrls() {
+    if (!invoke) return;
+    const seq = ++qrFetchSeq;
+    const { path, includeToken } = resolveQrRequest();
+    try {
+        const payload = await invoke('get_lan_urls', { path, includeToken });
+        if (seq !== qrFetchSeq) return;
+        renderQrPayload(payload);
+    } catch (e) {
+        if (seq !== qrFetchSeq) return;
+        console.error('Failed to fetch LAN QR URLs:', e);
+        showToast(t('toast.error_prefix', { error: String(e) }));
+    }
 }
 
 function renderPendingAclBadge(count) {
@@ -470,14 +682,35 @@ function syncPinUiState() {
     pinBtn.title = t(isAlwaysOnTop ? 'panel.unpin_title' : 'panel.pin_title');
 }
 
+function setLangSubmenuOpen(open) {
+    const submenu = document.getElementById('more-lang-submenu');
+    const trigger = document.getElementById('more-lang-trigger');
+    const isOpen = Boolean(open);
+    submenu?.classList.toggle('hidden', !isOpen);
+    trigger?.classList.toggle('open', isOpen);
+    trigger?.setAttribute('aria-expanded', String(isOpen));
+}
+
 function updateLanguageButtons(locale) {
     const normalized = String(locale || currentLocale || 'en').trim();
-    document.querySelectorAll('#more-lang-group .more-lang-btn').forEach((btn) => {
+    const currentLabelEl = document.getElementById('more-lang-current');
+    let activeLabel = '';
+    document.querySelectorAll('#more-lang-submenu .more-lang-option').forEach((btn) => {
         const target = btn.getAttribute('data-locale') || '';
         const active = target === normalized;
         btn.classList.toggle('active', active);
-        btn.setAttribute('aria-pressed', String(active));
+        btn.setAttribute('aria-checked', String(active));
+        const checkEl = btn.querySelector('.menu-check');
+        if (checkEl) {
+            checkEl.innerText = active ? '✓' : '';
+        }
+        if (active) {
+            activeLabel = btn.querySelector('.menu-item-label')?.innerText.trim() || normalized;
+        }
     });
+    if (currentLabelEl && activeLabel) {
+        currentLabelEl.innerText = activeLabel;
+    }
 }
 
 let lastSyncedPanelHeight = null;
@@ -680,6 +913,7 @@ function hideAllDropdownMenusOnly() {
     document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
     const moreMenu = document.getElementById('more-dropdown-menu');
     const moreBtn = document.getElementById('more-btn');
+    setLangSubmenuOpen(false);
     moreMenu?.classList.add('hidden');
     moreBtn?.classList.remove('active');
     moreBtn?.setAttribute('aria-expanded', 'false');
@@ -779,6 +1013,7 @@ function setMoreMenuOpen(open) {
     if (open) {
         openSingleDropdownMenu('more');
     } else {
+        setLangSubmenuOpen(false);
         document.getElementById('more-dropdown-menu')?.classList.add('hidden');
         document.getElementById('more-btn')?.classList.remove('active');
         document.getElementById('more-btn')?.setAttribute('aria-expanded', 'false');
@@ -1415,9 +1650,54 @@ document.getElementById('plugin-dropdown-btn')?.addEventListener('click', async 
         try {
             const plugins = await invoke('get_plugins');
             renderPlugins(plugins);
+            if (activePluginTab === 'qr') {
+                await fetchPluginQrUrls();
+            }
         } catch (e) {
             console.error('Failed to fetch plugins:', e);
         }
+    }
+});
+
+document.getElementById('tab-plugins-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setPluginTab('plugins');
+});
+
+document.getElementById('tab-mobile-qr-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setPluginTab('qr');
+});
+
+document.querySelectorAll('#plugin-qr-page-row .qr-page-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const page = btn.getAttribute('data-qr-page') === 'manage' ? 'manage' : 'view';
+        if (qrPluginPage === page) return;
+        qrPluginPage = page;
+        renderQrTargetButtons();
+        fetchPluginQrUrls();
+    });
+});
+
+document.getElementById('plugin-qr-copy-btn')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const copyBtn = document.getElementById('plugin-qr-copy-btn');
+    const url = copyBtn?.dataset.copyUrl || document.getElementById('plugin-qr-url-text')?.innerText || '';
+    if (!url) return;
+    try {
+        await navigator.clipboard.writeText(url);
+        if (copyBtn) {
+            copyBtn.classList.add('copied');
+            copyBtn.innerText = t('lan.copied');
+            setTimeout(() => {
+                copyBtn.classList.remove('copied');
+                copyBtn.innerText = t('lan.copy_url');
+            }, 1500);
+        }
+    } catch (err) {
+        console.error('Failed to copy QR url:', err);
+        showToast(t('toast.error_prefix', { error: String(err) }));
     }
 });
 
@@ -1485,8 +1765,28 @@ document.getElementById('more-open-log-btn')?.addEventListener('click', () => {
     if (invoke) invoke('open_folder', { kind: 'log' }).catch(console.error);
 });
 
-document.querySelectorAll('#more-lang-group .more-lang-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
+const langSubmenuGroup = document.getElementById('more-lang-submenu-group');
+langSubmenuGroup?.addEventListener('mouseenter', () => {
+    setLangSubmenuOpen(true);
+});
+langSubmenuGroup?.addEventListener('mouseleave', () => {
+    setLangSubmenuOpen(false);
+});
+document.querySelectorAll('#more-dropdown-menu > .more-menu-item').forEach((item) => {
+    item.addEventListener('mouseenter', () => {
+        setLangSubmenuOpen(false);
+    });
+});
+document.getElementById('more-lang-trigger')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const submenu = document.getElementById('more-lang-submenu');
+    const isHidden = submenu ? submenu.classList.contains('hidden') : true;
+    setLangSubmenuOpen(isHidden);
+});
+
+document.querySelectorAll('#more-lang-submenu .more-lang-option').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
         const locale = btn.getAttribute('data-locale');
         if (!locale || !invoke) return;
         try {
@@ -1496,11 +1796,11 @@ document.querySelectorAll('#more-lang-group .more-lang-btn').forEach((btn) => {
             } else {
                 updateLanguageButtons(locale);
             }
-            const label = btn.innerText.trim() || locale;
+            const label = btn.querySelector('.menu-item-label')?.innerText.trim() || locale;
             showToast(t('toast.locale_updated', { locale: label }));
-        } catch (e) {
-            console.error('Failed to switch locale:', e);
-            showToast(t('toast.error_prefix', { error: String(e) }));
+        } catch (err) {
+            console.error('Failed to switch locale:', err);
+            showToast(t('toast.error_prefix', { error: String(err) }));
         } finally {
             setMoreMenuOpen(false);
         }
@@ -1508,6 +1808,10 @@ document.querySelectorAll('#more-lang-group .more-lang-btn').forEach((btn) => {
 });
 
 document.addEventListener('click', (e) => {
+    if (e.target instanceof Node && !e.target.isConnected) {
+        return;
+    }
+
     const roomMenu = document.getElementById('room-dropdown-menu');
     const roomGroup = document.querySelector('.room-selector-group');
     if (roomMenu && !roomMenu.classList.contains('hidden') && roomGroup && !roomGroup.contains(e.target)) {

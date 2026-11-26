@@ -217,6 +217,14 @@ mod tests {
         assert_eq!(t(LOCALE_JA, "more.language"), "🌐 言語");
         assert_eq!(t(LOCALE_EN, "more.language"), "🌐 Language");
 
+        assert_eq!(t(LOCALE_ZH_CN, "plugin.tab_mobile_qr"), "📱 手机扫码");
+        assert_eq!(t(LOCALE_JA, "plugin.tab_mobile_qr"), "📱 スマホ QR");
+        assert_eq!(t(LOCALE_EN, "plugin.tab_mobile_qr"), "📱 Mobile QR");
+
+        assert_eq!(t(LOCALE_ZH_CN, "plugin.qr_target_admin"), "管理端 (/)");
+        assert_eq!(t(LOCALE_JA, "plugin.qr_target_admin"), "管理画面 (/)");
+        assert_eq!(t(LOCALE_EN, "plugin.qr_target_admin"), "Admin (/)");
+
         assert!(!dict_zh_cn().contains_key("tray.open_portal"));
 
         assert_eq!(

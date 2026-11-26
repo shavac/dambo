@@ -70,20 +70,41 @@
 
             <span class="divider"></span>
 
-            <!-- Web Control Panel direct trigger -->
-            <button id="console-open-btn" class="pill-btn console-trigger-btn" type="button" data-i18n-title="console.trigger_title" title="Open Control Panel in browser">
-                <span id="console-trigger-label" data-i18n="console.trigger_label">Console</span>
-                <span id="console-pending-badge" class="console-pending-badge hidden">0</span>
-            </button>
-
-            <!-- Plugin manager dropdown -->
+            <!-- Plugin manager & Mobile QR dropdown -->
             <div class="plugin-menu-group">
                 <button id="plugin-dropdown-btn" class="pill-btn" data-i18n-title="plugin.trigger_title" title="Manage plugins & desktop overlays" aria-haspopup="true" aria-expanded="false">
                     <span id="plugin-trigger-label">Plugins (0)</span> ▾
                 </button>
 
                 <div id="plugin-dropdown-menu" class="plugin-dropdown-menu hidden">
+                    <div class="plugin-tabs-header">
+                        <button type="button" id="tab-plugins-btn" class="plugin-tab-btn active" data-i18n="plugin.tab_plugins">Plugins</button>
+                        <button type="button" id="tab-mobile-qr-btn" class="plugin-tab-btn" data-i18n="plugin.tab_mobile_qr">📱 Mobile QR</button>
+                    </div>
                     <div id="plugin-cards-list" class="plugin-cards-list"></div>
+                    <div id="plugin-qr-panel" class="plugin-qr-panel hidden">
+                        <div class="lan-menu-header">
+                            <span class="lan-menu-title" data-i18n="console.lan_section">Mobile / LAN QR Code</span>
+                            <span id="plugin-qr-mode-badge" class="lan-mode-badge">Open</span>
+                        </div>
+                        <div id="plugin-qr-targets" class="qr-targets-row"></div>
+                        <div id="plugin-qr-page-row" class="qr-page-row hidden">
+                            <button type="button" id="qr-mode-view-btn" class="plugin-btn qr-page-btn active" data-qr-page="view" data-i18n="plugin.qr_mode_view">Plugin View</button>
+                            <button type="button" id="qr-mode-manage-btn" class="plugin-btn qr-page-btn" data-qr-page="manage" data-i18n="plugin.qr_mode_manage">Plugin Manage</button>
+                        </div>
+                        <div id="plugin-qr-ip-tabs" class="lan-ip-tabs hidden"></div>
+                        <div class="lan-body">
+                            <div class="lan-url-col">
+                                <div id="plugin-qr-target-path" class="qr-target-path"></div>
+                                <div id="plugin-qr-url-text" class="lan-url-text"></div>
+                                <div id="plugin-qr-local-note" class="lan-local-note hidden"></div>
+                                <div class="lan-actions">
+                                    <button type="button" id="plugin-qr-copy-btn" class="plugin-btn primary" data-i18n="lan.copy_url">Copy URL</button>
+                                </div>
+                            </div>
+                            <img id="plugin-qr-img" class="lan-qr-img hidden" alt="QR" />
+                        </div>
+                    </div>
                     <div class="plugin-dropdown-footer" id="plugin-dropdown-footer">
                         <button id="plugin-open-dir-btn" class="plugin-dir-btn">
                             📂 <span data-i18n="plugin.open_dir">Open Plugins Folder</span>
@@ -92,12 +113,10 @@
                 </div>
             </div>
 
-            <!-- Standalone Always-on-Top Pin toggle -->
-            <button id="pin-btn" class="more-btn pin-toggle-btn" type="button" aria-pressed="false" data-i18n-title="panel.pin_title" title="Pin on top">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M12 17v5" />
-                    <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-                </svg>
+            <!-- Web Control Panel direct trigger -->
+            <button id="console-open-btn" class="pill-btn console-trigger-btn" type="button" data-i18n-title="console.trigger_title" title="Open Control Panel in browser">
+                <span id="console-trigger-label" data-i18n="console.trigger_label">Console</span>
+                <span id="console-pending-badge" class="console-pending-badge hidden">0</span>
             </button>
 
             <!-- More actions menu button & popover -->
@@ -126,17 +145,40 @@
                         <span class="menu-item-label" data-i18n="more.open_logs">📝 Open Logs Folder</span>
                     </button>
                     <div class="menu-separator"></div>
-                    <div class="more-menu-section-title" data-i18n="more.language">🌐 Language</div>
-                    <div id="more-lang-group" class="more-lang-group" role="group" aria-label="Language">
-                        <button type="button" class="more-lang-btn" data-locale="zh-CN">简体中文</button>
-                        <button type="button" class="more-lang-btn" data-locale="en">English</button>
-                        <button type="button" class="more-lang-btn" data-locale="ja">日本語</button>
+                    <div id="more-lang-submenu-group" class="more-submenu-group">
+                        <button id="more-lang-trigger" class="more-menu-item more-submenu-trigger" type="button" role="menuitem" aria-haspopup="menu" aria-expanded="false">
+                            <span class="menu-item-label" data-i18n="more.language">🌐 Language</span>
+                            <span class="more-submenu-meta">
+                                <span id="more-lang-current" class="more-submenu-current">English</span>
+                                <span class="more-submenu-arrow" aria-hidden="true">◂</span>
+                            </span>
+                        </button>
+                        <div id="more-lang-submenu" class="more-submenu hidden" role="menu" aria-label="Language">
+                            <button type="button" class="more-menu-item more-lang-option" role="menuitemradio" aria-checked="false" data-locale="zh-CN">
+                                <span class="menu-item-label">简体中文</span>
+                                <span class="menu-check"></span>
+                            </button>
+                            <button type="button" class="more-menu-item more-lang-option" role="menuitemradio" aria-checked="false" data-locale="ja">
+                                <span class="menu-item-label">日本語</span>
+                                <span class="menu-check"></span>
+                            </button>
+                            <button type="button" class="more-menu-item more-lang-option" role="menuitemradio" aria-checked="false" data-locale="en">
+                                <span class="menu-item-label">English</span>
+                                <span class="menu-check"></span>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Window controls (minimize / quit) -->
+            <!-- Window controls (pin / minimize / quit) -->
             <div class="win-controls">
+                <button id="pin-btn" class="win-btn win-pin" type="button" aria-pressed="false" data-i18n-title="panel.pin_title" title="Pin on top">
+                    <svg class="pin-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 17v5" />
+                        <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+                    </svg>
+                </button>
                 <button id="min-btn" class="win-btn" data-i18n-title="more.minimize_title" title="Minimize to tray">
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12" /></svg>
                 </button>

@@ -1211,6 +1211,19 @@ async fn get_plugins(app: AppHandle, ctx: State<'_, AppContext>) -> Result<Vec<P
 }
 
 #[tauri::command]
+async fn get_lan_urls(
+    path: Option<String>,
+    include_token: Option<bool>,
+    ctx: State<'_, AppContext>,
+) -> Result<dambo_core::net::LanUrlsPayload, String> {
+    Ok(dambo_core::net::build_lan_urls(
+        &ctx.runtime.config.server,
+        path.as_deref(),
+        include_token.unwrap_or(true),
+    ))
+}
+
+#[tauri::command]
 async fn open_plugin_desktop(
     app: AppHandle,
     plugin_name: String,
@@ -1812,6 +1825,7 @@ pub fn run(config_path: &str) {
         .invoke_handler(tauri::generate_handler![
             get_initial_state,
             get_plugins,
+            get_lan_urls,
             open_plugin_desktop,
             close_plugin_desktop,
             open_plugin_manage,

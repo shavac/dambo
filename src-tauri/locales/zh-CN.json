@@ -56,6 +56,12 @@
   "plugin.copied": "✓ 已复制",
   "plugin.open_manage": "设置",
   "plugin.open_dir": "打开插件目录",
+  "plugin.tab_plugins": "插件",
+  "plugin.tab_mobile_qr": "📱 手机扫码",
+  "plugin.qr_btn_title": "手机扫码打开",
+  "plugin.qr_target_admin": "管理端 (/)",
+  "plugin.qr_mode_view": "插件页面",
+  "plugin.qr_mode_manage": "插件管理",
 
   "more.title": "更多操作",
   "more.always_on_top": "📌 窗口置顶",

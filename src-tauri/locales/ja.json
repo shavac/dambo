@@ -56,6 +56,12 @@
   "plugin.copied": "✓ コピー済み",
   "plugin.open_manage": "設定",
   "plugin.open_dir": "プラグインフォルダを開く",
+  "plugin.tab_plugins": "プラグイン",
+  "plugin.tab_mobile_qr": "📱 スマホ QR",
+  "plugin.qr_btn_title": "スマホ QR コードを表示",
+  "plugin.qr_target_admin": "管理画面 (/)",
+  "plugin.qr_mode_view": "プラグイン画面",
+  "plugin.qr_mode_manage": "プラグイン管理",
 
   "more.title": "その他の操作",
   "more.always_on_top": "📌 常に最前面に表示",
