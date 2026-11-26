@@ -60,68 +60,32 @@ fn remove_session_from_db(db: &Database) -> Result<()> {
 }
 
 fn try_migrate_legacy_session(db: &Database, legacy_path: &Path) -> Option<SessionData> {
-    let already_migrated = db::read_meta(db, db::KEY_AUTH_SESSION_MIGRATED)
-        .ok()
-        .flatten()
-        .is_some();
-    if already_migrated || !legacy_path.exists() {
-        return None;
-    }
-    let session = match load_legacy_session_file(legacy_path) {
-        Ok(Some(s)) if s.is_valid_format() => s,
-        Ok(Some(_)) => {
-            log::warn!(
-                "Legacy session {:?} has invalid format; skipping migration",
-                legacy_path
-            );
-            return None;
-        }
-        Ok(None) => return None,
-        Err(e) => {
-            log::warn!(
-                "Failed to load legacy session {:?}; leaving file untouched: {}",
-                legacy_path,
-                e
-            );
-            return None;
-        }
-    };
-    match serde_json::to_vec(&session) {
-        Ok(bytes) => {
-            if let Err(e) = db::write_meta_batch(
-                db,
-                &[
-                    (db::KEY_AUTH_SESSION, bytes.as_slice()),
-                    (db::KEY_AUTH_SESSION_MIGRATED, b"1"),
-                ],
-            ) {
+    db::migrate_legacy_json(
+        db,
+        legacy_path,
+        db::KEY_AUTH_SESSION,
+        db::KEY_AUTH_SESSION_MIGRATED,
+        "session.json",
+        |path| match load_legacy_session_file(path) {
+            Ok(Some(s)) if s.is_valid_format() => Some(s),
+            Ok(Some(_)) => {
                 log::warn!(
-                    "Failed to migrate legacy session {:?} into redb: {}",
-                    legacy_path,
-                    e
+                    "Legacy session {:?} has invalid format; skipping migration",
+                    path
                 );
-            } else if let Err(e) = fs::remove_file(legacy_path) {
-                log::warn!(
-                    "Migrated legacy session {:?} into redb, but failed to remove legacy file: {}",
-                    legacy_path,
-                    e
-                );
-            } else {
-                log::info!(
-                    "Migrated legacy session {:?} into redb and removed plaintext file",
-                    legacy_path
-                );
+                None
             }
-        }
-        Err(e) => {
-            log::warn!(
-                "Failed to serialize legacy session {:?} during migration: {}",
-                legacy_path,
-                e
-            );
-        }
-    }
-    Some(session)
+            Ok(None) => None,
+            Err(e) => {
+                log::warn!(
+                    "Failed to load legacy session {:?}; leaving file untouched: {}",
+                    path,
+                    e
+                );
+                None
+            }
+        },
+    )
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -243,31 +207,27 @@ impl AuthManager {
             .write_lock
             .lock()
             .expect("AuthManager write_lock poisoned");
-        let snapshot_to_save = {
+        let updated = {
             let guard = self.session.read().expect("AuthManager RwLock poisoned");
-            if let Some(ref sess) = *guard {
-                if sess.uname == trimmed_uname
-                    && (trimmed_face.is_empty() || sess.face == trimmed_face)
-                {
-                    return;
-                }
-                let mut updated = sess.clone();
-                updated.uname = trimmed_uname.to_string();
-                if !trimmed_face.is_empty() {
-                    updated.face = trimmed_face.to_string();
-                }
-                Some(updated)
-            } else {
-                None
-            }
-        };
-        if let Some(updated) = snapshot_to_save {
-            if let Err(e) = save_session_to_db(&self.db, &updated) {
-                log::warn!("Failed to persist cached profile name to redb: {:#}", e);
+            let Some(ref sess) = *guard else {
+                return;
+            };
+            if sess.uname == trimmed_uname && (trimmed_face.is_empty() || sess.face == trimmed_face)
+            {
                 return;
             }
-            *self.session.write().expect("AuthManager RwLock poisoned") = Some(updated);
+            let mut updated = sess.clone();
+            updated.uname = trimmed_uname.to_string();
+            if !trimmed_face.is_empty() {
+                updated.face = trimmed_face.to_string();
+            }
+            updated
+        };
+        if let Err(e) = save_session_to_db(&self.db, &updated) {
+            log::warn!("Failed to persist cached profile name to redb: {:#}", e);
+            return;
         }
+        *self.session.write().expect("AuthManager RwLock poisoned") = Some(updated);
     }
 
     fn apply_validated_auth(&self, state: AuthState) -> AuthState {
@@ -322,12 +282,12 @@ impl AuthManager {
         if room_id == 0 {
             return Err(SendDanmakuError::NotConnected);
         }
-        let Some(session) = self.current_session() else {
+        let Some(session) = self
+            .current_session()
+            .filter(|s| s.is_valid_format() && self.current_state().is_login)
+        else {
             return Err(SendDanmakuError::NotLoggedIn);
         };
-        if !session.is_valid_format() || !self.current_state().is_login {
-            return Err(SendDanmakuError::NotLoggedIn);
-        }
 
         let res = self.api.send_danmaku(&session, room_id, msg).await;
         if matches!(res, Err(SendDanmakuError::AuthExpired(_))) {
@@ -338,14 +298,11 @@ impl AuthManager {
 
     /// Validate stored cookies via `blive-proto` (`nav` with live user-info fallback).
     pub async fn validate_session(&self) -> Result<AuthState> {
-        let Some(session) = self.current_session() else {
-            self.state_tx.send_replace(AuthState::default());
-            return Ok(AuthState::default());
+        let Some(session) = self.current_session().filter(SessionData::is_valid_format) else {
+            let state = AuthState::default();
+            self.state_tx.send_replace(state.clone());
+            return Ok(state);
         };
-        if !session.is_valid_format() {
-            self.state_tx.send_replace(AuthState::default());
-            return Ok(AuthState::default());
-        }
 
         let state = self
             .api
@@ -444,7 +401,7 @@ mod tests {
 
         let mgr = AuthManager::open(&db_path, None).unwrap();
         assert!(!mgr.current_state().is_login);
-        mgr.save_session(session.clone(), String::new(), String::new())
+        mgr.save_session(session, String::new(), String::new())
             .unwrap();
         assert!(mgr.current_state().is_login);
         assert_eq!(mgr.current_state().mid, 3829104);

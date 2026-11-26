@@ -53,17 +53,20 @@ mod tests {
 
     #[test]
     fn test_resolve_config_path_from_non_repo_cwd() {
-        let orig_dir = std::env::current_dir().unwrap();
+        struct CwdGuard(std::path::PathBuf);
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+
+        let _cwd_guard = CwdGuard(std::env::current_dir().unwrap());
         let temp = std::env::temp_dir();
         std::env::set_current_dir(&temp).unwrap();
 
         let resolved = resolve_config_path("etc/config.sample.toml");
-        let resolved_path = Path::new(&resolved);
-        let exists = resolved_path.exists();
-
-        let _ = std::env::set_current_dir(&orig_dir);
         assert!(
-            exists,
+            Path::new(&resolved).exists(),
             "Expected resolved config path {:?} to exist",
             resolved
         );

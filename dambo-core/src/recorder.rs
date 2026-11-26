@@ -137,17 +137,10 @@ impl Recorder {
 
     pub fn set_record_raw(&self, record_raw: bool) {
         self.record_raw.store(record_raw, Ordering::Release);
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self
-            .tx
-            .send(RecorderCmd::SetRecordRaw {
-                enabled: record_raw,
-                ack: ack_tx,
-            })
-            .is_ok()
-        {
-            let _ = ack_rx.recv();
-        }
+        let _ = self.send_with_ack(|ack| RecorderCmd::SetRecordRaw {
+            enabled: record_raw,
+            ack,
+        });
     }
 
     /// Replace cross-platform illegal filename characters and control chars with `_`.
@@ -193,11 +186,10 @@ impl Recorder {
     }
 
     fn derive_raw_filename(main_filename: &str) -> String {
-        if let Some(stem) = main_filename.strip_suffix(".jsonl") {
-            format!("{}_raw.jsonl", stem)
-        } else {
-            format!("{}_raw.jsonl", main_filename)
-        }
+        let stem = main_filename
+            .strip_suffix(".jsonl")
+            .unwrap_or(main_filename);
+        format!("{}_raw.jsonl", stem)
     }
 
     pub fn current_path(&self) -> Option<PathBuf> {
@@ -209,53 +201,42 @@ impl Recorder {
         self.paths.read().ok().and_then(|p| p.raw_path.clone())
     }
 
-    /// Write `session_end` summary if an active session is open, then flush and close all writers.
-    pub fn finish_session(&self) -> Result<()> {
+    fn send_with_ack<T>(
+        &self,
+        build_cmd: impl FnOnce(mpsc::SyncSender<T>) -> RecorderCmd,
+    ) -> Result<T> {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         self.tx
-            .send(RecorderCmd::FinishSession { ack: ack_tx })
+            .send(build_cmd(ack_tx))
             .map_err(|_| anyhow::anyhow!("Recorder writer thread stopped"))?;
         ack_rx
             .recv()
-            .map_err(|_| anyhow::anyhow!("Recorder writer thread dropped ack"))?
+            .map_err(|_| anyhow::anyhow!("Recorder writer thread dropped ack"))
+    }
+
+    /// Write `session_end` summary if an active session is open, then flush and close all writers.
+    pub fn finish_session(&self) -> Result<()> {
+        self.send_with_ack(|ack| RecorderCmd::FinishSession { ack })?
     }
 
     /// Flush buffered writers to disk without ending or closing the active session.
     pub fn flush(&self) -> Result<()> {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        self.tx
-            .send(RecorderCmd::Flush { ack: ack_tx })
-            .map_err(|_| anyhow::anyhow!("Recorder writer thread stopped"))?;
-        ack_rx
-            .recv()
-            .map_err(|_| anyhow::anyhow!("Recorder writer thread dropped ack"))?
+        self.send_with_ack(|ack| RecorderCmd::Flush { ack })?
     }
 
     /// Flush and close open main & raw writers without emitting `session_end`.
     pub fn close(&self) -> Result<()> {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        self.tx
-            .send(RecorderCmd::Close { ack: ack_tx })
-            .map_err(|_| anyhow::anyhow!("Recorder writer thread stopped"))?;
-        ack_rx
-            .recv()
-            .map_err(|_| anyhow::anyhow!("Recorder writer thread dropped ack"))?
+        self.send_with_ack(|ack| RecorderCmd::Close { ack })?
     }
 
     /// Open a new recording session or continue appending the existing file when `(room_id, start_time)` matches.
     /// Returns `Ok(true)` if a new session file was opened, `Ok(false)` if continuing the existing session.
     pub fn open_or_continue_session(&self, info: &RoomInfoSnapshot, now_ms: u64) -> Result<bool> {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        self.tx
-            .send(RecorderCmd::OpenOrContinue {
-                info: Box::new(info.clone()),
-                now_ms,
-                ack: ack_tx,
-            })
-            .map_err(|_| anyhow::anyhow!("Recorder writer thread stopped"))?;
-        ack_rx
-            .recv()
-            .map_err(|_| anyhow::anyhow!("Recorder writer thread dropped ack"))?
+        self.send_with_ack(|ack| RecorderCmd::OpenOrContinue {
+            info: Box::new(info.clone()),
+            now_ms,
+            ack,
+        })?
     }
 
     /// Queue an event to the background recorder writer (cloning & sanitizing unpaid `face` if needed).
@@ -316,15 +297,33 @@ impl Drop for Recorder {
     }
 }
 
+fn mark_dirty_or_flush(
+    inner: &mut RecorderInner,
+    dirty: &mut bool,
+    last_flush: &mut Instant,
+    err_ctx: &str,
+) {
+    if !*dirty {
+        *dirty = true;
+        *last_flush = Instant::now();
+    } else if last_flush.elapsed() >= FLUSH_INTERVAL {
+        if let Err(e) = inner.flush_writers() {
+            log::error!("{}: {}", err_ctx, e);
+        }
+        *dirty = false;
+        *last_flush = Instant::now();
+    }
+}
+
 fn run_writer_loop(inner: &mut RecorderInner, rx: mpsc::Receiver<RecorderCmd>) {
     let mut dirty = false;
     let mut last_flush = Instant::now();
 
     loop {
-        let next_cmd = if dirty {
+        let cmd = if dirty {
             let wait = FLUSH_INTERVAL.saturating_sub(last_flush.elapsed());
             match rx.recv_timeout(wait) {
-                Ok(cmd) => Some(cmd),
+                Ok(cmd) => cmd,
                 Err(RecvTimeoutError::Timeout) => {
                     if let Err(e) = inner.flush_writers() {
                         log::error!("Recorder batch flush failed: {}", e);
@@ -336,14 +335,10 @@ fn run_writer_loop(inner: &mut RecorderInner, rx: mpsc::Receiver<RecorderCmd>) {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         } else {
-            match rx.recv() {
-                Ok(cmd) => Some(cmd),
-                Err(_) => break,
-            }
-        };
-
-        let Some(cmd) = next_cmd else {
-            break;
+            let Ok(cmd) = rx.recv() else {
+                break;
+            };
+            cmd
         };
 
         match cmd {
@@ -364,42 +359,34 @@ fn run_writer_loop(inner: &mut RecorderInner, rx: mpsc::Receiver<RecorderCmd>) {
                 event,
                 already_sanitized,
             } => match inner.record_event_owned(*event, already_sanitized) {
-                Ok(immediate_flush) => {
-                    if immediate_flush {
-                        if let Err(e) = inner.flush_writers() {
-                            log::error!("Recorder immediate flush failed: {}", e);
-                        }
-                        dirty = false;
-                        last_flush = Instant::now();
-                    } else if inner.current_file.is_some() {
-                        if !dirty {
-                            dirty = true;
-                            last_flush = Instant::now();
-                        } else if last_flush.elapsed() >= FLUSH_INTERVAL {
-                            if let Err(e) = inner.flush_writers() {
-                                log::error!("Recorder periodic flush failed: {}", e);
-                            }
-                            dirty = false;
-                            last_flush = Instant::now();
-                        }
+                Ok(true) => {
+                    if let Err(e) = inner.flush_writers() {
+                        log::error!("Recorder immediate flush failed: {}", e);
                     }
+                    dirty = false;
+                    last_flush = Instant::now();
                 }
+                Ok(false) if inner.current_file.is_some() => {
+                    mark_dirty_or_flush(
+                        inner,
+                        &mut dirty,
+                        &mut last_flush,
+                        "Recorder periodic flush failed",
+                    );
+                }
+                Ok(false) => {}
                 Err(e) => log::error!("Recorder write failed: {}", e),
             },
             RecorderCmd::RecordRawJson { val } => {
                 if let Err(e) = inner.record_raw_json(&val) {
                     log::error!("Raw packet capture write failed: {}", e);
                 } else if inner.raw_file.is_some() {
-                    if !dirty {
-                        dirty = true;
-                        last_flush = Instant::now();
-                    } else if last_flush.elapsed() >= FLUSH_INTERVAL {
-                        if let Err(e) = inner.flush_writers() {
-                            log::error!("Recorder raw periodic flush failed: {}", e);
-                        }
-                        dirty = false;
-                        last_flush = Instant::now();
-                    }
+                    mark_dirty_or_flush(
+                        inner,
+                        &mut dirty,
+                        &mut last_flush,
+                        "Recorder raw periodic flush failed",
+                    );
                 }
             }
             RecorderCmd::Flush { ack } => {
@@ -485,22 +472,23 @@ impl RecorderInner {
         Ok(())
     }
 
-    fn write_event_line_owned(
+    fn write_event_line(
         &mut self,
-        mut event: RawBiliEvent,
+        event: &mut RawBiliEvent,
         already_sanitized: bool,
     ) -> Result<()> {
-        if let Some(writer) = self.current_file.as_mut() {
-            if !already_sanitized {
-                event = event.sanitized_for_standard_stream();
-            }
-            event.offset_ms = event.timestamp.saturating_sub(self.session_start_ms);
-            serde_json::to_writer(&mut *writer, &event)
-                .context("Failed to serialize RawBiliEvent to JSONL")?;
-            writer
-                .write_all(b"\n")
-                .context("Failed to write JSONL newline")?;
+        let Some(writer) = self.current_file.as_mut() else {
+            return Ok(());
+        };
+        if !already_sanitized {
+            *event = event.sanitized_for_standard_stream();
         }
+        event.offset_ms = event.timestamp.saturating_sub(self.session_start_ms);
+        serde_json::to_writer(&mut *writer, event)
+            .context("Failed to serialize RawBiliEvent to JSONL")?;
+        writer
+            .write_all(b"\n")
+            .context("Failed to write JSONL newline")?;
         Ok(())
     }
 
@@ -508,7 +496,7 @@ impl RecorderInner {
         if self.current_file.is_none() || self.session_end_written {
             return Ok(());
         }
-        let summary_ev = RawBiliEvent {
+        let mut summary_ev = RawBiliEvent {
             seq: self.last_seq.saturating_add(1),
             timestamp: ts_ms,
             room_id: self.current_room_id,
@@ -519,10 +507,18 @@ impl RecorderInner {
             raw_cmd: "SESSION_END".to_string(),
             ..Default::default()
         };
-        self.write_event_line_owned(summary_ev, true)?;
+        self.write_event_line(&mut summary_ev, true)?;
         self.flush_writers()?;
         self.session_end_written = true;
         Ok(())
+    }
+
+    fn open_raw_sidecar_for_main(&mut self, main_path: &Path) -> Result<PathBuf> {
+        let stem_name = main_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("dambo.jsonl");
+        self.open_raw_file_with_name(&Recorder::derive_raw_filename(stem_name))
     }
 
     fn open_or_continue_session(&mut self, info: &RoomInfoSnapshot, now_ms: u64) -> Result<bool> {
@@ -546,11 +542,7 @@ impl RecorderInner {
         self.session_end_written = false;
         self.current_room_id = info.room_id;
         self.current_room_uname = info.uname.clone();
-        self.current_live_start_time = if info.live_status == 1 {
-            info.start_time
-        } else {
-            None
-        };
+        self.current_live_start_time = (info.live_status == 1).then_some(info.start_time).flatten();
 
         if info.room_id == 0 || (!self.enabled && !self.record_raw) {
             return Ok(false);
@@ -564,14 +556,10 @@ impl RecorderInner {
         let anchor_ms = self.session_start_ms;
         if self.enabled {
             let main_path = self.open_new_main_file(info.room_id, &info.uname, anchor_ms)?;
-            let room_info_ev = info.to_raw_event(now_ms);
-            self.write_event_line_owned(room_info_ev, true)?;
+            let mut room_info_ev = info.to_raw_event(now_ms);
+            self.write_event_line(&mut room_info_ev, true)?;
             if self.record_raw {
-                let stem_name = main_path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("dambo.jsonl");
-                self.open_raw_file_with_name(&Recorder::derive_raw_filename(stem_name))?;
+                self.open_raw_sidecar_for_main(&main_path)?;
             }
         } else if self.record_raw {
             self.open_new_raw_file(info.room_id, &info.uname, anchor_ms)?;
@@ -586,7 +574,7 @@ impl RecorderInner {
         mut event: RawBiliEvent,
         already_sanitized: bool,
     ) -> Result<bool> {
-        if event.kind == "combo_end" {
+        if event.kind == "combo_end" || (!self.enabled && event.kind != "room_info") {
             return Ok(false);
         }
 
@@ -595,35 +583,15 @@ impl RecorderInner {
         } else {
             now_unix_ms()
         };
-        let room_id = if event.room_id > 0 {
-            event.room_id
-        } else {
-            self.current_room_id
-        };
-        let room_uname = if !event.room_uname.is_empty() {
-            event.room_uname.clone()
-        } else {
-            self.current_room_uname.clone()
-        };
 
         if event.kind == "room_info" {
-            let snap = RoomInfoSnapshot {
-                room_id,
-                short_id: event.short_id.unwrap_or(0),
-                uid: event.uid,
-                uname: room_uname,
-                title: event.title.clone().unwrap_or_else(|| event.content.clone()),
-                area_name: event.area_name.clone().unwrap_or_default(),
-                parent_area_name: event.parent_area_name.clone().unwrap_or_default(),
-                live_status: event.live_status.unwrap_or(0),
-                start_time: event.start_time,
-            };
+            let snap = crate::model::room_info_snapshot_from_event(
+                &event,
+                self.current_room_id,
+                &self.current_room_uname,
+            );
             self.open_or_continue_session(&snap, ts)?;
             return Ok(true);
-        }
-
-        if !self.enabled {
-            return Ok(false);
         }
 
         let mut rotated = false;
@@ -634,6 +602,16 @@ impl RecorderInner {
             self.stats = SessionSummary::default();
             self.last_seq = 0;
             self.session_end_written = false;
+            let room_id = if event.room_id > 0 {
+                event.room_id
+            } else {
+                self.current_room_id
+            };
+            let room_uname = if event.room_uname.is_empty() {
+                self.current_room_uname.clone()
+            } else {
+                event.room_uname.clone()
+            };
             self.current_room_id = room_id;
             self.current_room_uname = room_uname.clone();
             let start_sec = event.start_time.filter(|&s| s > 0).unwrap_or(ts / 1000);
@@ -645,14 +623,20 @@ impl RecorderInner {
             };
             let main_path = self.open_new_main_file(room_id, &room_uname, self.session_start_ms)?;
             if self.record_raw && self.raw_file.is_none() {
-                let stem_name = main_path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("dambo.jsonl");
-                self.open_raw_file_with_name(&Recorder::derive_raw_filename(stem_name))?;
+                self.open_raw_sidecar_for_main(&main_path)?;
             }
             rotated = true;
         } else if self.current_file.is_none() {
+            let room_id = if event.room_id > 0 {
+                event.room_id
+            } else {
+                self.current_room_id
+            };
+            let room_uname = if event.room_uname.is_empty() {
+                self.current_room_uname.clone()
+            } else {
+                event.room_uname.clone()
+            };
             self.current_room_id = room_id;
             self.current_room_uname = room_uname.clone();
             self.session_start_ms = ts;
@@ -661,16 +645,12 @@ impl RecorderInner {
             rotated = true;
         }
 
-        let ev_seq = event.seq;
-        let ev_price = event.price;
-        let ev_kind = event.kind.clone();
         event.timestamp = ts;
+        self.write_event_line(&mut event, already_sanitized)?;
 
-        self.write_event_line_owned(event, already_sanitized)?;
-
-        self.last_seq = self.last_seq.max(ev_seq);
+        self.last_seq = self.last_seq.max(event.seq);
         let mut is_critical = rotated;
-        match ev_kind.as_str() {
+        match event.kind.as_str() {
             "chat" => self.stats.chat_count = self.stats.chat_count.saturating_add(1),
             "like" => self.stats.like_count = self.stats.like_count.saturating_add(1),
             "guard" => self.stats.guard_count = self.stats.guard_count.saturating_add(1),
@@ -680,11 +660,11 @@ impl RecorderInner {
             }
             "share" => self.stats.share_count = self.stats.share_count.saturating_add(1),
             "gift" => {
-                self.stats.gift_total_coin = self.stats.gift_total_coin.saturating_add(ev_price);
+                self.stats.gift_total_coin = self.stats.gift_total_coin.saturating_add(event.price);
             }
             "superchat" | "super_chat" => {
                 self.stats.superchat_total_coin =
-                    self.stats.superchat_total_coin.saturating_add(ev_price);
+                    self.stats.superchat_total_coin.saturating_add(event.price);
             }
             "preparing" => {
                 self.write_session_end(ts)?;
@@ -702,20 +682,16 @@ impl RecorderInner {
         }
 
         if self.raw_file.is_none() {
-            let ts = if self.session_start_ms > 0 {
-                self.session_start_ms
+            if let Some(main_path) = self.current_path.clone() {
+                self.open_raw_sidecar_for_main(&main_path)?;
             } else {
-                now_unix_ms()
-            };
-            let room_id = self.current_room_id;
-            let room_uname = self.current_room_uname.clone();
-            if let Some(ref main_path) = self.current_path {
-                let stem_name = main_path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("dambo.jsonl");
-                self.open_raw_file_with_name(&Recorder::derive_raw_filename(stem_name))?;
-            } else {
+                let ts = if self.session_start_ms > 0 {
+                    self.session_start_ms
+                } else {
+                    now_unix_ms()
+                };
+                let room_id = self.current_room_id;
+                let room_uname = self.current_room_uname.clone();
                 self.open_new_raw_file(room_id, &room_uname, ts)?;
             }
         }
@@ -730,29 +706,40 @@ impl RecorderInner {
         Ok(())
     }
 
+    fn open_jsonl_writer(
+        output_dir: &Path,
+        filename: &str,
+        file_label: &str,
+    ) -> Result<(BufWriter<File>, PathBuf)> {
+        fs::create_dir_all(output_dir)
+            .with_context(|| format!("Failed to create recording dir {:?}", output_dir))?;
+        let target_path = Self::unique_path(output_dir, filename);
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&target_path)
+            .with_context(|| format!("Failed to open {} {:?}", file_label, target_path))?;
+        Ok((
+            BufWriter::with_capacity(WRITER_BUF_CAPACITY, file),
+            target_path,
+        ))
+    }
+
     fn open_new_main_file(
         &mut self,
         room_id: u64,
         room_uname: &str,
         timestamp_ms: u64,
     ) -> Result<PathBuf> {
-        fs::create_dir_all(&self.output_dir)
-            .with_context(|| format!("Failed to create recording dir {:?}", self.output_dir))?;
-
         let dt = Local
             .timestamp_millis_opt(timestamp_ms as i64)
             .single()
             .unwrap_or_else(Local::now);
         let filename = Recorder::build_filename(&self.filename_pattern, room_id, room_uname, dt);
-        let target_path = Self::unique_path(&self.output_dir, &filename);
+        let (writer, target_path) =
+            Self::open_jsonl_writer(&self.output_dir, &filename, "JSONL file")?;
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&target_path)
-            .with_context(|| format!("Failed to open JSONL file {:?}", target_path))?;
-
-        self.current_file = Some(BufWriter::with_capacity(WRITER_BUF_CAPACITY, file));
+        self.current_file = Some(writer);
         self.current_path = Some(target_path.clone());
         self.sync_paths();
         log::info!("📼 Recording JSONL to {:?}", target_path);
@@ -775,15 +762,9 @@ impl RecorderInner {
     }
 
     fn open_raw_file_with_name(&mut self, raw_filename: &str) -> Result<PathBuf> {
-        fs::create_dir_all(&self.output_dir)
-            .with_context(|| format!("Failed to create recording dir {:?}", self.output_dir))?;
-        let target_path = Self::unique_path(&self.output_dir, raw_filename);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&target_path)
-            .with_context(|| format!("Failed to open raw JSONL file {:?}", target_path))?;
-        self.raw_file = Some(BufWriter::with_capacity(WRITER_BUF_CAPACITY, file));
+        let (writer, target_path) =
+            Self::open_jsonl_writer(&self.output_dir, raw_filename, "raw JSONL file")?;
+        self.raw_file = Some(writer);
         self.raw_path = Some(target_path.clone());
         self.sync_paths();
         log::info!("📦 Recording raw packets to {:?}", target_path);

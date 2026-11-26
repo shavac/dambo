@@ -104,14 +104,11 @@ impl AdminSessionStore {
             return false;
         }
         let now = Instant::now();
-        self.sessions
-            .read()
-            .map(|guard| {
-                guard.get(token).is_some_and(|(created_at, _)| {
-                    now.saturating_duration_since(*created_at) < self.ttl
-                })
+        self.sessions.read().is_ok_and(|guard| {
+            guard.get(token).is_some_and(|(created_at, _)| {
+                now.saturating_duration_since(*created_at) < self.ttl
             })
-            .unwrap_or(false)
+        })
     }
 
     /// Check whether `peer_ip` has exceeded recent `admin_token` failure limits, returning
@@ -202,8 +199,7 @@ fn generate_random_hex_token(counter: &AtomicU64) -> String {
         let rs = RandomState::new();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let pid = std::process::id() as u64;
         for chunk in bytes.chunks_mut(8) {
             let mut h = rs.build_hasher();
@@ -608,27 +604,40 @@ fn check_referer_matches_manage(
     )
 }
 
+fn authorize_cookie_session(
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    state: &AppState,
+    role_label: &str,
+) -> Result<bool, PluginApiError> {
+    let cfg = &state.config.server;
+    check_remote_manage_allowed(cfg, peer_ip)?;
+
+    if cfg.security_mode.is_open() && is_peer_loopback_or_private(peer_ip) {
+        return Ok(true);
+    }
+
+    let cookie = extract_admin_cookie(headers).ok_or_else(|| {
+        PluginApiError::unauthorized(format!("Missing dambo_admin {} session", role_label))
+    })?;
+    if !state.admin_sessions.is_valid(&cookie) {
+        return Err(PluginApiError::unauthorized(format!(
+            "Invalid or expired dambo_admin {} session",
+            role_label
+        )));
+    }
+    Ok(false)
+}
+
 pub(super) fn require_manage_session(
     headers: &HeaderMap,
     peer_ip: Option<IpAddr>,
     state: &AppState,
     caller_plugin_name: &str,
 ) -> Result<(), PluginApiError> {
-    let cfg = &state.config.server;
-    check_remote_manage_allowed(cfg, peer_ip)?;
-
-    if cfg.security_mode.is_open() && is_peer_loopback_or_private(peer_ip) {
+    if authorize_cookie_session(headers, peer_ip, state, "management")? {
         return Ok(());
     }
-
-    let cookie = extract_admin_cookie(headers)
-        .ok_or_else(|| PluginApiError::unauthorized("Missing dambo_admin management session"))?;
-    if !state.admin_sessions.is_valid(&cookie) {
-        return Err(PluginApiError::unauthorized(
-            "Invalid or expired dambo_admin management session",
-        ));
-    }
-
     check_referer_matches_manage(headers, caller_plugin_name)
 }
 
@@ -637,21 +646,9 @@ pub(super) fn require_admin_session(
     peer_ip: Option<IpAddr>,
     state: &AppState,
 ) -> Result<(), PluginApiError> {
-    let cfg = &state.config.server;
-    check_remote_manage_allowed(cfg, peer_ip)?;
-
-    if cfg.security_mode.is_open() && is_peer_loopback_or_private(peer_ip) {
+    if authorize_cookie_session(headers, peer_ip, state, "admin")? {
         return Ok(());
     }
-
-    let cookie = extract_admin_cookie(headers)
-        .ok_or_else(|| PluginApiError::unauthorized("Missing dambo_admin admin session"))?;
-    if !state.admin_sessions.is_valid(&cookie) {
-        return Err(PluginApiError::unauthorized(
-            "Invalid or expired dambo_admin admin session",
-        ));
-    }
-
     validate_referer_authority_and_path(
         headers,
         |p| p == "/" || p == "/admin" || (p.starts_with('/') && p.ends_with("/m")),
@@ -821,17 +818,13 @@ pub(super) async fn api_security_middleware(
         {
             return finalize(ApiError(err).into_response());
         }
-        let path = req
+        let raw_path = req
             .extensions()
             .get::<OriginalUri>()
-            .map(|u| u.0.path().to_string())
-            .unwrap_or_else(|| req.uri().path().to_string());
-        let is_exempt_caller_header = path == "/api/v1/auth/manage"
-            || path == "/auth/manage"
-            || path.starts_with("/api/v1/system/")
+            .map_or_else(|| req.uri().path(), |u| u.0.path());
+        let path = raw_path.strip_prefix("/api/v1").unwrap_or(raw_path);
+        let is_exempt_caller_header = path == "/auth/manage"
             || path.starts_with("/system/")
-            || path == "/api/v1/admin"
-            || path.starts_with("/api/v1/admin/")
             || path == "/admin"
             || path.starts_with("/admin/");
         if !is_exempt_caller_header {

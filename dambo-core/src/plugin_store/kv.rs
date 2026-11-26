@@ -160,9 +160,14 @@ fn adjust_quota_check(
     })
 }
 
-fn apply_delete_quota(quotas: &mut HashMap<String, QuotaStats>, owner: &str, removed_bytes: usize) {
+fn apply_delete_quota(
+    quotas: &mut HashMap<String, QuotaStats>,
+    owner: &str,
+    removed_keys: usize,
+    removed_bytes: usize,
+) {
     if let Some(q) = quotas.get_mut(owner) {
-        q.keys = q.keys.saturating_sub(1);
+        q.keys = q.keys.saturating_sub(removed_keys);
         q.bytes = q.bytes.saturating_sub(removed_bytes);
         if q.keys == 0 {
             quotas.remove(owner);
@@ -685,8 +690,8 @@ impl PluginStore {
                 let caller = caller_namedomain.to_string();
                 let owner = owner_namedomain.to_string();
                 let ns_str = ns.to_string();
-                let prefix_owned = prefix.map(|s| s.to_string());
-                let keys_owned = keys_filter.map(|k| k.to_vec());
+                let prefix_owned = prefix.map(ToString::to_string);
+                let keys_owned = keys_filter.map(<[String]>::to_vec);
                 let defs_arc = is_config.then(|| Arc::clone(parsed_defaults));
 
                 self.run_blocking(move || {
@@ -762,8 +767,8 @@ impl PluginStore {
                 let caller = caller_namedomain.to_string();
                 let owner = owner_namedomain.to_string();
                 let ns_str = ns.to_string();
-                let prefix_owned = prefix.map(|s| s.to_string());
-                let keys_owned = keys_filter.map(|k| k.to_vec());
+                let prefix_owned = prefix.map(ToString::to_string);
+                let keys_owned = keys_filter.map(<[String]>::to_vec);
 
                 self.run_blocking(move || {
                     let auto_rec = this.require_data_access_or_auto_grant_sync(
@@ -870,6 +875,10 @@ impl PluginStore {
                     let write_txn = this.db.begin_write().map_err(|e| {
                         PluginApiError::internal(format!("redb begin_write failed: {}", e))
                     })?;
+                    let mut quotas = this
+                        .persist_quotas
+                        .lock()
+                        .map_err(|_| PluginApiError::internal("Persist quota lock poisoned"))?;
                     let (final_entry, next_quota) = {
                         let mut table = write_txn.open_table(KV_DATA_TABLE).map_err(|e| {
                             PluginApiError::internal(format!("redb open kv_data failed: {}", e))
@@ -895,13 +904,7 @@ impl PluginStore {
                             input,
                             &key_str,
                         )?;
-                        let current_quota = this
-                            .persist_quotas
-                            .lock()
-                            .map_err(|_| PluginApiError::internal("Persist quota lock poisoned"))?
-                            .get(&owner)
-                            .copied()
-                            .unwrap_or_default();
+                        let current_quota = quotas.get(&owner).copied().unwrap_or_default();
                         let next_quota = adjust_quota_check(
                             current_quota,
                             old_bytes,
@@ -922,9 +925,8 @@ impl PluginStore {
                     write_txn.commit().map_err(|e| {
                         PluginApiError::internal(format!("redb commit failed: {}", e))
                     })?;
-                    if let Ok(mut quotas) = this.persist_quotas.lock() {
-                        quotas.insert(owner.clone(), next_quota);
-                    }
+                    quotas.insert(owner.clone(), next_quota);
+                    drop(quotas);
 
                     let mut val_map = BTreeMap::new();
                     val_map.insert(key_str.clone(), final_entry.clone());
@@ -1029,17 +1031,15 @@ impl PluginStore {
                     let write_txn = this.db.begin_write().map_err(|e| {
                         PluginApiError::internal(format!("redb begin_write failed: {}", e))
                     })?;
+                    let mut quotas = this
+                        .persist_quotas
+                        .lock()
+                        .map_err(|_| PluginApiError::internal("Persist quota lock poisoned"))?;
                     let (committed, next_quota) = {
                         let mut table = write_txn.open_table(KV_DATA_TABLE).map_err(|e| {
                             PluginApiError::internal(format!("redb open kv_data failed: {}", e))
                         })?;
-                        let mut running_quota = this
-                            .persist_quotas
-                            .lock()
-                            .map_err(|_| PluginApiError::internal("Persist quota lock poisoned"))?
-                            .get(&owner)
-                            .copied()
-                            .unwrap_or_default();
+                        let mut running_quota = quotas.get(&owner).copied().unwrap_or_default();
 
                         let mut staged: Vec<(String, TypedEntry, Vec<u8>)> =
                             Vec::with_capacity(entries.len());
@@ -1094,9 +1094,8 @@ impl PluginStore {
                     write_txn.commit().map_err(|e| {
                         PluginApiError::internal(format!("redb commit failed: {}", e))
                     })?;
-                    if let Ok(mut quotas) = this.persist_quotas.lock() {
-                        quotas.insert(owner.clone(), next_quota);
-                    }
+                    quotas.insert(owner.clone(), next_quota);
+                    drop(quotas);
 
                     let keys: Vec<String> = committed.keys().cloned().collect();
                     let inline_values = compute_inline_values(&committed);
@@ -1166,6 +1165,10 @@ impl PluginStore {
                     let write_txn = this.db.begin_write().map_err(|e| {
                         PluginApiError::internal(format!("redb begin_write failed: {}", e))
                     })?;
+                    let mut quotas = this
+                        .persist_quotas
+                        .lock()
+                        .map_err(|_| PluginApiError::internal("Persist quota lock poisoned"))?;
                     let removed_bytes = {
                         let mut table = write_txn.open_table(KV_DATA_TABLE).map_err(|e| {
                             PluginApiError::internal(format!("redb open kv_data failed: {}", e))
@@ -1182,9 +1185,8 @@ impl PluginStore {
                     })?;
 
                     if let Some(len) = removed_bytes {
-                        if let Ok(mut quotas) = this.persist_quotas.lock() {
-                            apply_delete_quota(&mut quotas, &owner, len);
-                        }
+                        apply_delete_quota(&mut quotas, &owner, 1, len);
+                        drop(quotas);
                         Ok((
                             true,
                             Some(DataMutationResult {
@@ -1243,6 +1245,10 @@ impl PluginStore {
                     let write_txn = this.db.begin_write().map_err(|e| {
                         PluginApiError::internal(format!("redb begin_write failed: {}", e))
                     })?;
+                    let mut quotas = this
+                        .persist_quotas
+                        .lock()
+                        .map_err(|_| PluginApiError::internal("Persist quota lock poisoned"))?;
                     let mut removed_keys = Vec::new();
                     let mut removed_bytes = 0usize;
                     {
@@ -1287,15 +1293,8 @@ impl PluginStore {
 
                     let count = removed_keys.len();
                     if count > 0 {
-                        if let Ok(mut quotas) = this.persist_quotas.lock()
-                            && let Some(q) = quotas.get_mut(&owner)
-                        {
-                            q.keys = q.keys.saturating_sub(count);
-                            q.bytes = q.bytes.saturating_sub(removed_bytes);
-                            if q.keys == 0 {
-                                quotas.remove(&owner);
-                            }
-                        }
+                        apply_delete_quota(&mut quotas, &owner, count, removed_bytes);
+                        drop(quotas);
                         Ok((
                             count,
                             Some(DataMutationResult {
@@ -1480,7 +1479,7 @@ impl PluginStore {
             .map_err(|_| PluginApiError::internal("Memory store lock poisoned"))?;
         let map_key = (owner.to_string(), ns.to_string(), key.to_string());
         if let Some((_, len)) = mem.entries.remove(&map_key) {
-            apply_delete_quota(&mut mem.quotas, owner, len);
+            apply_delete_quota(&mut mem.quotas, owner, 1, len);
             Ok((
                 true,
                 Some(DataMutationResult {
@@ -1516,14 +1515,16 @@ impl PluginStore {
             .map(|(k, _)| k.clone())
             .collect();
         let mut removed_keys = Vec::with_capacity(to_delete.len());
+        let mut removed_bytes = 0usize;
         for k in to_delete {
             if let Some((_, len)) = mem.entries.remove(&k) {
-                apply_delete_quota(&mut mem.quotas, owner, len);
+                removed_bytes += len;
                 removed_keys.push(k.2);
             }
         }
         let count = removed_keys.len();
         let mutation = if count > 0 {
+            apply_delete_quota(&mut mem.quotas, owner, count, removed_bytes);
             Some(DataMutationResult {
                 store: StoreKind::Memory,
                 owner_namedomain: owner.to_string(),

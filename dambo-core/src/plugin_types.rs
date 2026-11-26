@@ -642,7 +642,7 @@ pub fn validate_value_against(
                     s, path
                 ))
                 .with_details(serde_json::json!({
-                    "allowed": opts.iter().map(|o| o.value()).collect::<Vec<_>>()
+                    "allowed": opts.iter().map(EnumOption::value).collect::<Vec<_>>()
                 })));
             }
         }

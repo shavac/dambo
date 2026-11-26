@@ -1,9 +1,8 @@
 use crate::config::EventConfig;
 use crate::model::{ChannelBMessage, EventBatchData, EventItem, RawBiliEvent, now_unix_ms};
-use regex::Regex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::{Notify, broadcast};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -13,29 +12,58 @@ use tokio_util::sync::CancellationToken;
 /// of 3+ identical characters into a single effective character (so spam like `66666`, `wwwww`,
 /// `哈哈哈哈哈` enters the short-chat reservoir while normal reduplications like `谢谢老板` stay intact).
 pub fn effective_chat_char_count(content: &str) -> usize {
-    static EMOTE_RE: OnceLock<Regex> = OnceLock::new();
-    let re = EMOTE_RE.get_or_init(|| Regex::new(r"\[[^\[\]]+\]").expect("valid emote regex"));
-    let stripped = re.replace_all(content, "");
-
     let mut count = 0usize;
     let mut prev: Option<char> = None;
     let mut run_len = 0usize;
 
-    for ch in stripped
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .flat_map(char::to_lowercase)
-    {
-        if Some(ch) == prev {
-            run_len += 1;
-        } else {
-            if run_len > 0 {
-                count += if run_len >= 3 { 1 } else { run_len };
+    let mut feed_slice = |slice: &str| {
+        for ch in slice
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(char::to_lowercase)
+        {
+            if Some(ch) == prev {
+                run_len += 1;
+            } else {
+                if run_len > 0 {
+                    count += if run_len >= 3 { 1 } else { run_len };
+                }
+                prev = Some(ch);
+                run_len = 1;
             }
-            prev = Some(ch);
-            run_len = 1;
+        }
+    };
+
+    // Single-pass zero-allocation scanner mirroring `[[^\[\]]+]` left-to-right.
+    let bytes = content.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            let Some(rel) = bytes[i + 1..].iter().position(|&b| b == b'[' || b == b']') else {
+                feed_slice(&content[i..]);
+                break;
+            };
+            if bytes[i + 1 + rel] == b']' && rel > 0 {
+                i += 2 + rel;
+                continue;
+            }
+            let advance = if bytes[i + 1 + rel] == b']' {
+                2
+            } else {
+                1 + rel
+            };
+            feed_slice(&content[i..i + advance]);
+            i += advance;
+        } else {
+            let next = bytes[i..]
+                .iter()
+                .position(|&b| b == b'[')
+                .map_or(bytes.len(), |rel| i + rel);
+            feed_slice(&content[i..next]);
+            i = next;
         }
     }
+
     if run_len > 0 {
         count += if run_len >= 3 { 1 } else { run_len };
     }
@@ -52,12 +80,23 @@ pub fn is_passthrough_chat(ev: &RawBiliEvent, min_passthrough_chars: usize) -> b
 
 /// Normalize short/spam chat text for Reservoir aggregation (trim, lowercase, collapse consecutive duplicate chars).
 pub fn normalize_short_chat_key(content: &str) -> String {
-    let mut out = String::new();
+    let trimmed = content.trim();
+    let mut out = String::with_capacity(trimmed.len());
     let mut prev: Option<char> = None;
-    for ch in content.trim().to_lowercase().chars() {
+    let mut push_ch = |ch: char| {
         if Some(ch) != prev {
             out.push(ch);
             prev = Some(ch);
+        }
+    };
+
+    if trimmed.contains('Σ') {
+        for ch in trimmed.to_lowercase().chars() {
+            push_ch(ch);
+        }
+    } else {
+        for ch in trimmed.chars().flat_map(char::to_lowercase) {
+            push_ch(ch);
         }
     }
     out
@@ -101,7 +140,7 @@ fn is_critical_passthrough(kind: &str) -> bool {
 pub struct BackpressureQueue {
     capacity: usize,
     min_passthrough_chars: usize,
-    inner: Mutex<VecDeque<RawBiliEvent>>,
+    inner: Mutex<VecDeque<(RawBiliEvent, u8)>>,
     notify: Notify,
 }
 
@@ -138,16 +177,15 @@ impl BackpressureQueue {
 
     /// Enqueue an event without blocking. Returns `true` if accepted, `false` if dropped.
     pub fn push(&self, ev: RawBiliEvent) -> bool {
+        let incoming_tier = ingress_tier(&ev, self.min_passthrough_chars);
         let accepted = {
             let mut q = self.inner.lock().expect("BackpressureQueue poisoned");
             if q.len() < self.capacity {
-                q.push_back(ev);
+                q.push_back((ev, incoming_tier));
                 true
             } else {
-                let incoming_tier = ingress_tier(&ev, self.min_passthrough_chars);
                 let mut victim: Option<(usize, u8)> = None;
-                for (idx, item) in q.iter().enumerate() {
-                    let t = ingress_tier(item, self.min_passthrough_chars);
+                for (idx, &(_, t)) in q.iter().enumerate() {
                     if t < incoming_tier && victim.is_none_or(|(_, bt)| t < bt) {
                         victim = Some((idx, t));
                         if t == 0 {
@@ -158,11 +196,11 @@ impl BackpressureQueue {
 
                 if let Some((idx, _)) = victim {
                     q.remove(idx);
-                    q.push_back(ev);
+                    q.push_back((ev, incoming_tier));
                     true
                 } else if incoming_tier == 4 {
                     // Critical events (SC / Guard / Status / ComboEnd) are NEVER dropped
-                    q.push_back(ev);
+                    q.push_back((ev, incoming_tier));
                     true
                 } else {
                     false
@@ -180,7 +218,7 @@ impl BackpressureQueue {
         loop {
             {
                 let mut q = self.inner.lock().expect("BackpressureQueue poisoned");
-                if let Some(ev) = q.pop_front() {
+                if let Some((ev, _)) = q.pop_front() {
                     return ev;
                 }
             }
@@ -221,70 +259,68 @@ impl Reservoir {
         }
     }
 
+    fn merge_into(&mut self, idx: usize, seq: u64, medal_level: u32, uname: &str) {
+        let target = &mut self.events[idx];
+        target.count = target.count.saturating_add(1);
+        target.seq = target.seq.max(seq);
+        if medal_level > target.medal_level {
+            target.medal_level = medal_level;
+        }
+        Self::push_sample_user(&mut target.sample_users, uname);
+    }
+
     fn push(&mut self, ev: RawBiliEvent, dedup_enabled: bool) {
         let medal_level = ev.medal_level.unwrap_or(0);
         match ev.kind.as_str() {
             "like" => {
                 if let Some(idx) = self.like_idx {
-                    let target = &mut self.events[idx];
-                    target.count = target.count.saturating_add(1);
-                    target.seq = target.seq.max(ev.seq);
-                    if medal_level > target.medal_level {
-                        target.medal_level = medal_level;
-                    }
-                    Self::push_sample_user(&mut target.sample_users, &ev.uname);
-                } else {
-                    let idx = self.events.len();
-                    self.like_idx = Some(idx);
-                    self.events.push(EventItem {
-                        seq: ev.seq,
-                        kind: "like".to_string(),
-                        uid: ev.uid,
-                        uname: ev.uname.clone(),
-                        medal_level,
-                        content: if ev.content.is_empty() {
-                            "为主播点赞了".to_string()
-                        } else {
-                            ev.content
-                        },
-                        count: 1,
-                        sample_users: initial_sample_users(&ev.uname),
-                        price: 0,
-                        ..Default::default()
-                    });
+                    self.merge_into(idx, ev.seq, medal_level, &ev.uname);
+                    return;
                 }
+                let idx = self.events.len();
+                self.like_idx = Some(idx);
+                let sample_users = initial_sample_users(&ev.uname);
+                self.events.push(EventItem {
+                    seq: ev.seq,
+                    kind: "like".to_string(),
+                    uid: ev.uid,
+                    uname: ev.uname,
+                    medal_level,
+                    content: if ev.content.is_empty() {
+                        "为主播点赞了".to_string()
+                    } else {
+                        ev.content
+                    },
+                    count: 1,
+                    sample_users,
+                    price: 0,
+                    ..Default::default()
+                });
             }
             "chat" if dedup_enabled => {
-                let norm = normalize_short_chat_key(&ev.content);
-                let key = if norm.is_empty() {
-                    ev.content.trim().to_string()
-                } else {
-                    norm
-                };
-                if let Some(&idx) = self.chat_indices.get(&key) {
-                    let target = &mut self.events[idx];
-                    target.count = target.count.saturating_add(1);
-                    target.seq = target.seq.max(ev.seq);
-                    if medal_level > target.medal_level {
-                        target.medal_level = medal_level;
+                let key = normalize_short_chat_key(&ev.content);
+                match self.chat_indices.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(occ) => {
+                        let idx = *occ.get();
+                        self.merge_into(idx, ev.seq, medal_level, &ev.uname);
                     }
-                    Self::push_sample_user(&mut target.sample_users, &ev.uname);
-                } else {
-                    let idx = self.events.len();
-                    self.chat_indices.insert(key, idx);
-                    let sample_users = initial_sample_users(&ev.uname);
-                    self.events.push(EventItem {
-                        seq: ev.seq,
-                        kind: "chat".to_string(),
-                        uid: ev.uid,
-                        uname: ev.uname,
-                        medal_level,
-                        content: ev.content,
-                        count: 1,
-                        sample_users,
-                        price: 0,
-                        ..Default::default()
-                    });
+                    std::collections::hash_map::Entry::Vacant(vac) => {
+                        let idx = self.events.len();
+                        vac.insert(idx);
+                        let sample_users = initial_sample_users(&ev.uname);
+                        self.events.push(EventItem {
+                            seq: ev.seq,
+                            kind: "chat".to_string(),
+                            uid: ev.uid,
+                            uname: ev.uname,
+                            medal_level,
+                            content: ev.content,
+                            count: 1,
+                            sample_users,
+                            price: 0,
+                            ..Default::default()
+                        });
+                    }
                 }
             }
             _ => {
@@ -317,7 +353,6 @@ impl Reservoir {
 }
 
 struct ComboBucket {
-    batch_combo_id: String,
     room_id: u64,
     room_uname: String,
     uid: u64,
@@ -331,6 +366,13 @@ struct ComboBucket {
     timestamp: u64,
     first_seen_at: Instant,
     deadline: Instant,
+}
+
+fn trimmed_combo_id(ev: &RawBiliEvent) -> Option<&str> {
+    ev.batch_combo_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 fn extract_gift_base_name(content: &str) -> String {
@@ -401,6 +443,22 @@ impl EventEngine {
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    fn sync_generation(
+        &self,
+        seen_gen: &mut u64,
+        reservoir: &mut Reservoir,
+        combo_buckets: &mut HashMap<String, ComboBucket>,
+    ) -> bool {
+        let cur_gen = self.generation.load(Ordering::SeqCst);
+        if cur_gen != *seen_gen {
+            reservoir.clear();
+            combo_buckets.clear();
+            *seen_gen = cur_gen;
+            return true;
+        }
+        false
+    }
+
     /// Run the 3-lane event shaping, reservoir flush, and combo deadline loop until cancelled.
     pub async fn run(&self, cancel: CancellationToken) {
         let mut reservoir = Reservoir::default();
@@ -418,21 +476,11 @@ impl EventEngine {
                     break;
                 }
                 ev = self.queue.pop() => {
-                    let cur_gen = self.generation.load(Ordering::SeqCst);
-                    if cur_gen != seen_gen {
-                        reservoir.clear();
-                        combo_buckets.clear();
-                        seen_gen = cur_gen;
-                    }
-
+                    self.sync_generation(&mut seen_gen, &mut reservoir, &mut combo_buckets);
                     self.dispatch_event(ev, &mut reservoir, &mut combo_buckets);
                 }
                 _ = interval.tick() => {
-                    let cur_gen = self.generation.load(Ordering::SeqCst);
-                    if cur_gen != seen_gen {
-                        reservoir.clear();
-                        combo_buckets.clear();
-                        seen_gen = cur_gen;
+                    if self.sync_generation(&mut seen_gen, &mut reservoir, &mut combo_buckets) {
                         continue;
                     }
                     if !reservoir.is_empty() {
@@ -448,14 +496,8 @@ impl EventEngine {
                     }
                 } => {
                     let now = Instant::now();
-                    let expired_keys: Vec<String> = combo_buckets
-                        .iter()
-                        .filter_map(|(k, b)| if b.deadline <= now { Some(k.clone()) } else { None })
-                        .collect();
-                    for key in expired_keys {
-                        if let Some(bucket) = combo_buckets.remove(&key) {
-                            self.emit_combo_bucket(bucket);
-                        }
+                    for (combo_id, bucket) in combo_buckets.extract_if(|_, b| b.deadline <= now) {
+                        self.emit_combo_bucket(combo_id, bucket);
                     }
                 }
             }
@@ -474,14 +516,10 @@ impl EventEngine {
             return;
         }
         if kind == "combo_end" {
-            if let Some(combo_id) = ev
-                .batch_combo_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                && let Some(bucket) = combo_buckets.remove(combo_id)
+            if let Some(combo_id) = trimmed_combo_id(&ev)
+                && let Some((key, bucket)) = combo_buckets.remove_entry(combo_id)
             {
-                self.emit_combo_bucket(bucket);
+                self.emit_combo_bucket(key, bucket);
             }
             return;
         }
@@ -500,14 +538,8 @@ impl EventEngine {
         }
 
         if kind == "gift" {
-            let combo_id_opt = ev
-                .batch_combo_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
             if ev.combo_stay_time > 0
-                && let Some(combo_id) = combo_id_opt
+                && let Some(combo_id) = trimmed_combo_id(&ev)
             {
                 let now = Instant::now();
                 let stay = Duration::from_secs(ev.combo_stay_time);
@@ -515,11 +547,11 @@ impl EventEngine {
                 let add_num = ev.num.unwrap_or(1).max(1);
                 let medal_level = ev.medal_level.unwrap_or(0);
 
-                if let Some(bucket) = combo_buckets.get_mut(&combo_id) {
+                if let Some(bucket) = combo_buckets.get_mut(combo_id) {
                     bucket.total_num = bucket.total_num.saturating_add(add_num);
                     bucket.total_price = bucket.total_price.saturating_add(ev.price);
                     if bucket.face.is_none() && ev.face.is_some() {
-                        bucket.face = ev.face.clone();
+                        bucket.face = ev.face;
                     }
                     bucket.last_seq = ev.seq;
                     bucket.timestamp = ev.timestamp;
@@ -529,11 +561,11 @@ impl EventEngine {
                     let max_dl = bucket.first_seen_at + max_wait;
                     bucket.deadline = (now + stay).min(max_dl);
                 } else {
+                    let key = combo_id.to_string();
                     let gift_name = extract_gift_base_name(&ev.content);
                     combo_buckets.insert(
-                        combo_id.clone(),
+                        key,
                         ComboBucket {
-                            batch_combo_id: combo_id,
                             room_id: ev.room_id,
                             room_uname: ev.room_uname,
                             uid: ev.uid,
@@ -564,34 +596,26 @@ impl EventEngine {
         reservoir.push(ev, self.dedup_enabled);
     }
 
-    fn emit_combo_bucket(&self, bucket: ComboBucket) {
+    fn emit_combo_bucket(&self, batch_combo_id: String, bucket: ComboBucket) {
         let ts = if bucket.timestamp > 0 {
             bucket.timestamp
         } else {
             now_unix_ms()
         };
-        let room_override = if bucket.room_id > 0 {
-            Some((bucket.room_id, bucket.room_uname.clone()))
-        } else {
-            None
-        };
+        let room_override = (bucket.room_id > 0).then_some((bucket.room_id, bucket.room_uname));
         let sample_users = initial_sample_users(&bucket.uname);
         let item = EventItem {
             seq: bucket.last_seq,
             kind: "gift".to_string(),
             uid: bucket.uid,
             uname: bucket.uname,
-            face: if bucket.total_price > 0 {
-                bucket.face
-            } else {
-                None
-            },
+            face: (bucket.total_price > 0).then_some(bucket.face).flatten(),
             medal_level: bucket.medal_level,
             content: format!("{} x{}", bucket.gift_name, bucket.total_num),
             count: bucket.total_num,
             sample_users,
             price: bucket.total_price,
-            batch_combo_id: Some(bucket.batch_combo_id),
+            batch_combo_id: Some(batch_combo_id),
             ..Default::default()
         };
         self.emit_batch(vec![item], 1, ts, room_override);
@@ -603,21 +627,13 @@ impl EventEngine {
         } else {
             now_unix_ms()
         };
-        let room_override = if ev.room_id > 0 {
-            Some((ev.room_id, ev.room_uname.clone()))
-        } else {
-            None
-        };
+        let face = ev.is_paid_event_for_face().then_some(ev.face).flatten();
         let count = if ev.kind == "gift" {
             ev.num.unwrap_or(1).max(1)
         } else {
             1
         };
-        let face = if ev.is_paid_event_for_face() {
-            ev.face
-        } else {
-            None
-        };
+        let room_override = (ev.room_id > 0).then_some((ev.room_id, ev.room_uname));
         let sample_users = initial_sample_users(&ev.uname);
         let item = EventItem {
             seq: ev.seq,
@@ -1147,5 +1163,20 @@ mod tests {
 
         cancel.cancel();
         let _ = handle.await;
+    }
+
+    #[test]
+    fn test_emoticon_and_short_chat_edge_cases() {
+        assert_eq!(effective_chat_char_count("["), 1);
+        assert_eq!(effective_chat_char_count("[]"), 2);
+        assert_eq!(effective_chat_char_count("[unclosed"), 9);
+        assert_eq!(effective_chat_char_count("a[b]c[d]"), 2);
+        assert_eq!(effective_chat_char_count("[[b]]"), 2);
+        assert_eq!(effective_chat_char_count("[doge][坏笑]"), 0);
+        assert_eq!(effective_chat_char_count("ΣΣΣ"), 1);
+
+        assert_eq!(normalize_short_chat_key("  ΣΣσ "), "σ");
+        assert_eq!(normalize_short_chat_key("ΣΑ"), "σα");
+        assert_eq!(normalize_short_chat_key("ΑΣ"), "ας");
     }
 }

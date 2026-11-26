@@ -162,7 +162,7 @@ impl PluginEventHub {
     /// Number of currently connected SSE clients (useful for diagnostics & tests).
     #[cfg(test)]
     pub fn client_count(&self) -> usize {
-        self.clients.read().map(|c| c.len()).unwrap_or(0)
+        self.clients.read().map_or(0, |c| c.len())
     }
 
     /// Register a new SSE client connection and obtain its outbound receiver.
@@ -819,18 +819,19 @@ pub async fn evaluate_subscriptions_with_hub(
     }
 
     let mut acl_queries = Vec::with_capacity(staged_watches.len() + staged_topics.len());
-    for sw in &staged_watches {
+    for (owner_domain, parsed) in staged_watches
+        .iter()
+        .map(|sw| (&sw.owner_domain, &sw.parsed))
+        .chain(
+            staged_topics
+                .iter()
+                .map(|st| (&st.owner_domain, &st.parsed)),
+        )
+    {
         acl_queries.push((
             caller_namedomain.to_string(),
-            sw.owner_domain.clone(),
-            sw.parsed.clone(),
-        ));
-    }
-    for st in &staged_topics {
-        acl_queries.push((
-            caller_namedomain.to_string(),
-            st.owner_domain.clone(),
-            st.parsed.clone(),
+            owner_domain.clone(),
+            parsed.clone(),
         ));
     }
 
@@ -904,24 +905,23 @@ pub async fn evaluate_subscriptions_with_hub(
             }
         }
         Err(err) => {
-            for sw in staged_watches {
-                result.rejected.push(RejectedSub {
-                    kind: "watch",
-                    owner: sw.requested_owner,
-                    target: sw.namespace,
-                    code: err.code,
-                    message: err.message.clone(),
-                });
-            }
-            for st in staged_topics {
-                result.rejected.push(RejectedSub {
-                    kind: "topic",
-                    owner: st.requested_owner,
-                    target: st.topic,
-                    code: err.code,
-                    message: err.message.clone(),
-                });
-            }
+            let reject_err = |kind, owner, target| RejectedSub {
+                kind,
+                owner,
+                target,
+                code: err.code,
+                message: err.message.clone(),
+            };
+            result.rejected.extend(
+                staged_watches
+                    .into_iter()
+                    .map(|sw| reject_err("watch", sw.requested_owner, sw.namespace)),
+            );
+            result.rejected.extend(
+                staged_topics
+                    .into_iter()
+                    .map(|st| reject_err("topic", st.requested_owner, st.topic)),
+            );
         }
     }
 

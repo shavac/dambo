@@ -108,8 +108,7 @@ impl InputState {
         self.text
             .char_indices()
             .nth(char_idx)
-            .map(|(i, _)| i)
-            .unwrap_or(self.text.len())
+            .map_or(self.text.len(), |(i, _)| i)
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -237,14 +236,9 @@ impl InputState {
         let target_cols = max_cols.saturating_sub(1);
 
         let mut start = 0usize;
-        loop {
-            let prefix_width: usize = chars[start..cursor]
-                .iter()
-                .map(|c| c.width().unwrap_or(0))
-                .sum();
-            if prefix_width <= target_cols || start >= cursor {
-                break;
-            }
+        let mut cursor_width: usize = chars[..cursor].iter().map(|c| c.width().unwrap_or(0)).sum();
+        while cursor_width > target_cols && start < cursor {
+            cursor_width -= chars[start].width().unwrap_or(0);
             start += 1;
         }
 
@@ -259,10 +253,6 @@ impl InputState {
             used_width += w;
         }
 
-        let cursor_width: usize = chars[start..cursor]
-            .iter()
-            .map(|c| c.width().unwrap_or(0))
-            .sum();
         (visible, cursor_width as u16)
     }
 }
@@ -363,7 +353,7 @@ struct TuiApp {
 
 impl TuiApp {
     fn new(runtime: Arc<DamboRuntime>) -> Self {
-        let cfg = runtime.config_snapshot();
+        let show_enter = runtime.config.feed.show_enter;
         let auth_state = runtime.auth.current_state();
         let room_state = runtime.hub.room_state();
         let room_info = runtime.hub.room_info();
@@ -373,7 +363,7 @@ impl TuiApp {
             ephemeral: EphemeralSlot::default(),
             scroll_from_bottom: 0,
             last_total_lines: 0,
-            filter: DisplayFilter::new(cfg.feed.show_enter),
+            filter: DisplayFilter::new(show_enter),
             auth_state,
             room_state,
             room_info,
@@ -437,47 +427,39 @@ impl TuiApp {
                     show_full_card: force,
                 });
             });
-        } else {
-            if !force && self.last_announced_auth.is_none() {
+        } else if force || self.last_announced_auth.is_none() {
+            if self.last_announced_auth.is_none() {
                 self.last_announced_auth = Some((0, String::new()));
-                self.push_entries(format_user_info_lines(&auth, None));
-            } else if force {
-                self.push_entries(format_user_info_lines(&auth, None));
             }
+            self.push_entries(format_user_info_lines(&auth, None));
         }
     }
 
     fn announce_room_info_if_ready(&mut self, force: bool) {
-        let cfg = self.runtime.config_snapshot();
-        let record_raw = self.runtime.is_record_raw_enabled();
         if self.room_state.room_id == 0 {
-            if force {
-                self.push_entries(format_room_info_lines(
-                    &self.room_info,
-                    &self.room_state,
-                    &cfg.server.host,
-                    cfg.server.port,
-                    cfg.record.enabled,
-                    record_raw,
-                ));
+            if !force {
+                return;
             }
-            return;
+        } else {
+            if !force
+                && (!self.room_state.connected
+                    || self.announced_room_id == Some(self.room_state.room_id))
+            {
+                return;
+            }
+            self.announced_room_id = Some(self.room_state.room_id);
         }
-        if !force
-            && (!self.room_state.connected
-                || self.announced_room_id == Some(self.room_state.room_id))
-        {
-            return;
-        }
-        self.announced_room_id = Some(self.room_state.room_id);
-        self.push_entries(format_room_info_lines(
+
+        let record_raw = self.runtime.is_record_raw_enabled();
+        let lines = format_room_info_lines(
             &self.room_info,
             &self.room_state,
-            &cfg.server.host,
-            cfg.server.port,
-            cfg.record.enabled,
+            &self.runtime.config.server.host,
+            self.runtime.config.server.port,
+            self.runtime.config.record.enabled,
             record_raw,
-        ));
+        );
+        self.push_entries(lines);
     }
 
     fn apply_snapshot(&mut self, snap: SnapshotData) {
@@ -525,6 +507,15 @@ impl TuiApp {
             return;
         }
         self.push_entry(format_snapshot_item(item));
+    }
+
+    fn handle_ws_lagged(&mut self, skipped: u64) {
+        self.push_entry(FeedEntry::system(format!(
+            "实时弹幕流滞后 {} 条，已同步最新快照",
+            skipped
+        )));
+        let snap = self.runtime.hub.snapshot();
+        self.apply_snapshot(snap);
     }
 
     fn handle_ws_message(&mut self, msg: ChannelAMessage) {
@@ -733,12 +724,17 @@ impl TuiApp {
                 }
             },
             CliCommand::Plugins => {
-                let cfg = self.runtime.config_snapshot();
                 let plugins = self.runtime.list_plugins();
-                self.push_entries(format_plugins(&plugins, &cfg.server.host, cfg.server.port));
+                let lines = format_plugins(
+                    &plugins,
+                    &self.runtime.config.server.host,
+                    self.runtime.config.server.port,
+                );
+                self.push_entries(lines);
             }
             CliCommand::Lan { selector } => {
                 let mut err_msg: Option<String> = None;
+                let mut cached_payload: Option<dambo_core::net::LanUrlsPayload> = None;
                 if let Some(raw) = selector {
                     let trimmed = raw.trim();
                     if let Ok(num) = trimmed.parse::<usize>() {
@@ -752,6 +748,7 @@ impl TuiApp {
                         } else if !payload.urls.is_empty() {
                             self.lan_selected_idx = num - 1;
                         }
+                        cached_payload = Some(payload);
                     } else if !trimmed.is_empty() {
                         self.lan_path = Some(trimmed.to_string());
                         self.lan_selected_idx = 0;
@@ -760,7 +757,8 @@ impl TuiApp {
                 if let Some(msg) = err_msg {
                     self.push_entry(FeedEntry::error(msg));
                 } else {
-                    let payload = self.runtime.lan_urls(self.lan_path.as_deref());
+                    let payload = cached_payload
+                        .unwrap_or_else(|| self.runtime.lan_urls(self.lan_path.as_deref()));
                     self.push_entries(format_lan_info(&payload, self.lan_selected_idx));
                 }
             }
@@ -954,7 +952,7 @@ impl TuiApp {
     }
 
     fn draw_header(&self, frame: &mut Frame<'_>, area: Rect) {
-        let cfg = self.runtime.config_snapshot();
+        let cfg = &self.runtime.config;
         let listen_host = display_listen_host(&cfg.server.host);
         let record_raw = self.runtime.is_record_raw_enabled();
 
@@ -1255,7 +1253,7 @@ where
             }
 
             tokio::select! {
-                _ = wait_for_shutdown(shutdown_rx) => {
+                _ = crate::wait_for_shutdown(shutdown_rx) => {
                     app.should_quit = true;
                     break;
                 }
@@ -1283,11 +1281,7 @@ where
                     match ws_res {
                         Ok(msg) => app.handle_ws_message(msg),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            app.push_entry(FeedEntry::system(format!(
-                                "实时弹幕流滞后 {} 条，已同步最新快照",
-                                skipped
-                            )));
-                            app.apply_snapshot(runtime.hub.snapshot());
+                            app.handle_ws_lagged(skipped);
                         }
                         Err(broadcast::error::RecvError::Closed) => {}
                     }
@@ -1371,9 +1365,16 @@ fn drain_burst_channels(
 ) {
     for _ in 0..64 {
         let mut progressed = false;
-        if let Ok(msg) = ch.ws_rx.try_recv() {
-            app.handle_ws_message(msg);
-            progressed = true;
+        match ch.ws_rx.try_recv() {
+            Ok(msg) => {
+                app.handle_ws_message(msg);
+                progressed = true;
+            }
+            Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                app.handle_ws_lagged(skipped);
+                progressed = true;
+            }
+            Err(_) => {}
         }
         if let Ok(ChannelBMessage::RoomInfo(_)) = ch.event_rx.try_recv() {
             app.handle_room_info_refresh();
@@ -1415,17 +1416,6 @@ fn count_wrapped_lines(lines: &[Line<'_>], width: u16) -> usize {
     }
 
     total
-}
-
-pub async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
-    if *rx.borrow() {
-        return;
-    }
-    while rx.changed().await.is_ok() {
-        if *rx.borrow() {
-            return;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1488,7 +1478,9 @@ mod tests {
 
         slot.update("enter".to_string(), 0, Line::from("→ 甲 进入了直播间"), t0);
         assert_eq!(
-            slot.active_line(&filter).map(|l| l.to_string()).as_deref(),
+            slot.active_line(&filter)
+                .map(ToString::to_string)
+                .as_deref(),
             Some("→ 甲 进入了直播间")
         );
 
@@ -1501,7 +1493,9 @@ mod tests {
             t1,
         );
         assert_eq!(
-            slot.active_line(&filter).map(|l| l.to_string()).as_deref(),
+            slot.active_line(&filter)
+                .map(ToString::to_string)
+                .as_deref(),
             Some("欢迎 舰长 乙 进入直播间")
         );
 
@@ -1520,5 +1514,107 @@ mod tests {
         slot.update("like".to_string(), 0, Line::from("♥ 丙 为主播点赞了"), t1);
         assert!(slot.expire_if_needed(t1 + EPHEMERAL_TTL, EPHEMERAL_TTL));
         assert!(slot.active_line(&filter).is_none());
+    }
+
+    #[test]
+    fn test_input_state_visible_slice_zero_and_cjk_emoji_boundary() {
+        let mut input = InputState::default();
+        for ch in "你👋好a".chars() {
+            input.insert_char(ch);
+        }
+        assert_eq!(input.visible_slice(0), (String::new(), 0));
+
+        // Cursor in the middle of wide CJK + emoji keeps valid UTF-8 and display width bounds
+        input.move_home();
+        input.move_right();
+        input.move_right();
+        for max_cols in [1usize, 2, 3, 4, 5, 6] {
+            let (vis, cursor) = input.visible_slice(max_cols);
+            assert!(vis.width() <= max_cols);
+            assert!(usize::from(cursor) <= vis.width());
+        }
+
+        input.move_end();
+        let (vis_end, cursor_end) = input.visible_slice(4);
+        assert!(vis_end.width() <= 4);
+        assert_eq!(usize::from(cursor_end), vis_end.width());
+    }
+
+    #[test]
+    fn test_drain_burst_channels_lagged_resyncs_snapshot() {
+        let tmp = std::env::temp_dir().join(format!("dambo_tui_lag_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let cfg_path = tmp.join("etc").join("config.toml");
+        let runtime = Arc::new(DamboRuntime::from_config_path(&cfg_path).unwrap());
+
+        runtime.hub.update_room_state(
+            true,
+            true,
+            Some("ResyncAnchor".to_string()),
+            Some("ResyncTitle".to_string()),
+        );
+
+        let (ws_tx, ws_rx) = tokio::sync::broadcast::channel::<ChannelAMessage>(1);
+        // Overflow capacity=1 so the next try_recv returns TryRecvError::Lagged(2)
+        for idx in 0..3 {
+            let _ = ws_tx.send(ChannelAMessage::Event(Box::new(SnapshotItem {
+                id: idx + 1,
+                seq: idx + 1,
+                kind: "chat".to_string(),
+                msg_type: None,
+                uid: 100 + idx,
+                uname: format!("u{}", idx),
+                face: None,
+                medal_name: None,
+                medal_level: None,
+                content: format!("msg_{}", idx),
+                emoticon: None,
+                emots: None,
+                price: 0,
+                num: None,
+                guard_level: None,
+                ids: None,
+                batch_combo_id: None,
+                combo_stay_time: 0,
+                timestamp: 1_700_000_000_000 + idx,
+            })));
+        }
+
+        let (_room_tx, room_rx) = tokio::sync::watch::channel(RoomStateSnapshot::default());
+        let (_auth_tx, auth_rx) = tokio::sync::watch::channel(AuthState::default());
+        let (_event_tx, event_rx) = tokio::sync::broadcast::channel::<ChannelBMessage>(1);
+        let mut ch = TuiChannels {
+            ws_rx,
+            room_rx,
+            auth_rx,
+            event_rx,
+            logger_handle: CliLoggerHandle::default(),
+        };
+
+        let (_log_tx, mut log_rx) = mpsc::unbounded_channel();
+        let (_action_tx, mut action_rx) = mpsc::unbounded_channel();
+        let mut app = TuiApp::new(Arc::clone(&runtime));
+        app.room_state = RoomStateSnapshot::default();
+
+        drain_burst_channels(&mut app, &mut ch, &mut log_rx, &mut action_rx);
+
+        assert_eq!(app.room_state.room_uname, "ResyncAnchor");
+        assert_eq!(app.room_state.room_title, "ResyncTitle");
+        assert!(app.room_state.is_live);
+        assert!(app.room_state.connected);
+        assert!(app.entries.iter().any(|e| {
+            e.line
+                .to_string()
+                .contains("实时弹幕流滞后 2 条，已同步最新快照")
+        }));
+        assert!(
+            app.entries
+                .iter()
+                .any(|e| e.line.to_string().contains("msg_2"))
+        );
+
+        drop(app);
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

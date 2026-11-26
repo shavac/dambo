@@ -1,4 +1,7 @@
-use anyhow::{Context, Result};
+#[cfg(feature = "file-watcher")]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(feature = "file-watcher")]
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -6,8 +9,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "file-watcher")]
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+#[cfg(feature = "file-watcher")]
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// Reserved top-level route segments that cannot be claimed as plugin directories or plugin IDs.
@@ -186,7 +192,7 @@ pub fn normalize_version_value(
     let major = segs[0];
     let canonical = segs
         .iter()
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(".");
     (canonical, major)
@@ -362,6 +368,7 @@ pub fn scan_plugins(html_dir: &Path) -> Vec<PluginInfo> {
     plugins
 }
 
+#[cfg(feature = "file-watcher")]
 fn is_relevant_fs_event(kind: &EventKind) -> bool {
     !matches!(kind, EventKind::Access(_))
 }
@@ -434,24 +441,16 @@ impl PluginRegistry {
                 .cloned();
         }
 
-        // Level 1: match effective `plugin_id`
-        let id_matches: Vec<&PluginInfo> = list.iter().filter(|p| p.plugin_id == target).collect();
-        if id_matches.is_empty() {
-            // Fallback to exact `plugin_name`
-            return list.iter().find(|p| p.name == target).cloned();
-        }
-        if id_matches.len() == 1 {
-            return Some(id_matches[0].clone());
-        }
-
+        // Level 1: match effective `plugin_id`; fallback to exact `plugin_name`
         // Level 2 & 3: highest full version, then `plugin_name == target`, then ASCII ascending `plugin_name`
-        id_matches
-            .into_iter()
+        list.iter()
+            .filter(|p| p.plugin_id == target)
             .max_by(|a, b| {
                 compare_version_strs(&a.version, &b.version)
                     .then_with(|| (a.name == target).cmp(&(b.name == target)))
                     .then_with(|| b.name.cmp(&a.name))
             })
+            .or_else(|| list.iter().find(|p| p.name == target))
             .cloned()
     }
 
@@ -475,6 +474,7 @@ impl PluginRegistry {
     }
 
     /// Start recursive `notify` watching on `html_dir` with ~200ms debounce until `cancel` fires.
+    #[cfg(feature = "file-watcher")]
     pub fn start_watching(self: &Arc<Self>, cancel: CancellationToken) -> Result<()> {
         if !self.html_dir.exists() {
             fs::create_dir_all(&self.html_dir).with_context(|| {
@@ -520,6 +520,16 @@ impl PluginRegistry {
             }
         });
 
+        Ok(())
+    }
+
+    /// No-op stub when compiled without the `file-watcher` feature.
+    #[cfg(not(feature = "file-watcher"))]
+    pub fn start_watching(self: &Arc<Self>, _cancel: CancellationToken) -> Result<()> {
+        log::debug!(
+            "Plugin directory watcher compiled without 'file-watcher' feature; skipping watch on {:?}",
+            self.html_dir
+        );
         Ok(())
     }
 }
@@ -741,6 +751,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "file-watcher")]
     #[tokio::test]
     async fn test_plugin_registry_notify_hot_reload() {
         let dir = temp_html_dir("watch");

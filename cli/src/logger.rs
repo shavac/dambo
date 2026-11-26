@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 /// Structured log entry forwarded to the TUI message stream when interactive mode is active.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub struct CliLogEntry {
     pub level: Level,
@@ -13,13 +14,14 @@ pub struct CliLogEntry {
 }
 
 /// Handle allowing the TUI to attach/detach its log receiver around terminal mode transitions.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CliLoggerHandle {
     tui_tx: Arc<Mutex<Option<mpsc::UnboundedSender<CliLogEntry>>>>,
 }
 
 impl CliLoggerHandle {
     /// Route subsequent log records to the TUI channel instead of writing to `stderr`.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
     pub fn attach_tui(&self, tx: mpsc::UnboundedSender<CliLogEntry>) {
         if let Ok(mut guard) = self.tui_tx.lock() {
             *guard = Some(tx);
@@ -27,6 +29,7 @@ impl CliLoggerHandle {
     }
 
     /// Detach the TUI channel so logs resume writing cleanly via `env_logger` to `stderr`.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
     pub fn detach_tui(&self) {
         if let Ok(mut guard) = self.tui_tx.lock() {
             *guard = None;
@@ -49,30 +52,24 @@ impl Log for CliLogger {
             return;
         }
 
-        let entry = CliLogEntry {
-            level: record.level(),
-            target: record.target().to_string(),
-            message: format!("{}", record.args()),
-        };
-
-        let sent_to_tui = if let Ok(mut guard) = self.tui_tx.lock() {
-            if let Some(tx) = guard.as_ref() {
-                if tx.send(entry).is_ok() {
-                    true
-                } else {
-                    *guard = None;
-                    false
-                }
-            } else {
-                false
+        let tx_opt = self.tui_tx.lock().ok().and_then(|guard| guard.clone());
+        if let Some(tx) = tx_opt {
+            let entry = CliLogEntry {
+                level: record.level(),
+                target: record.target().to_string(),
+                message: format!("{}", record.args()),
+            };
+            if tx.send(entry).is_ok() {
+                return;
             }
-        } else {
-            false
-        };
-
-        if !sent_to_tui {
-            self.inner.log(record);
+            if let Ok(mut guard) = self.tui_tx.lock()
+                && guard.as_ref().is_some_and(|cur| cur.same_channel(&tx))
+            {
+                *guard = None;
+            }
         }
+
+        self.inner.log(record);
     }
 
     fn flush(&self) {

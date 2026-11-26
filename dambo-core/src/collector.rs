@@ -110,23 +110,22 @@ impl CollectorManager {
 
     #[cfg(test)]
     pub async fn active_room_id(&self) -> u64 {
-        self.active
-            .lock()
-            .await
-            .as_ref()
-            .map(|a| a.room_id)
-            .unwrap_or(0)
+        self.active.lock().await.as_ref().map_or(0, |a| a.room_id)
     }
 
-    /// Cancel any existing collector task and attach to `input_room_id` via `blive-proto`.
-    pub async fn connect_room(&self, input_room_id: u64, ctx: CollectorContext) {
-        let mut guard = self.active.lock().await;
+    async fn retire_active_task(&self, guard: &mut Option<ActiveCollector>) {
         if let Some(prev) = guard.take() {
             prev.cancel.cancel();
             let mut retired = self.retired_handles.lock().await;
             retired.retain(|h| !h.is_finished());
             retired.push(prev.handle);
         }
+    }
+
+    /// Cancel any existing collector task and attach to `input_room_id` via `blive-proto`.
+    pub async fn connect_room(&self, input_room_id: u64, ctx: CollectorContext) {
+        let mut guard = self.active.lock().await;
+        self.retire_active_task(&mut guard).await;
 
         if let Err(e) = ctx.recorder.finish_session() {
             log::warn!(
@@ -153,214 +152,13 @@ impl CollectorManager {
         ctx.hub
             .reset_room(input_room_id, String::new(), String::new(), false, false);
 
-        let handle = tokio::spawn(async move {
-            let mut attempt: u32 = 0;
-            let mut initialized_room = false;
-            let mut cached_buvid3 = String::new();
-            let mut session_state: Option<CollectorSessionState> = None;
-
-            while !task_cancel.is_cancelled() {
-                let cookie_str = ctx
-                    .auth
-                    .current_session()
-                    .map(|s| s.to_cookie_header())
-                    .unwrap_or_default();
-
-                let fetched_buvid3 = tokio::select! {
-                    _ = task_cancel.cancelled() => break,
-                    b3 = api.fetch_buvid3(&cookie_str) => b3,
-                };
-                if !fetched_buvid3.trim().is_empty() {
-                    cached_buvid3 = fetched_buvid3.trim().to_string();
-                }
-                let buvid3 = cached_buvid3.clone();
-                let effective_cookie = append_cookie_kv(&cookie_str, "buvid3", &buvid3);
-                let opt_cookie = if effective_cookie.is_empty() {
-                    None
-                } else {
-                    Some(effective_cookie.as_str())
-                };
-
-                let meta_res = tokio::select! {
-                    _ = task_cancel.cancelled() => break,
-                    res = api.fetch_room_meta(input_room_id, opt_cookie) => res,
-                };
-
-                let meta = match meta_res {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let wait_secs = backoff_delay_secs(attempt);
-                        log::warn!(
-                            "Failed to fetch room {} metadata ({}); retrying in {}s",
-                            input_room_id,
-                            e,
-                            wait_secs
-                        );
-                        attempt = attempt.saturating_add(1);
-                        tokio::select! {
-                            _ = task_cancel.cancelled() => break,
-                            _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => continue,
-                        }
-                    }
-                };
-
-                if !initialized_room {
-                    initialized_room = true;
-                    let now_ms = now_unix_ms();
-                    if let Err(e) = ctx.recorder.open_or_continue_session(&meta, now_ms) {
-                        log::error!("Failed to open recorder for room {}: {}", meta.room_id, e);
-                    }
-                    ctx.event_engine.set_room(meta.room_id, meta.uname.clone());
-                    ctx.hub.set_room_info(meta.clone(), false);
-                    let room_info_ev = meta.to_raw_event(now_ms);
-                    let _ = raw_tx.send(room_info_ev);
-
-                    let active_live_start_time = if meta.is_live() {
-                        meta.start_time
-                    } else {
-                        None
-                    };
-                    session_state = Some(CollectorSessionState {
-                        meta: meta.clone(),
-                        normalizer: CollectorNormalizer::new(ctx.avatar_cache_size),
-                        active_live_start_time,
-                    });
-
-                    // Best-effort seed currently active SuperChats into Hub (Channel A history)
-                    let active_scs = tokio::select! {
-                        _ = task_cancel.cancelled() => break,
-                        scs = api.fetch_active_super_chats(meta.room_id, &meta.uname, opt_cookie) => scs,
-                    };
-                    for sc_ev in active_scs {
-                        ctx.hub.push_event(&sc_ev);
-                    }
-                } else if let Some(ref mut state) = session_state {
-                    let now_ms = now_unix_ms();
-                    let same_live = meta.live_status == 1
-                        && meta.start_time.is_some()
-                        && meta.start_time == state.active_live_start_time;
-
-                    state.meta = meta.clone();
-                    ctx.hub.set_room_info(meta.clone(), false);
-
-                    if same_live {
-                        let reconnected_ev = RawBiliEvent {
-                            seq: state.normalizer.next_seq(),
-                            timestamp: now_ms,
-                            room_id: meta.room_id,
-                            room_uname: meta.uname.clone(),
-                            kind: "reconnected".to_string(),
-                            content: "网络重连恢复".to_string(),
-                            raw_cmd: "RECONNECTED".to_string(),
-                            ..Default::default()
-                        };
-                        let _ = raw_tx.send(reconnected_ev);
-                    } else if meta.live_status == 1 {
-                        state.active_live_start_time = meta.start_time;
-                        state.normalizer.reset_session();
-                        let info_ev = meta.to_raw_event(now_ms);
-                        let _ = raw_tx.send(info_ev);
-                    } else {
-                        state.active_live_start_time = None;
-                        let reconnected_ev = RawBiliEvent {
-                            seq: state.normalizer.next_seq(),
-                            timestamp: now_ms,
-                            room_id: meta.room_id,
-                            room_uname: meta.uname.clone(),
-                            kind: "reconnected".to_string(),
-                            content: "网络重连恢复".to_string(),
-                            raw_cmd: "RECONNECTED".to_string(),
-                            ..Default::default()
-                        };
-                        let _ = raw_tx.send(reconnected_ev);
-                    }
-                }
-
-                let state_for_blocking = session_state
-                    .take()
-                    .expect("session_state initialized above");
-                let cookie_clone = effective_cookie.clone();
-                let buvid_clone = buvid3.clone();
-                let cancel_blocking = task_cancel.clone();
-                let hub_blocking = ctx.hub.clone();
-                let recorder_blocking = ctx.recorder.clone();
-                let tx_blocking = raw_tx.clone();
-
-                let session_outcome = tokio::task::spawn_blocking(move || {
-                    run_blocking_ws_session(
-                        state_for_blocking,
-                        &cookie_clone,
-                        &buvid_clone,
-                        cancel_blocking,
-                        hub_blocking,
-                        recorder_blocking,
-                        tx_blocking,
-                    )
-                })
-                .await;
-
-                match session_outcome {
-                    Ok((outcome, returned_state)) => {
-                        session_state = Some(returned_state);
-                        if task_cancel.is_cancelled() {
-                            break;
-                        }
-                        match outcome {
-                            Ok(was_connected) => {
-                                log::info!("Bilibili WS stream ended for room {}", meta.room_id);
-                                if was_connected {
-                                    attempt = 0;
-                                }
-                            }
-                            Err((err_msg, was_connected)) => {
-                                log::warn!(
-                                    "Bilibili WS error for room {}: {}",
-                                    meta.room_id,
-                                    err_msg
-                                );
-                                if was_connected {
-                                    attempt = 0;
-                                }
-                            }
-                        }
-                    }
-                    Err(join_err) => {
-                        log::error!("Collector blocking task join error: {}", join_err);
-                        if task_cancel.is_cancelled() {
-                            break;
-                        }
-                        session_state = Some(CollectorSessionState {
-                            meta: meta.clone(),
-                            normalizer: CollectorNormalizer::new(ctx.avatar_cache_size),
-                            active_live_start_time: if meta.is_live() {
-                                meta.start_time
-                            } else {
-                                None
-                            },
-                        });
-                    }
-                }
-
-                let live_now = ctx.hub.room_state().is_live;
-                ctx.hub.update_room_state(live_now, false, None, None);
-
-                let wait_secs = backoff_delay_secs(attempt);
-                log::info!(
-                    "Reconnecting to room {} in {}s (attempt {})",
-                    meta.room_id,
-                    wait_secs,
-                    attempt + 1
-                );
-                attempt = attempt.saturating_add(1);
-
-                tokio::select! {
-                    _ = task_cancel.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => {}
-                }
-            }
-
-            log::info!("🛑 Collector stopped for room {}", input_room_id);
-        });
+        let handle = tokio::spawn(run_collector_loop(
+            ctx,
+            input_room_id,
+            task_cancel,
+            api,
+            raw_tx,
+        ));
 
         *guard = Some(ActiveCollector {
             #[cfg(test)]
@@ -373,24 +171,220 @@ impl CollectorManager {
     /// Cancel active room collector and reset hub to disconnected.
     pub async fn disconnect(&self, hub: Arc<StateHub>) {
         let mut guard = self.active.lock().await;
-        if let Some(prev) = guard.take() {
-            prev.cancel.cancel();
-            let mut retired = self.retired_handles.lock().await;
-            retired.retain(|h| !h.is_finished());
-            retired.push(prev.handle);
-        }
+        self.retire_active_task(&mut guard).await;
         hub.reset_room(0, String::new(), String::new(), false, false);
     }
+}
+
+impl CollectorSessionState {
+    fn new(meta: RoomInfoSnapshot, avatar_cache_size: usize) -> Self {
+        let active_live_start_time = meta.is_live().then_some(meta.start_time).flatten();
+        Self {
+            meta,
+            normalizer: CollectorNormalizer::new(avatar_cache_size),
+            active_live_start_time,
+        }
+    }
+}
+
+fn reconnected_event(seq: u64, now_ms: u64, meta: &RoomInfoSnapshot) -> RawBiliEvent {
+    RawBiliEvent {
+        seq,
+        timestamp: now_ms,
+        room_id: meta.room_id,
+        room_uname: meta.uname.clone(),
+        kind: "reconnected".to_string(),
+        content: "网络重连恢复".to_string(),
+        raw_cmd: "RECONNECTED".to_string(),
+        ..Default::default()
+    }
+}
+
+async fn run_collector_loop(
+    ctx: CollectorContext,
+    input_room_id: u64,
+    task_cancel: CancellationToken,
+    api: BiliApiClient,
+    raw_tx: broadcast::Sender<RawBiliEvent>,
+) {
+    let mut attempt: u32 = 0;
+    let mut cached_buvid3 = String::new();
+    let mut session_state: Option<CollectorSessionState> = None;
+
+    while !task_cancel.is_cancelled() {
+        let cookie_str = ctx
+            .auth
+            .current_session()
+            .map_or_default(|s| s.to_cookie_header());
+
+        let fetched_buvid3 = tokio::select! {
+            _ = task_cancel.cancelled() => break,
+            b3 = api.fetch_buvid3(&cookie_str) => b3,
+        };
+        let trimmed_buvid3 = fetched_buvid3.trim();
+        if !trimmed_buvid3.is_empty() {
+            cached_buvid3.clear();
+            cached_buvid3.push_str(trimmed_buvid3);
+        }
+
+        let effective_cookie = append_cookie_kv(&cookie_str, "buvid3", &cached_buvid3);
+        let opt_cookie = (!effective_cookie.is_empty()).then_some(effective_cookie.as_str());
+
+        let meta_res = tokio::select! {
+            _ = task_cancel.cancelled() => break,
+            res = api.fetch_room_meta(input_room_id, opt_cookie) => res,
+        };
+
+        let meta = match meta_res {
+            Ok(m) => m,
+            Err(e) => {
+                let wait_secs = backoff_delay_secs(attempt);
+                log::warn!(
+                    "Failed to fetch room {} metadata ({}); retrying in {}s",
+                    input_room_id,
+                    e,
+                    wait_secs
+                );
+                attempt = attempt.saturating_add(1);
+                tokio::select! {
+                    _ = task_cancel.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => continue,
+                }
+            }
+        };
+
+        let now_ms = now_unix_ms();
+        match session_state.as_mut() {
+            None => {
+                if let Err(e) = ctx.recorder.open_or_continue_session(&meta, now_ms) {
+                    log::error!("Failed to open recorder for room {}: {}", meta.room_id, e);
+                }
+                ctx.event_engine.set_room(meta.room_id, meta.uname.clone());
+                ctx.hub.set_room_info(meta.clone(), false);
+                let _ = raw_tx.send(meta.to_raw_event(now_ms));
+
+                session_state = Some(CollectorSessionState::new(
+                    meta.clone(),
+                    ctx.avatar_cache_size,
+                ));
+
+                // Best-effort seed currently active SuperChats into Hub (Channel A history)
+                let active_scs = tokio::select! {
+                    _ = task_cancel.cancelled() => break,
+                    scs = api.fetch_active_super_chats(meta.room_id, &meta.uname, opt_cookie) => scs,
+                };
+                for sc_ev in active_scs {
+                    ctx.hub.push_event(&sc_ev);
+                }
+            }
+            Some(state) => {
+                let same_live = meta.live_status == 1
+                    && meta.start_time.is_some()
+                    && meta.start_time == state.active_live_start_time;
+
+                state.meta = meta.clone();
+                ctx.hub.set_room_info(meta.clone(), false);
+
+                if !same_live && meta.live_status == 1 {
+                    state.active_live_start_time = meta.start_time;
+                    state.normalizer.reset_session();
+                    let _ = raw_tx.send(meta.to_raw_event(now_ms));
+                } else {
+                    if !same_live {
+                        state.active_live_start_time = None;
+                    }
+                    let _ = raw_tx.send(reconnected_event(
+                        state.normalizer.next_seq(),
+                        now_ms,
+                        &meta,
+                    ));
+                }
+            }
+        }
+
+        let state_for_blocking = session_state
+            .take()
+            .expect("session_state initialized above");
+        let buvid_blocking = cached_buvid3.clone();
+        let cancel_blocking = task_cancel.clone();
+        let hub_blocking = ctx.hub.clone();
+        let recorder_blocking = ctx.recorder.clone();
+        let tx_blocking = raw_tx.clone();
+
+        let session_outcome = tokio::task::spawn_blocking(move || {
+            run_blocking_ws_session(
+                state_for_blocking,
+                &effective_cookie,
+                &buvid_blocking,
+                &cancel_blocking,
+                &hub_blocking,
+                &recorder_blocking,
+                &tx_blocking,
+            )
+        })
+        .await;
+
+        match session_outcome {
+            Ok((outcome, returned_state)) => {
+                session_state = Some(returned_state);
+                if task_cancel.is_cancelled() {
+                    break;
+                }
+                let was_connected = match outcome {
+                    Ok(was_connected) => {
+                        log::info!("Bilibili WS stream ended for room {}", meta.room_id);
+                        was_connected
+                    }
+                    Err((err_msg, was_connected)) => {
+                        log::warn!("Bilibili WS error for room {}: {}", meta.room_id, err_msg);
+                        was_connected
+                    }
+                };
+                if was_connected {
+                    attempt = 0;
+                }
+            }
+            Err(join_err) => {
+                log::error!("Collector blocking task join error: {}", join_err);
+                if task_cancel.is_cancelled() {
+                    break;
+                }
+                session_state = Some(CollectorSessionState::new(
+                    meta.clone(),
+                    ctx.avatar_cache_size,
+                ));
+            }
+        }
+
+        let live_now = ctx.hub.room_state().is_live;
+        ctx.hub.update_room_state(live_now, false, None, None);
+
+        let wait_secs = backoff_delay_secs(attempt);
+        log::info!(
+            "Reconnecting to room {} in {}s (attempt {})",
+            meta.room_id,
+            wait_secs,
+            attempt + 1
+        );
+        attempt = attempt.saturating_add(1);
+
+        tokio::select! {
+            _ = task_cancel.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => {}
+        }
+    }
+
+    log::info!("🛑 Collector stopped for room {}", input_room_id);
 }
 
 fn run_blocking_ws_session(
     mut state: CollectorSessionState,
     cookie_str: &str,
     buvid3: &str,
-    cancel: CancellationToken,
-    hub: Arc<StateHub>,
-    recorder: Arc<Recorder>,
-    raw_tx: broadcast::Sender<RawBiliEvent>,
+    cancel: &CancellationToken,
+    hub: &Arc<StateHub>,
+    recorder: &Arc<Recorder>,
+    raw_tx: &broadcast::Sender<RawBiliEvent>,
 ) -> (
     std::result::Result<bool, (String, bool)>,
     CollectorSessionState,
@@ -455,9 +449,8 @@ fn run_blocking_ws_session(
                         state.meta.room_id,
                         &state.meta.uname,
                     );
-                    let recv_now_ms = now_unix_ms();
                     for mut ev in events {
-                        ev.timestamp = sanitize_live_timestamp(ev.timestamp, recv_now_ms);
+                        ev.timestamp = sanitize_live_timestamp(ev.timestamp, now_ms);
                         if ev.kind == "live" && ev.start_time.is_none() {
                             ev.start_time = state.meta.start_time;
                         }

@@ -975,10 +975,12 @@ impl PluginStore {
                 let val: AclRecordValue = serde_json::from_slice(v_guard.value())
                     .map_err(|e| PluginApiError::internal(format!("Corrupt acl record: {}", e)))?;
                 let rec = AclRecord::from_parts(owner, requester, resource, val);
-                if owner == caller {
+                if owner == caller && requester == caller {
                     incoming.push(rec.clone());
-                }
-                if requester == caller {
+                    outgoing.push(rec);
+                } else if owner == caller {
+                    incoming.push(rec);
+                } else {
                     outgoing.push(rec);
                 }
             }

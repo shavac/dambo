@@ -145,3 +145,29 @@ pub struct InitialUiState {
     #[serde(default)]
     pub connecting: bool,
 }
+
+pub(crate) fn room_info_snapshot_from_event(
+    ev: &RawBiliEvent,
+    fallback_room_id: u64,
+    fallback_uname: &str,
+) -> RoomInfoSnapshot {
+    RoomInfoSnapshot {
+        room_id: if ev.room_id > 0 {
+            ev.room_id
+        } else {
+            fallback_room_id
+        },
+        short_id: ev.short_id.unwrap_or(0),
+        uid: ev.uid,
+        uname: if ev.room_uname.is_empty() {
+            fallback_uname.to_string()
+        } else {
+            ev.room_uname.clone()
+        },
+        title: ev.title.clone().unwrap_or_else(|| ev.content.clone()),
+        area_name: ev.area_name.clone().unwrap_or_default(),
+        parent_area_name: ev.parent_area_name.clone().unwrap_or_default(),
+        live_status: ev.live_status.unwrap_or(0),
+        start_time: ev.start_time,
+    }
+}

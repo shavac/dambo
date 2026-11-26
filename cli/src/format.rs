@@ -1,17 +1,25 @@
+#[cfg(feature = "tui")]
 use crate::logger::CliLogEntry;
+#[cfg(feature = "tui")]
 use chrono::{DateTime, Local, TimeZone};
+#[cfg(feature = "tui")]
 use dambo_core::auth::SendDanmakuError;
 use dambo_core::config::SecurityMode;
-use dambo_core::model::{
-    AuthState, RoomInfoSnapshot, RoomOptionsPayload, RoomQuickItem, RoomStateSnapshot, SnapshotItem,
-};
+use dambo_core::model::{AuthState, RoomInfoSnapshot, RoomStateSnapshot};
+#[cfg(feature = "tui")]
+use dambo_core::model::{RoomOptionsPayload, RoomQuickItem, SnapshotItem};
 use dambo_core::net::LanUrlsPayload;
+#[cfg(feature = "tui")]
 use dambo_core::plugin::PluginInfo;
+#[cfg(feature = "tui")]
 use dambo_core::state::RoomHistoryEntry;
+#[cfg(feature = "tui")]
 use ratatui::style::{Color, Modifier, Style};
+#[cfg(feature = "tui")]
 use ratatui::text::{Line, Span};
 
 /// Display filter mode for the live danmaku & event viewport.
+#[cfg(feature = "tui")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilterMode {
     All,
@@ -20,6 +28,7 @@ pub enum FilterMode {
 }
 
 /// Active viewport visibility filter settings.
+#[cfg(feature = "tui")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisplayFilter {
     pub mode: FilterMode,
@@ -27,6 +36,7 @@ pub struct DisplayFilter {
     pub show_like: bool,
 }
 
+#[cfg(feature = "tui")]
 impl DisplayFilter {
     pub fn new(show_enter: bool) -> Self {
         Self {
@@ -90,6 +100,7 @@ impl DisplayFilter {
     }
 }
 
+#[cfg(feature = "tui")]
 fn is_status_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -98,20 +109,22 @@ fn is_status_kind(kind: &str) -> bool {
             | "room_change"
             | "room_silent"
             | "room_block"
-            | "superchat_delete"
             | "warning"
             | "cut_off"
+            | "superchat_delete"
             | "reconnected"
     )
 }
 
 /// Returns `true` for high-frequency ephemeral presence/activity events
 /// rendered on the pinned bottom line instead of scrolling into the main feed.
+#[cfg(feature = "tui")]
 pub fn is_ephemeral_kind(kind: &str) -> bool {
     matches!(kind, "enter" | "guard_enter" | "like")
 }
 
 /// A single logical row stored in the TUI message buffer.
+#[cfg(feature = "tui")]
 #[derive(Clone, Debug)]
 pub struct FeedEntry {
     /// `Some((kind, price))` for stream events subject to `/filter`; `None` for cards/system/errors.
@@ -119,6 +132,7 @@ pub struct FeedEntry {
     pub line: Line<'static>,
 }
 
+#[cfg(feature = "tui")]
 impl FeedEntry {
     pub fn always(line: Line<'static>) -> Self {
         Self {
@@ -152,6 +166,7 @@ impl FeedEntry {
 pub use dambo_core::server::{connect_host, display_listen_host, is_wildcard_host};
 
 /// Normalize Unix timestamps in seconds / ms / µs / ns to 13-digit milliseconds.
+#[cfg(feature = "tui")]
 fn normalize_timestamp_to_ms(ts: u64) -> Option<u64> {
     if ts >= 1_000_000_000_000_000_000 {
         Some(ts / 1_000_000)
@@ -167,6 +182,7 @@ fn normalize_timestamp_to_ms(ts: u64) -> Option<u64> {
 }
 
 /// Format a Unix timestamp (ms, or normalized from s/µs/ns) as local `HH:MM:SS`.
+#[cfg(feature = "tui")]
 pub fn format_timestamp_hms(ts_raw: u64) -> String {
     let Some(ts_ms) = normalize_timestamp_to_ms(ts_raw) else {
         return Local::now().format("%H:%M:%S").to_string();
@@ -181,6 +197,7 @@ pub fn format_timestamp_hms(ts_raw: u64) -> String {
 }
 
 /// Format Unix seconds timestamp as local `YYYY-MM-DD HH:MM:SS`.
+#[cfg(feature = "tui")]
 pub fn format_unix_secs_local(secs: u64) -> String {
     let dt: DateTime<Local> = Local
         .timestamp_opt(secs as i64, 0)
@@ -190,6 +207,7 @@ pub fn format_unix_secs_local(secs: u64) -> String {
 }
 
 /// Convert gold seeds (`1000` = `¥1`) to a compact CNY display string.
+#[cfg(feature = "tui")]
 pub fn format_price_cny(price_seeds: u64) -> String {
     if price_seeds == 0 {
         return String::new();
@@ -204,6 +222,7 @@ pub fn format_price_cny(price_seeds: u64) -> String {
 }
 
 /// Map Bilibili guard level (`1`/`2`/`3`) to its Chinese display name.
+#[cfg(feature = "tui")]
 pub fn format_guard_name(level: Option<u8>) -> &'static str {
     match level {
         Some(1) => "总督",
@@ -213,6 +232,7 @@ pub fn format_guard_name(level: Option<u8>) -> &'static str {
     }
 }
 
+#[cfg(feature = "tui")]
 fn card_row(label: &str, value_spans: Vec<Span<'static>>) -> FeedEntry {
     let mut spans = vec![
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
@@ -228,6 +248,7 @@ fn card_row(label: &str, value_spans: Vec<Span<'static>>) -> FeedEntry {
 }
 
 /// Render a structured User Info card when logged in (or guest status notice).
+#[cfg(feature = "tui")]
 pub fn format_user_info_lines(auth: &AuthState, my_room: Option<&RoomQuickItem>) -> Vec<FeedEntry> {
     if !auth.is_login {
         return vec![FeedEntry::always(Line::from(vec![
@@ -303,6 +324,7 @@ pub fn format_user_info_lines(auth: &AuthState, my_room: Option<&RoomQuickItem>)
 }
 
 /// Render a structured Room Info card upon entering/inspecting a live room.
+#[cfg(feature = "tui")]
 pub fn format_room_info_lines(
     info: &RoomInfoSnapshot,
     state: &RoomStateSnapshot,
@@ -514,6 +536,7 @@ pub fn format_room_info_plain(info: &RoomInfoSnapshot, state: &RoomStateSnapshot
     )
 }
 
+#[cfg(feature = "tui")]
 fn push_medal_span(spans: &mut Vec<Span<'static>>, item: &SnapshotItem) {
     if let Some(level) = item.medal_level.filter(|&lv| lv > 0) {
         let label = match item.medal_name.as_deref().map(str::trim) {
@@ -525,6 +548,7 @@ fn push_medal_span(spans: &mut Vec<Span<'static>>, item: &SnapshotItem) {
 }
 
 /// Format a live or replayed Channel A `SnapshotItem` into a styled TUI `FeedEntry`.
+#[cfg(feature = "tui")]
 pub fn format_snapshot_item(item: &SnapshotItem) -> FeedEntry {
     let ts = format_timestamp_hms(item.timestamp);
     let mut spans = vec![Span::styled(
@@ -705,16 +729,12 @@ pub fn format_snapshot_item(item: &SnapshotItem) -> FeedEntry {
             ));
         }
         "superchat_delete" => {
-            let ids_str = item
-                .ids
-                .as_ref()
-                .map(|ids| {
-                    ids.iter()
-                        .map(|id| id.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_default();
+            let ids_str = item.ids.as_ref().map_or_default(|ids| {
+                ids.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
             spans.push(Span::styled(
                 format!("✕ 撤回醒目留言 [{}]", ids_str),
                 Style::default().fg(Color::DarkGray),
@@ -740,6 +760,7 @@ pub fn format_snapshot_item(item: &SnapshotItem) -> FeedEntry {
 }
 
 /// Convert `SendDanmakuError` into a user-friendly Chinese error message.
+#[cfg(feature = "tui")]
 pub fn format_send_danmaku_error(err: &SendDanmakuError) -> String {
     match err {
         SendDanmakuError::NotLoggedIn => "尚未登录 B 站账号，请先输入 /login 扫码登录".to_string(),
@@ -760,6 +781,7 @@ pub fn format_send_danmaku_error(err: &SendDanmakuError) -> String {
 }
 
 /// Format `/rooms` output (My Room + Following Live + Recent Rooms).
+#[cfg(feature = "tui")]
 pub fn format_room_options(opts: &RoomOptionsPayload) -> Vec<FeedEntry> {
     let mut out = vec![FeedEntry::system(
         "── 房间列表 (/room <房间号> 快速进入) ──",
@@ -828,6 +850,7 @@ pub fn format_room_options(opts: &RoomOptionsPayload) -> Vec<FeedEntry> {
 }
 
 /// Format `/history` output.
+#[cfg(feature = "tui")]
 pub fn format_history(history: &[RoomHistoryEntry]) -> Vec<FeedEntry> {
     if history.is_empty() {
         return vec![FeedEntry::system("暂无历史房间记录")];
@@ -855,6 +878,7 @@ pub fn format_history(history: &[RoomHistoryEntry]) -> Vec<FeedEntry> {
 }
 
 /// Format `/plugins` output.
+#[cfg(feature = "tui")]
 pub fn format_plugins(plugins: &[PluginInfo], host: &str, port: u16) -> Vec<FeedEntry> {
     if plugins.is_empty() {
         return vec![FeedEntry::system("插件目录中未发现有效插件")];
@@ -980,6 +1004,7 @@ pub fn format_lan_info_plain(payload: &LanUrlsPayload, selected_idx: usize) -> V
 }
 
 /// Format LAN access links and terminal QR code for the TUI feed (`/lan`).
+#[cfg(feature = "tui")]
 pub fn format_lan_info(payload: &LanUrlsPayload, selected_idx: usize) -> Vec<FeedEntry> {
     build_lan_display_lines(payload, selected_idx)
         .into_iter()
@@ -1017,6 +1042,7 @@ pub fn format_lan_info(payload: &LanUrlsPayload, selected_idx: usize) -> Vec<Fee
 }
 
 /// Format a routed `CliLogEntry` for display inside the TUI viewport.
+#[cfg(feature = "tui")]
 pub fn format_cli_log(entry: &CliLogEntry) -> FeedEntry {
     let (tag, color) = match entry.level {
         log::Level::Error => ("ERR", Color::Red),
@@ -1042,6 +1068,7 @@ pub fn format_cli_log(entry: &CliLogEntry) -> FeedEntry {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "tui")]
     fn entry_text(entry: &FeedEntry) -> String {
         entry
             .line
@@ -1051,6 +1078,7 @@ mod tests {
             .collect::<String>()
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn test_display_filter_modes() {
         let mut filter = DisplayFilter::new(true);
@@ -1085,6 +1113,7 @@ mod tests {
         assert!(filter.allows_kind("guard", 198000));
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn test_price_and_guard_formatting() {
         assert_eq!(format_price_cny(0), "");
@@ -1098,6 +1127,7 @@ mod tests {
         assert_eq!(format_guard_name(None), "大航海");
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn test_user_and_room_info_cards() {
         let guest = AuthState::default();
@@ -1178,6 +1208,7 @@ mod tests {
         assert_eq!(connect_host("192.168.1.5"), "192.168.1.5");
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn test_format_snapshot_items() {
         let base = SnapshotItem {
@@ -1227,6 +1258,7 @@ mod tests {
         assert!(guard_text.contains("¥138"));
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn test_format_timestamp_hms_normalizes_units() {
         let secs = 1_795_479_892u64;
@@ -1265,14 +1297,17 @@ mod tests {
         assert!(joined0.contains("/lan <序号>"));
         assert!(lines_idx0.len() > 8);
 
-        let lines_idx1 = format_lan_info(&multi, 1);
-        let joined1: String = lines_idx1
-            .iter()
-            .map(entry_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined1.contains("• [备选 #1] http://192.168.1.20:3838/game24/m"));
-        assert!(joined1.contains("★ [已选 #2] http://10.0.0.5:3838/game24/m"));
+        #[cfg(feature = "tui")]
+        {
+            let lines_idx1 = format_lan_info(&multi, 1);
+            let joined1: String = lines_idx1
+                .iter()
+                .map(entry_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(joined1.contains("• [备选 #1] http://192.168.1.20:3838/game24/m"));
+            assert!(joined1.contains("★ [已选 #2] http://10.0.0.5:3838/game24/m"));
+        }
 
         cfg.host = "127.0.0.1".to_string();
         cfg.security_mode = SecurityMode::Strict;

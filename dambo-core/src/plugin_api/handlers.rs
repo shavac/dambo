@@ -389,8 +389,7 @@ async fn get_system_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "history_rooms": state
             .state_store
             .as_ref()
-            .map(|s| s.room_history())
-            .unwrap_or_default(),
+            .map_or_default(|s| s.room_history()),
         "recording": {
             "enabled": rec_enabled,
             "record_raw": rec_raw,
@@ -684,8 +683,7 @@ async fn get_plugin(
                 .plugin_store
                 .check_effective_acl(&c.namedomain, &target_info.namedomain, "persist:config")
                 .await
-                .map(|chk| matches!(chk.effective_level.as_str(), "read" | "write" | "self"))
-                .unwrap_or(false)
+                .is_ok_and(|chk| matches!(chk.effective_level.as_str(), "read" | "write" | "self"))
         };
         if can_read_config {
             config = Some(
@@ -723,6 +721,16 @@ async fn data_list_namespaces(
     Ok(Json(serde_json::json!({ "namespaces": namespaces })))
 }
 
+fn parse_csv_keys(raw: Option<&str>) -> Option<Vec<String>> {
+    raw.map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+}
+
 async fn data_list_entries(
     AxumPath((store_raw, owner, ns)): AxumPath<(String, String, String)>,
     Query(query): Query<ListEntriesQuery>,
@@ -732,13 +740,7 @@ async fn data_list_entries(
     let (caller, store, target_info) =
         resolve_data_target(&headers, &state.plugins, &store_raw, &owner)?;
 
-    let keys_vec: Option<Vec<String>> = query.keys.map(|raw| {
-        raw.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect()
-    });
+    let keys_vec = parse_csv_keys(query.keys.as_deref());
     let (entries, auto_acl) = state
         .plugin_store
         .list_entries_cached_with_acl(
@@ -951,6 +953,33 @@ fn validate_topic_payload(payload: &serde_json::Value) -> Result<(), ApiError> {
     Ok(())
 }
 
+async fn publish_topic_for_owner(
+    state: &AppState,
+    owner_namedomain: &str,
+    name: &str,
+    body: TopicPublishBody,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_topic_payload(&body.payload)?;
+
+    let (meta, demoted) = state
+        .plugin_store
+        .ensure_topic_for_publish(owner_namedomain, name, body.public, body.description)
+        .await?;
+    if demoted {
+        state
+            .plugin_hub
+            .prune_unauthorized_for_owner(&state.plugin_store, owner_namedomain)
+            .await;
+    }
+    let delivered = state
+        .plugin_hub
+        .publish_topic_message(owner_namedomain, name, &body.payload);
+    Ok(Json(serde_json::json!({
+        "delivered": delivered,
+        "topic": meta
+    })))
+}
+
 async fn publish_topic(
     AxumPath(name): AxumPath<String>,
     headers: HeaderMap,
@@ -958,26 +987,7 @@ async fn publish_topic(
     Json(body): Json<TopicPublishBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = require_caller_plugin(&headers, &state.plugins)?;
-    validate_topic_payload(&body.payload)?;
-
-    let (meta, demoted) = state
-        .plugin_store
-        .ensure_topic_for_publish(&caller.namedomain, &name, body.public, body.description)
-        .await?;
-    if demoted {
-        state
-            .plugin_hub
-            .prune_unauthorized_for_owner(&state.plugin_store, &caller.namedomain)
-            .await;
-    }
-    let delivered =
-        state
-            .plugin_hub
-            .publish_topic_message(&caller.namedomain, &name, &body.payload);
-    Ok(Json(serde_json::json!({
-        "delivered": delivered,
-        "topic": meta
-    })))
+    publish_topic_for_owner(&state, &caller.namedomain, &name, body).await
 }
 
 async fn get_acl(
@@ -1263,13 +1273,7 @@ async fn admin_list_entries(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let (store, target_info) = resolve_admin_owner_and_store(&state.plugins, &store_raw, &owner)?;
-    let keys_vec: Option<Vec<String>> = query.keys.map(|raw| {
-        raw.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect()
-    });
+    let keys_vec = parse_csv_keys(query.keys.as_deref());
     let (entries, _) = state
         .plugin_store
         .list_entries_cached_with_acl(
@@ -1354,25 +1358,7 @@ async fn admin_publish_topic(
     Json(body): Json<TopicPublishBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let owner_info = resolve_target_plugin(&state.plugins, None, &owner)?;
-    validate_topic_payload(&body.payload)?;
-    let (meta, demoted) = state
-        .plugin_store
-        .ensure_topic_for_publish(&owner_info.namedomain, &name, body.public, body.description)
-        .await?;
-    if demoted {
-        state
-            .plugin_hub
-            .prune_unauthorized_for_owner(&state.plugin_store, &owner_info.namedomain)
-            .await;
-    }
-    let delivered =
-        state
-            .plugin_hub
-            .publish_topic_message(&owner_info.namedomain, &name, &body.payload);
-    Ok(Json(serde_json::json!({
-        "delivered": delivered,
-        "topic": meta
-    })))
+    publish_topic_for_owner(&state, &owner_info.namedomain, &name, body).await
 }
 
 pub(super) async fn auth_manage(
@@ -1399,7 +1385,7 @@ pub(super) async fn auth_manage(
             }
             return Ok(res);
         }
-        let provided = body.token.as_deref().map(str::trim).unwrap_or("");
+        let provided = body.token.as_deref().map_or("", str::trim);
         if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
             state.admin_sessions.record_auth_failure(peer_ip);
             return Err(ApiError(PluginApiError::unauthorized(
@@ -1495,6 +1481,21 @@ fn build_sse_response(
     )
 }
 
+fn parse_json_query_list<T: serde::de::DeserializeOwned>(
+    raw: Option<&str>,
+    param_name: &str,
+) -> Result<Vec<T>, ApiError> {
+    match raw.map(str::trim) {
+        Some(trimmed) if !trimmed.is_empty() => serde_json::from_str(trimmed).map_err(|e| {
+            ApiError(PluginApiError::invalid_argument(format!(
+                "Invalid '{}' JSON query parameter: {}",
+                param_name, e
+            )))
+        }),
+        _ => Ok(Vec::new()),
+    }
+}
+
 async fn sse_events(
     OptionalPeerIp(peer_ip): OptionalPeerIp,
     headers: HeaderMap,
@@ -1545,24 +1546,9 @@ async fn sse_events(
         )))
     })?;
 
-    let raw_watches: Vec<WatchSubInput> = match query.watches.as_deref().map(str::trim) {
-        Some(raw) if !raw.is_empty() => serde_json::from_str(raw).map_err(|e| {
-            ApiError(PluginApiError::invalid_argument(format!(
-                "Invalid 'watches' JSON query parameter: {}",
-                e
-            )))
-        })?,
-        _ => Vec::new(),
-    };
-    let raw_topics: Vec<TopicSubInput> = match query.topics.as_deref().map(str::trim) {
-        Some(raw) if !raw.is_empty() => serde_json::from_str(raw).map_err(|e| {
-            ApiError(PluginApiError::invalid_argument(format!(
-                "Invalid 'topics' JSON query parameter: {}",
-                e
-            )))
-        })?,
-        _ => Vec::new(),
-    };
+    let raw_watches: Vec<WatchSubInput> =
+        parse_json_query_list(query.watches.as_deref(), "watches")?;
+    let raw_topics: Vec<TopicSubInput> = parse_json_query_list(query.topics.as_deref(), "topics")?;
 
     let sync_res = evaluate_subscriptions_with_hub(
         &state.plugins,

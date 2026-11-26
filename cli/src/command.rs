@@ -62,11 +62,7 @@ pub fn parse_input(raw: &str) -> ParsedInput {
 
     // Double leading slash escapes into literal danmaku starting with `/`.
     if let Some(escaped) = trimmed.strip_prefix("//") {
-        let literal = format!("/{}", escaped);
-        if literal.trim() == "/" && escaped.is_empty() {
-            return ParsedInput::SendDanmaku("/".to_string());
-        }
-        return ParsedInput::SendDanmaku(literal);
+        return ParsedInput::SendDanmaku(format!("/{}", escaped));
     }
 
     if !trimmed.starts_with('/') {
@@ -130,14 +126,11 @@ fn parse_history_args(rest: &str) -> ParsedInput {
     if rest.is_empty() {
         return ParsedInput::Command(CliCommand::History);
     }
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    if parts.len() == 2
-        && matches!(
-            parts[0].to_ascii_lowercase().as_str(),
-            "rm" | "del" | "remove"
-        )
+    let mut parts = rest.split_whitespace();
+    if let (Some(sub), Some(id_str), None) = (parts.next(), parts.next(), parts.next())
+        && matches!(sub.to_ascii_lowercase().as_str(), "rm" | "del" | "remove")
     {
-        if let Ok(room_id) = parts[1].parse::<u64>()
+        if let Ok(room_id) = id_str.parse::<u64>()
             && room_id > 0
         {
             return ParsedInput::Command(CliCommand::HistoryRemove(room_id));
@@ -159,28 +152,28 @@ fn parse_raw_args(rest: &str) -> ParsedInput {
 }
 
 fn parse_filter_args(rest: &str) -> ParsedInput {
-    if rest.is_empty() {
+    let mut parts = rest.split_whitespace();
+    let Some(first) = parts.next() else {
         return ParsedInput::Command(CliCommand::Filter(FilterCommand::Status));
-    }
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    match parts[0].to_ascii_lowercase().as_str() {
-        "all" => ParsedInput::Command(CliCommand::Filter(FilterCommand::All)),
-        "chat" => ParsedInput::Command(CliCommand::Filter(FilterCommand::ChatOnly)),
-        "paid" | "gift" => ParsedInput::Command(CliCommand::Filter(FilterCommand::PaidOnly)),
-        "enter" if parts.len() == 2 => {
-            if let Some(val) = parse_toggle(parts[1]) {
-                ParsedInput::Command(CliCommand::Filter(FilterCommand::SetEnter(val)))
-            } else {
-                ParsedInput::InvalidCommand("用法: /filter enter <on|off>".to_string())
-            }
+    };
+    match (
+        first.to_ascii_lowercase().as_str(),
+        parts.next(),
+        parts.next(),
+    ) {
+        ("all", _, _) => ParsedInput::Command(CliCommand::Filter(FilterCommand::All)),
+        ("chat", _, _) => ParsedInput::Command(CliCommand::Filter(FilterCommand::ChatOnly)),
+        ("paid" | "gift", _, _) => {
+            ParsedInput::Command(CliCommand::Filter(FilterCommand::PaidOnly))
         }
-        "like" if parts.len() == 2 => {
-            if let Some(val) = parse_toggle(parts[1]) {
-                ParsedInput::Command(CliCommand::Filter(FilterCommand::SetLike(val)))
-            } else {
-                ParsedInput::InvalidCommand("用法: /filter like <on|off>".to_string())
-            }
-        }
+        ("enter", Some(val_raw), None) => match parse_toggle(val_raw) {
+            Some(val) => ParsedInput::Command(CliCommand::Filter(FilterCommand::SetEnter(val))),
+            None => ParsedInput::InvalidCommand("用法: /filter enter <on|off>".to_string()),
+        },
+        ("like", Some(val_raw), None) => match parse_toggle(val_raw) {
+            Some(val) => ParsedInput::Command(CliCommand::Filter(FilterCommand::SetLike(val))),
+            None => ParsedInput::InvalidCommand("用法: /filter like <on|off>".to_string()),
+        },
         _ => ParsedInput::InvalidCommand(
             "用法: /filter [all|chat|paid|enter <on|off>|like <on|off>]".to_string(),
         ),
@@ -195,31 +188,29 @@ pub fn complete_command(input: &str) -> Option<String> {
     }
 
     let lower = trimmed.to_ascii_lowercase();
-    let matches: Vec<&str> = CANONICAL_COMMANDS
-        .iter()
-        .copied()
-        .filter(|cmd| cmd.starts_with(&lower))
-        .collect();
+    let mut match_count = 0usize;
+    let mut common: Option<&str> = None;
+    for &cmd in CANONICAL_COMMANDS {
+        if !cmd.starts_with(&lower) {
+            continue;
+        }
+        match_count += 1;
+        common = Some(match common {
+            None => cmd,
+            Some(prev) => {
+                let byte_len: usize = prev
+                    .chars()
+                    .zip(cmd.chars())
+                    .take_while(|(a, b)| a == b)
+                    .map(|(ch, _)| ch.len_utf8())
+                    .sum();
+                &prev[..byte_len]
+            }
+        });
+    }
 
-    if matches.is_empty() {
-        return None;
-    }
-    if matches.len() == 1 {
-        return Some(matches[0].to_string());
-    }
-
-    let first = matches[0];
-    let mut common_len = first.len();
-    for m in &matches[1..] {
-        common_len = first
-            .bytes()
-            .zip(m.bytes())
-            .take(common_len)
-            .take_while(|(a, b)| a == b)
-            .count();
-    }
-    let prefix = &first[..common_len];
-    if prefix.len() > lower.len() {
+    let prefix = common?;
+    if match_count == 1 || prefix.len() > lower.len() {
         Some(prefix.to_string())
     } else {
         None
@@ -265,6 +256,10 @@ mod tests {
             ParsedInput::SendDanmaku("/666".to_string())
         );
         assert_eq!(parse_input("//"), ParsedInput::SendDanmaku("/".to_string()));
+        assert_eq!(
+            parse_input("///"),
+            ParsedInput::SendDanmaku("//".to_string())
+        );
         assert_eq!(
             parse_input("/say /help"),
             ParsedInput::SendDanmaku("/help".to_string())
@@ -340,6 +335,10 @@ mod tests {
             ParsedInput::Command(CliCommand::Filter(FilterCommand::Status))
         );
         assert_eq!(
+            parse_input("/filter all extra"),
+            ParsedInput::Command(CliCommand::Filter(FilterCommand::All))
+        );
+        assert_eq!(
             parse_input("/filter chat"),
             ParsedInput::Command(CliCommand::Filter(FilterCommand::ChatOnly))
         );
@@ -351,6 +350,10 @@ mod tests {
             parse_input("/filter enter off"),
             ParsedInput::Command(CliCommand::Filter(FilterCommand::SetEnter(false)))
         );
+        assert!(matches!(
+            parse_input("/filter enter on extra"),
+            ParsedInput::InvalidCommand(_)
+        ));
         assert_eq!(
             parse_input("/filter like on"),
             ParsedInput::Command(CliCommand::Filter(FilterCommand::SetLike(true)))
@@ -377,10 +380,14 @@ mod tests {
     #[test]
     fn test_complete_command() {
         assert_eq!(complete_command("/he"), Some("/help".to_string()));
+        assert_eq!(complete_command("/help"), Some("/help".to_string()));
         assert_eq!(complete_command("/pl"), Some("/plugins".to_string()));
         assert_eq!(complete_command("/la"), Some("/lan".to_string()));
         assert_eq!(complete_command("/ro"), Some("/room".to_string()));
+        assert_eq!(complete_command("/r"), None);
+        assert_eq!(complete_command("/lo"), Some("/log".to_string()));
         assert_eq!(complete_command("/room "), None);
+        assert_eq!(complete_command("/中文"), None);
         assert_eq!(complete_command("hello"), None);
         assert_eq!(complete_command("/xyz"), None);
     }

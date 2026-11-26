@@ -116,29 +116,33 @@ async fn no_cache_middleware(req: Request<Body>, next: Next) -> Response {
 }
 
 fn content_type_for_path(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("html" | "htm") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js" | "mjs") => "application/javascript; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("ico") => "image/x-icon",
-        Some("woff2") => "font/woff2",
-        Some("woff") => "font/woff",
-        Some("ttf") => "font/ttf",
-        Some("mp3") => "audio/mpeg",
-        Some("wav") => "audio/wav",
-        _ => "application/octet-stream",
-    }
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return "application/octet-stream";
+    };
+    const MIME_TYPES: &[(&[&str], &str)] = &[
+        (&["html", "htm"], "text/html; charset=utf-8"),
+        (&["css"], "text/css; charset=utf-8"),
+        (&["js", "mjs"], "application/javascript; charset=utf-8"),
+        (&["json"], "application/json; charset=utf-8"),
+        (&["svg"], "image/svg+xml"),
+        (&["png"], "image/png"),
+        (&["jpg", "jpeg"], "image/jpeg"),
+        (&["gif"], "image/gif"),
+        (&["webp"], "image/webp"),
+        (&["ico"], "image/x-icon"),
+        (&["woff2"], "font/woff2"),
+        (&["woff"], "font/woff"),
+        (&["ttf"], "font/ttf"),
+        (&["mp3"], "audio/mpeg"),
+        (&["wav"], "audio/wav"),
+    ];
+    MIME_TYPES
+        .iter()
+        .find(|(exts, _)| {
+            exts.iter()
+                .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+        })
+        .map_or("application/octet-stream", |&(_, mime)| mime)
 }
 
 async fn serve_file_response(path: &Path) -> Response {
@@ -162,27 +166,29 @@ fn redirect_with_query(status: StatusCode, target_path: &str, uri: &Uri) -> Resp
     }
 }
 
-fn attach_admin_security_headers(mut res: Response) -> Response {
+fn attach_frame_headers(
+    mut res: Response,
+    x_frame_options: &'static str,
+    csp: &'static str,
+) -> Response {
     let headers = res.headers_mut();
-    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static(x_frame_options),
+    );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'none'"),
+        HeaderValue::from_static(csp),
     );
     res
 }
 
-fn attach_manage_security_headers(mut res: Response) -> Response {
-    let headers = res.headers_mut();
-    headers.insert(
-        header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("SAMEORIGIN"),
-    );
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'self'"),
-    );
-    res
+fn attach_admin_security_headers(res: Response) -> Response {
+    attach_frame_headers(res, "DENY", "frame-ancestors 'none'")
+}
+
+fn attach_manage_security_headers(res: Response) -> Response {
+    attach_frame_headers(res, "SAMEORIGIN", "frame-ancestors 'self'")
 }
 
 fn is_manage_html_subpath(rel_path: &str) -> bool {
@@ -190,21 +196,25 @@ fn is_manage_html_subpath(rel_path: &str) -> bool {
         return false;
     }
     let trimmed = rel_path.trim_start_matches('/');
-    let mut normals = Vec::new();
+    let mut single_normal = None;
     for comp in Path::new(trimmed).components() {
         match comp {
-            Component::Normal(part) => normals.push(part),
+            Component::Normal(part) => {
+                if single_normal.is_some() {
+                    return false;
+                }
+                single_normal = Some(part);
+            }
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
         }
     }
-    normals.len() == 1
-        && normals[0]
-            .to_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case("manage.html"))
+    single_normal
+        .and_then(|p| p.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("manage.html"))
 }
 
-fn safe_join_subpath(plugin_dir: &Path, rel_path: &str) -> Option<PathBuf> {
+async fn safe_join_subpath(plugin_dir: &Path, rel_path: &str) -> Option<PathBuf> {
     if rel_path.contains('\0') || rel_path.contains('\\') {
         return None;
     }
@@ -221,12 +231,17 @@ fn safe_join_subpath(plugin_dir: &Path, rel_path: &str) -> Option<PathBuf> {
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    let canonical_base = std::fs::canonicalize(plugin_dir).ok()?;
-    let canonical_target = std::fs::canonicalize(&candidate).ok()?;
-    if canonical_target.starts_with(&canonical_base) && canonical_target.is_file() {
-        Some(canonical_target)
-    } else {
+    let canonical_base = tokio::fs::canonicalize(plugin_dir).await.ok()?;
+    let canonical_target = tokio::fs::canonicalize(&candidate).await.ok()?;
+    let meta = tokio::fs::metadata(&canonical_target).await.ok()?;
+    (canonical_target.starts_with(&canonical_base) && meta.is_file()).then_some(canonical_target)
+}
+
+fn missing_plugin_response(state: &AppState, plugin: &str) -> Option<Response> {
+    if is_valid_plugin_name(plugin) && state.plugins.contains(plugin) {
         None
+    } else {
+        Some((StatusCode::NOT_FOUND, "Plugin not found").into_response())
     }
 }
 
@@ -268,8 +283,8 @@ async fn redirect_plugin_root(
     uri: Uri,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
-        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+    if let Some(err_res) = missing_plugin_response(&state, &plugin) {
+        return err_res;
     }
     redirect_with_query(
         StatusCode::MOVED_PERMANENTLY,
@@ -282,8 +297,8 @@ async fn serve_plugin_view(
     AxumPath(plugin): AxumPath<String>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
-        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+    if let Some(err_res) = missing_plugin_response(&state, &plugin) {
+        return err_res;
     }
     let view_path = state.html_dir.join(&plugin).join("plugin.html");
     serve_file_response(&view_path).await
@@ -295,8 +310,8 @@ async fn serve_plugin_manage(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
-        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+    if let Some(err_res) = missing_plugin_response(&state, &plugin) {
+        return err_res;
     }
     let set_cookie = match plugin_api::authorize_and_maybe_mint_manage_cookie(
         &headers,
@@ -308,7 +323,10 @@ async fn serve_plugin_manage(
         Err(err) => return plugin_api::ApiError(err).into_response(),
     };
     let manage_path = state.html_dir.join(&plugin).join("manage.html");
-    let mut res = if manage_path.is_file() {
+    let mut res = if tokio::fs::metadata(&manage_path)
+        .await
+        .is_ok_and(|m| m.is_file())
+    {
         serve_file_response(&manage_path).await
     } else {
         (
@@ -332,8 +350,8 @@ async fn redirect_plugin_manage_slash(
     uri: Uri,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
-        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+    if let Some(err_res) = missing_plugin_response(&state, &plugin) {
+        return err_res;
     }
     redirect_with_query(
         StatusCode::MOVED_PERMANENTLY,
@@ -347,8 +365,8 @@ async fn serve_plugin_asset(
     uri: Uri,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    if !is_valid_plugin_name(&plugin) || !state.plugins.contains(&plugin) {
-        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+    if let Some(err_res) = missing_plugin_response(&state, &plugin) {
+        return err_res;
     }
     if is_manage_html_subpath(&subpath) {
         return redirect_with_query(
@@ -358,7 +376,7 @@ async fn serve_plugin_asset(
         );
     }
     let plugin_dir = state.html_dir.join(&plugin);
-    match safe_join_subpath(&plugin_dir, &subpath) {
+    match safe_join_subpath(&plugin_dir, &subpath).await {
         Some(target) => serve_file_response(&target).await,
         None => (StatusCode::NOT_FOUND, "Asset not found").into_response(),
     }
@@ -371,53 +389,68 @@ async fn ws_channel_a(
     ws.on_upgrade(move |socket| handle_ws_a(socket, state))
 }
 
-async fn handle_ws_a(mut socket: WebSocket, state: Arc<AppState>) {
-    let mut rx = state.hub.subscribe_ws();
+async fn send_ws_json<T: serde::Serialize>(socket: &mut WebSocket, payload: &T) -> bool {
+    let Ok(json) = serde_json::to_string(payload) else {
+        return true;
+    };
+    socket.send(Message::Text(json.into())).await.is_ok()
+}
 
-    // Send initial Snapshot frame immediately upon connection
-    let initial = ChannelAMessage::Snapshot(state.hub.snapshot());
-    if let Ok(json) = serde_json::to_string(&initial)
-        && socket.send(Message::Text(json.into())).await.is_err()
-    {
-        return;
-    }
-
+async fn run_ws_broadcast_loop<T, F>(
+    socket: &mut WebSocket,
+    mut rx: broadcast::Receiver<T>,
+    cancel: &CancellationToken,
+    mut on_lagged: F,
+) where
+    T: Clone + serde::Serialize,
+    F: FnMut(u64) -> Option<T>,
+{
     loop {
         tokio::select! {
-            _ = state.cancel.cancelled() => {
+            _ = cancel.cancelled() => {
                 let _ = socket.send(Message::Close(None)).await;
                 break;
             }
-            recv = rx.recv() => {
-                match recv {
-                    Ok(msg) => {
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
-                        }
+            recv = rx.recv() => match recv {
+                Ok(msg) => {
+                    if !send_ws_json(socket, &msg).await {
+                        break;
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        log::warn!("/ws client lagged by {} messages, resending Snapshot", skipped);
-                        let fresh = ChannelAMessage::Snapshot(state.hub.snapshot());
-                        if let Ok(json) = serde_json::to_string(&fresh)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
-                        }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    if let Some(recovery) = on_lagged(skipped)
+                        && !send_ws_json(socket, &recovery).await
+                    {
+                        break;
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
-            }
-            incoming = socket.recv() => {
-                match incoming {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
-                    _ => {}
-                }
-            }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                _ => {}
+            },
         }
     }
+}
+
+async fn handle_ws_a(mut socket: WebSocket, state: Arc<AppState>) {
+    let rx = state.hub.subscribe_ws();
+
+    // Send initial Snapshot frame immediately upon connection
+    let initial = ChannelAMessage::Snapshot(state.hub.snapshot());
+    if !send_ws_json(&mut socket, &initial).await {
+        return;
+    }
+
+    run_ws_broadcast_loop(&mut socket, rx, &state.cancel, |skipped| {
+        log::warn!(
+            "/ws client lagged by {} messages, resending Snapshot",
+            skipped
+        );
+        Some(ChannelAMessage::Snapshot(state.hub.snapshot()))
+    })
+    .await;
 }
 
 async fn ws_channel_b(
@@ -428,46 +461,19 @@ async fn ws_channel_b(
 }
 
 async fn handle_ws_b(mut socket: WebSocket, state: Arc<AppState>) {
-    let mut rx = state.event_tx.subscribe();
+    let rx = state.event_tx.subscribe();
 
     // Send latest RoomInfo metadata immediately upon connecting to /ws/event
     let initial_info = ChannelBMessage::RoomInfo(Box::new(state.hub.room_info_event()));
-    if let Ok(json) = serde_json::to_string(&initial_info)
-        && socket.send(Message::Text(json.into())).await.is_err()
-    {
+    if !send_ws_json(&mut socket, &initial_info).await {
         return;
     }
 
-    loop {
-        tokio::select! {
-            _ = state.cancel.cancelled() => {
-                let _ = socket.send(Message::Close(None)).await;
-                break;
-            }
-            recv = rx.recv() => {
-                match recv {
-                    Ok(msg) => {
-                        if let Ok(json) = serde_json::to_string(&msg)
-                            && socket.send(Message::Text(json.into())).await.is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        log::warn!("/ws/event client lagged by {} batches", skipped);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            incoming = socket.recv() => {
-                match incoming {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
-                    _ => {}
-                }
-            }
-        }
-    }
+    run_ws_broadcast_loop(&mut socket, rx, &state.cancel, |skipped| {
+        log::warn!("/ws/event client lagged by {} batches", skipped);
+        None
+    })
+    .await;
 }
 
 /// Build the unified Axum router serving `/`, `/admin` (301 -> `/`), `/sdk/dambo.js`, `/ws`, `/ws/event`, `/api/v1/*`,
@@ -1106,5 +1112,33 @@ mod tests {
         assert!(!ADMIN_CONSOLE_HTML.contains("drawer-preview-link"));
         assert!(!ADMIN_CONSOLE_HTML.contains("innerHTML"));
         assert!(!ADMIN_CONSOLE_HTML.contains("no-referrer"));
+    }
+
+    #[test]
+    fn test_content_type_and_manage_subpath_edge_cases() {
+        assert_eq!(
+            content_type_for_path(Path::new("INDEX.HTML")),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for_path(Path::new("app.Js")),
+            "application/javascript; charset=utf-8"
+        );
+        assert_eq!(content_type_for_path(Path::new("font.WOFF2")), "font/woff2");
+        assert_eq!(
+            content_type_for_path(Path::new("README")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            content_type_for_path(Path::new("archive.tar.gz")),
+            "application/octet-stream"
+        );
+
+        assert!(is_manage_html_subpath("./Manage.HTML"));
+        assert!(is_manage_html_subpath("/manage.html"));
+        assert!(!is_manage_html_subpath("sub/manage.html"));
+        assert!(!is_manage_html_subpath("../manage.html"));
+        assert!(!is_manage_html_subpath("manage.html\0"));
+        assert!(!is_manage_html_subpath("manage.html\\evil"));
     }
 }

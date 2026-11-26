@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
@@ -15,25 +15,24 @@ pub const MAX_ROOM_HISTORY: usize = 20;
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Normalizes an arbitrary locale tag (e.g. `zh_CN.UTF-8`, `ja-JP`, `en_US`) into
 /// one of the supported host locales (`"zh-CN"`, `"ja"`, `"en"`), or returns `None`.
 pub fn normalize_locale(raw: &str) -> Option<&'static str> {
-    let lower = raw.trim().to_ascii_lowercase().replace('_', "-");
-    if lower.is_empty() {
+    let trimmed = raw.trim().as_bytes();
+    if trimmed.len() < 2 {
         return None;
     }
-    if lower.starts_with("zh") {
-        Some("zh-CN")
-    } else if lower.starts_with("ja") {
-        Some("ja")
-    } else if lower.starts_with("en") {
-        Some("en")
-    } else {
-        None
+    match [
+        trimmed[0].to_ascii_lowercase(),
+        trimmed[1].to_ascii_lowercase(),
+    ] {
+        [b'z', b'h'] => Some("zh-CN"),
+        [b'j', b'a'] => Some("ja"),
+        [b'e', b'n'] => Some("en"),
+        _ => None,
     }
 }
 
@@ -65,78 +64,46 @@ pub struct AppPersistedState {
 /// Thread-safe, fault-tolerant, ACID `redb` persistence store for runtime host state.
 pub struct StateStore {
     db: Arc<Database>,
-    inner: RwLock<AppPersistedState>,
     write_lock: Mutex<()>,
     state_tx: watch::Sender<AppPersistedState>,
 }
 
 fn try_migrate_legacy_state(db: &Database, legacy_path: &Path) -> Option<AppPersistedState> {
-    let already_migrated = db::read_meta(db, db::KEY_APP_STATE_MIGRATED)
-        .ok()
-        .flatten()
-        .is_some();
-    if already_migrated || !legacy_path.exists() {
-        return None;
-    }
-    let raw = match fs::read_to_string(legacy_path) {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!(
-                "Failed to read legacy state file {:?} ({}); falling back to default runtime state",
-                legacy_path,
-                e
-            );
-            return None;
-        }
-    };
-    let parsed = match serde_json::from_str::<AppPersistedState>(&raw) {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!(
-                "Failed to parse legacy state file {:?} ({}); falling back to default runtime state",
-                legacy_path,
-                e
-            );
-            return None;
-        }
-    };
-    let sanitized = StateStore::sanitize_state(parsed, &legacy_path.display().to_string());
-    match serde_json::to_vec(&sanitized) {
-        Ok(bytes) => {
-            if let Err(e) = db::write_meta_batch(
-                db,
-                &[
-                    (db::KEY_APP_STATE, bytes.as_slice()),
-                    (db::KEY_APP_STATE_MIGRATED, b"1"),
-                ],
-            ) {
-                log::warn!(
-                    "Failed to migrate legacy state {:?} into redb: {}",
-                    legacy_path,
-                    e
-                );
-            } else if let Err(e) = fs::remove_file(legacy_path) {
-                log::warn!(
-                    "Migrated legacy state {:?} into redb, but failed to remove legacy file: {}",
-                    legacy_path,
-                    e
-                );
-            } else {
-                log::info!(
-                    "Migrated legacy state {:?} into redb and removed old JSON file",
-                    legacy_path
-                );
-            }
-        }
-        Err(e) => {
-            log::warn!(
-                "Failed to serialize migrated state from {:?}: {}",
-                legacy_path,
-                e
-            );
-        }
-    }
-    Some(sanitized)
+    db::migrate_legacy_json(
+        db,
+        legacy_path,
+        db::KEY_APP_STATE,
+        db::KEY_APP_STATE_MIGRATED,
+        "state.json",
+        |path| {
+            let raw = match fs::read_to_string(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!(
+                        "Failed to read legacy state file {:?} ({}); falling back to default runtime state",
+                        path,
+                        e
+                    );
+                    return None;
+                }
+            };
+            let parsed = match serde_json::from_str::<AppPersistedState>(&raw) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!(
+                        "Failed to parse legacy state file {:?} ({}); falling back to default runtime state",
+                        path,
+                        e
+                    );
+                    return None;
+                }
+            };
+            Some(StateStore::sanitize_state(
+                parsed,
+                &path.display().to_string(),
+            ))
+        },
+    )
 }
 
 impl StateStore {
@@ -172,10 +139,9 @@ impl StateStore {
                 .unwrap_or_default(),
         };
 
-        let (state_tx, _) = watch::channel(state.clone());
+        let (state_tx, _) = watch::channel(state);
         Self {
             db,
-            inner: RwLock::new(state),
             write_lock: Mutex::new(()),
             state_tx,
         }
@@ -218,10 +184,7 @@ impl StateStore {
     }
 
     pub fn snapshot(&self) -> AppPersistedState {
-        self.inner
-            .read()
-            .expect("StateStore RwLock poisoned")
-            .clone()
+        self.state_tx.borrow().clone()
     }
 
     pub fn subscribe(&self) -> watch::Receiver<AppPersistedState> {
@@ -229,33 +192,19 @@ impl StateStore {
     }
 
     pub fn current_room_id(&self) -> Option<u64> {
-        self.inner
-            .read()
-            .expect("StateStore RwLock poisoned")
-            .current_room_id
+        self.state_tx.borrow().current_room_id
     }
 
     pub fn locale(&self) -> Option<String> {
-        self.inner
-            .read()
-            .expect("StateStore RwLock poisoned")
-            .locale
-            .clone()
+        self.state_tx.borrow().locale.clone()
     }
 
     pub fn room_history(&self) -> Vec<RoomHistoryEntry> {
-        self.inner
-            .read()
-            .expect("StateStore RwLock poisoned")
-            .room_history
-            .clone()
+        self.state_tx.borrow().room_history.clone()
     }
 
     pub fn record_raw(&self) -> Option<bool> {
-        self.inner
-            .read()
-            .expect("StateStore RwLock poisoned")
-            .record_raw
+        self.state_tx.borrow().record_raw
     }
 
     /// Persist active room ID (and move it to top of `room_history` when connected).
@@ -410,10 +359,6 @@ impl StateStore {
         let bytes = serde_json::to_vec(&next).context("Failed to serialize AppPersistedState")?;
         db::write_meta(&self.db, db::KEY_APP_STATE, &bytes)
             .context("Failed to persist app_state to redb")?;
-        {
-            let mut inner = self.inner.write().expect("StateStore RwLock poisoned");
-            *inner = next.clone();
-        }
         self.state_tx.send_replace(next.clone());
         Ok(next)
     }
@@ -584,5 +529,17 @@ mod tests {
         drop(reloaded);
 
         let _ = fs::remove_dir_all(db_path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn test_normalize_locale_edge_cases() {
+        assert_eq!(normalize_locale(""), None);
+        assert_eq!(normalize_locale("z"), None);
+        assert_eq!(normalize_locale("ZH"), Some("zh-CN"));
+        assert_eq!(normalize_locale("zh_Hans_CN"), Some("zh-CN"));
+        assert_eq!(normalize_locale("ja-JP"), Some("ja"));
+        assert_eq!(normalize_locale("EN_US"), Some("en"));
+        assert_eq!(normalize_locale("  fr-FR  "), None);
+        assert_eq!(normalize_locale("中文"), None);
     }
 }

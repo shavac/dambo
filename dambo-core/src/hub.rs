@@ -12,9 +12,6 @@ struct HubInner {
     room_info: RoomInfoSnapshot,
     history: VecDeque<SnapshotItem>,
     next_id: u64,
-    max_history: usize,
-    show_enter: bool,
-    show_medal: bool,
 }
 
 fn is_snapshot_history_kind(kind: &str) -> bool {
@@ -26,6 +23,9 @@ pub struct StateHub {
     inner: RwLock<HubInner>,
     ws_tx: broadcast::Sender<ChannelAMessage>,
     room_state_tx: watch::Sender<RoomStateSnapshot>,
+    max_history: usize,
+    show_enter: bool,
+    show_medal: bool,
 }
 
 impl StateHub {
@@ -40,12 +40,12 @@ impl StateHub {
                 room_info: initial_info,
                 history: VecDeque::with_capacity(cfg.max_history),
                 next_id: 1,
-                max_history: cfg.max_history,
-                show_enter: cfg.show_enter,
-                show_medal: cfg.show_medal,
             }),
             ws_tx,
             room_state_tx,
+            max_history: cfg.max_history,
+            show_enter: cfg.show_enter,
+            show_medal: cfg.show_medal,
         }
     }
 
@@ -78,8 +78,7 @@ impl StateHub {
     }
 
     pub fn room_info_event(&self) -> RawBiliEvent {
-        let info = self.room_info();
-        info.to_raw_event(now_unix_ms())
+        self.room_info().to_raw_event(now_unix_ms())
     }
 
     pub fn subscribe_ws(&self) -> broadcast::Receiver<ChannelAMessage> {
@@ -88,6 +87,13 @@ impl StateHub {
 
     pub fn subscribe_room_state(&self) -> watch::Receiver<RoomStateSnapshot> {
         self.room_state_tx.subscribe()
+    }
+
+    fn broadcast_room_state(&self, state: RoomStateSnapshot) {
+        self.room_state_tx.send_replace(state.clone());
+        if self.ws_tx.receiver_count() > 0 {
+            let _ = self.ws_tx.send(ChannelAMessage::RoomState(state));
+        }
     }
 
     /// Update full `RoomInfoSnapshot` and sync `RoomStateSnapshot` if changed.
@@ -112,8 +118,7 @@ impl StateHub {
         };
 
         if let Some(state) = changed_state {
-            self.room_state_tx.send_replace(state.clone());
-            let _ = self.ws_tx.send(ChannelAMessage::RoomState(state));
+            self.broadcast_room_state(state);
         }
     }
 
@@ -126,42 +131,38 @@ impl StateHub {
         is_live: bool,
         connected: bool,
     ) {
-        let snapshot = {
+        let state = RoomStateSnapshot {
+            room_id,
+            room_uname: room_uname.clone(),
+            room_title: room_title.clone(),
+            is_live,
+            connected,
+        };
+        let snapshot = SnapshotData {
+            room_id,
+            room_uname: room_uname.clone(),
+            room_title: room_title.clone(),
+            is_live,
+            connected,
+            items: Vec::new(),
+        };
+        {
             let mut guard = self.inner.write().expect("StateHub RwLock poisoned");
             guard.history.clear();
             guard.room_info = RoomInfoSnapshot {
                 room_id,
-                uname: room_uname.clone(),
-                title: room_title.clone(),
+                uname: room_uname,
+                title: room_title,
                 live_status: if is_live { 1 } else { 0 },
                 ..Default::default()
             };
-            guard.room_state = RoomStateSnapshot {
-                room_id,
-                room_uname,
-                room_title,
-                is_live,
-                connected,
-            };
-            SnapshotData {
-                room_id: guard.room_state.room_id,
-                room_uname: guard.room_state.room_uname.clone(),
-                room_title: guard.room_state.room_title.clone(),
-                is_live: guard.room_state.is_live,
-                connected: guard.room_state.connected,
-                items: Vec::new(),
-            }
-        };
+            guard.room_state = state.clone();
+        }
 
-        let state = RoomStateSnapshot {
-            room_id: snapshot.room_id,
-            room_uname: snapshot.room_uname.clone(),
-            room_title: snapshot.room_title.clone(),
-            is_live: snapshot.is_live,
-            connected: snapshot.connected,
-        };
         self.room_state_tx.send_replace(state);
-        let _ = self.ws_tx.send(ChannelAMessage::Snapshot(snapshot));
+        if self.ws_tx.receiver_count() > 0 {
+            let _ = self.ws_tx.send(ChannelAMessage::Snapshot(snapshot));
+        }
     }
 
     /// Update live/connection state (and optionally room_uname / room_title) if changed,
@@ -179,32 +180,29 @@ impl StateHub {
             if !is_live {
                 guard.room_info.start_time = None;
             }
-            let mut next = guard.room_state.clone();
-            next.is_live = is_live;
-            next.connected = connected;
-            if let Some(uname) = room_uname
-                && !uname.is_empty()
-            {
-                next.room_uname = uname.clone();
+            let mut changed =
+                guard.room_state.is_live != is_live || guard.room_state.connected != connected;
+            guard.room_state.is_live = is_live;
+            guard.room_state.connected = connected;
+            if let Some(uname) = room_uname.filter(|u| !u.is_empty()) {
+                if guard.room_state.room_uname != uname {
+                    guard.room_state.room_uname = uname.clone();
+                    changed = true;
+                }
                 guard.room_info.uname = uname;
             }
-            if let Some(title) = room_title
-                && !title.is_empty()
-            {
-                next.room_title = title.clone();
+            if let Some(title) = room_title.filter(|t| !t.is_empty()) {
+                if guard.room_state.room_title != title {
+                    guard.room_state.room_title = title.clone();
+                    changed = true;
+                }
                 guard.room_info.title = title;
             }
-            if next != guard.room_state {
-                guard.room_state = next.clone();
-                Some(next)
-            } else {
-                None
-            }
+            changed.then(|| guard.room_state.clone())
         };
 
         if let Some(state) = changed_state {
-            self.room_state_tx.send_replace(state.clone());
-            let _ = self.ws_tx.send(ChannelAMessage::RoomState(state));
+            self.broadcast_room_state(state);
         }
     }
 
@@ -227,8 +225,7 @@ impl StateHub {
         };
 
         if let Some(state) = changed_state {
-            self.room_state_tx.send_replace(state.clone());
-            let _ = self.ws_tx.send(ChannelAMessage::RoomState(state));
+            self.broadcast_room_state(state);
         }
     }
 
@@ -242,87 +239,88 @@ impl StateHub {
             return None;
         }
 
-        let (state_update, item_opt) = {
-            let mut guard = self.inner.write().expect("StateHub RwLock poisoned");
+        let mut item_opt = (event.kind != "enter" || self.show_enter).then(|| {
+            let (medal_name, medal_level) = if self.show_medal {
+                (event.medal_name.clone(), event.medal_level)
+            } else {
+                (None, None)
+            };
+            SnapshotItem {
+                id: 0,
+                seq: event.seq,
+                kind: event.kind.clone(),
+                msg_type: event.msg_type,
+                uid: event.uid,
+                uname: event.uname.clone(),
+                face: event.face.clone(),
+                medal_name,
+                medal_level,
+                content: event.content.clone(),
+                emoticon: event.emoticon.clone(),
+                emots: event.emots.clone(),
+                price: event.price,
+                num: event.num,
+                guard_level: event.guard_level,
+                ids: event.ids.clone(),
+                batch_combo_id: event.batch_combo_id.clone(),
+                combo_stay_time: event.combo_stay_time,
+                timestamp: event.timestamp,
+            }
+        });
 
-            let mut next_state = guard.room_state.clone();
-            if next_state.room_uname.is_empty() && !event.room_uname.is_empty() {
-                next_state.room_uname = event.room_uname.clone();
+        let keep_in_history = self.max_history > 0 && is_snapshot_history_kind(&event.kind);
+        let state_update = {
+            let mut guard = self.inner.write().expect("StateHub RwLock poisoned");
+            let mut state_changed = false;
+
+            if guard.room_state.room_uname.is_empty() && !event.room_uname.is_empty() {
+                guard.room_state.room_uname = event.room_uname.clone();
                 guard.room_info.uname = event.room_uname.clone();
+                state_changed = true;
             }
             match event.kind.as_str() {
                 "live" => {
-                    next_state.is_live = true;
                     guard.room_info.live_status = 1;
                     if event.start_time.is_some() {
                         guard.room_info.start_time = event.start_time;
                     }
+                    if !guard.room_state.is_live {
+                        guard.room_state.is_live = true;
+                        state_changed = true;
+                    }
                 }
                 "preparing" => {
-                    next_state.is_live = false;
                     guard.room_info.live_status = 0;
                     guard.room_info.start_time = None;
+                    if guard.room_state.is_live {
+                        guard.room_state.is_live = false;
+                        state_changed = true;
+                    }
                 }
                 _ => {}
             }
-            let state_update = if next_state != guard.room_state {
-                guard.room_state = next_state.clone();
-                Some(next_state)
-            } else {
-                None
-            };
 
-            if event.kind == "enter" && !guard.show_enter {
-                (state_update, None)
-            } else {
-                let id = guard.next_id;
+            if let Some(ref mut item) = item_opt {
+                item.id = guard.next_id;
                 guard.next_id = guard.next_id.saturating_add(1);
-
-                let (medal_name, medal_level) = if guard.show_medal {
-                    (event.medal_name.clone(), event.medal_level)
-                } else {
-                    (None, None)
-                };
-
-                let item = SnapshotItem {
-                    id,
-                    seq: event.seq,
-                    kind: event.kind.clone(),
-                    msg_type: event.msg_type,
-                    uid: event.uid,
-                    uname: event.uname.clone(),
-                    face: event.face.clone(),
-                    medal_name,
-                    medal_level,
-                    content: event.content.clone(),
-                    emoticon: event.emoticon.clone(),
-                    emots: event.emots.clone(),
-                    price: event.price,
-                    num: event.num,
-                    guard_level: event.guard_level,
-                    ids: event.ids.clone(),
-                    batch_combo_id: event.batch_combo_id.clone(),
-                    combo_stay_time: event.combo_stay_time,
-                    timestamp: event.timestamp,
-                };
-
-                if guard.max_history > 0 && is_snapshot_history_kind(&event.kind) {
-                    if guard.history.len() >= guard.max_history {
+                if keep_in_history {
+                    if guard.history.len() >= self.max_history {
                         guard.history.pop_front();
                     }
                     guard.history.push_back(item.clone());
                 }
-
-                (state_update, Some(item))
             }
+
+            state_changed.then(|| guard.room_state.clone())
         };
 
         if let Some(state) = state_update {
-            self.room_state_tx.send_replace(state.clone());
-            let _ = self.ws_tx.send(ChannelAMessage::RoomState(state));
+            self.broadcast_room_state(state);
         }
 
-        if let Some(ref item) = item_opt {
+        if let Some(ref item) = item_opt
+            && self.ws_tx.receiver_count() > 0
+        {
             let _ = self
                 .ws_tx
                 .send(ChannelAMessage::Event(Box::new(item.clone())));

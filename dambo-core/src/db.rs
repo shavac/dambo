@@ -21,13 +21,18 @@ pub const KEY_APP_STATE_MIGRATED: &str = "app_state_migrated";
 
 /// Open or create the shared runtime `redb` database at `db_path`, restrict permissions on Unix,
 /// and ensure [`APP_META_TABLE`] exists.
-pub fn open_database(db_path: &Path) -> Result<Arc<Database>> {
+fn ensure_parent_dir(db_path: &Path) -> Result<()> {
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create database parent directory {:?}", parent))?;
     }
+    Ok(())
+}
+
+pub fn open_database(db_path: &Path) -> Result<Arc<Database>> {
+    ensure_parent_dir(db_path)?;
 
     let db = Database::create(db_path).with_context(|| {
         format!(
@@ -68,13 +73,7 @@ pub fn open_runtime_database(
         && legacy != db_path
         && legacy.exists()
     {
-        if let Some(parent) = db_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create database parent directory {:?}", parent)
-            })?;
-        }
+        ensure_parent_dir(db_path)?;
         if let Err(rename_err) = fs::rename(legacy, db_path) {
             fs::copy(legacy, db_path).with_context(|| {
                 format!(
@@ -139,4 +138,52 @@ pub fn delete_meta(db: &Database, key: &str) -> Result<()> {
     }
     write_txn.commit()?;
     Ok(())
+}
+
+/// One-shot migration helper that loads a legacy plaintext JSON file via `load_fn`,
+/// persists it into `redb` under `data_key` alongside a `migrated_key` marker,
+/// and removes the legacy file when possible.
+pub(crate) fn migrate_legacy_json<T: serde::Serialize>(
+    db: &Database,
+    legacy_path: &Path,
+    data_key: &str,
+    migrated_key: &str,
+    label: &str,
+    load_fn: impl FnOnce(&Path) -> Option<T>,
+) -> Option<T> {
+    match read_meta(db, migrated_key) {
+        Ok(Some(_)) => return None,
+        Ok(None) => {}
+        Err(e) => log::warn!("Failed to check migration marker {}: {:#}", migrated_key, e),
+    }
+    if !legacy_path.exists() {
+        return None;
+    }
+    let val = load_fn(legacy_path)?;
+    let bytes = match serde_json::to_vec(&val) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("Failed to serialize migrated {}: {}", label, e);
+            return Some(val);
+        }
+    };
+    if let Err(e) = write_meta_batch(db, &[(data_key, &bytes), (migrated_key, b"1")]) {
+        log::warn!("Failed to migrate {} to redb: {:#}", label, e);
+        return Some(val);
+    }
+    if let Err(e) = fs::remove_file(legacy_path) {
+        log::warn!(
+            "Migrated {} to redb, but failed to delete legacy file {:?}: {}",
+            label,
+            legacy_path,
+            e
+        );
+    } else {
+        log::info!(
+            "Migrated legacy {} {:?} into redb and removed plaintext file",
+            label,
+            legacy_path
+        );
+    }
+    Some(val)
 }

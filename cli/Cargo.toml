@@ -5,19 +5,23 @@ license.workspace = true
 repository.workspace = true
 edition = "2024"
 
+[features]
+default = ["tui"]
+tui = ["dep:crossterm", "dep:futures-util", "dep:ratatui", "dep:unicode-width"]
+
 [[bin]]
 name = "dambo-cli"
 path = "src/main.rs"
 
 [dependencies]
 dambo-core = { path = "../dambo-core" }
-anyhow = "1.0.104"
-tokio = { version = "1.54.1", features = ["full"] }
-clap = { version = "4.6.7", features = ["derive"] }
-log = "0.4.35"
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+clap = { workspace = true }
+log = { workspace = true }
 env_logger = "0.11.11"
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-futures-util = "0.3.34"
-chrono = "0.4.45"
-unicode-width = "0.2"
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", features = ["event-stream"], optional = true }
+futures-util = { workspace = true, optional = true }
+chrono = { workspace = true, default-features = false, features = ["clock", "std"] }
+unicode-width = { version = "0.2", optional = true }

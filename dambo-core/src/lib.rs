@@ -21,8 +21,7 @@ use crate::config::{Config, ConfigManager};
 use crate::event_engine::EventEngine;
 use crate::hub::StateHub;
 use crate::model::{
-    AuthState, ChannelBMessage, InitialUiState, RoomInfoSnapshot, RoomOptionsPayload,
-    RoomStateSnapshot,
+    AuthState, ChannelBMessage, InitialUiState, RoomOptionsPayload, RoomStateSnapshot,
 };
 use crate::plugin::{PluginInfo, PluginRegistry};
 use crate::plugin_api::AdminSessionStore;
@@ -41,12 +40,9 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 fn resolve_base_dir(cfg_path: &Path) -> PathBuf {
-    let parent = cfg_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
+    let parent = cfg_path.parent().map_or_default(Path::to_path_buf);
     if parent.file_name().and_then(|s| s.to_str()) == Some("etc") {
-        parent.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+        parent.parent().map_or_default(Path::to_path_buf)
     } else {
         parent
     }
@@ -228,12 +224,10 @@ impl DamboRuntime {
     }
 
     pub fn local_http_origin(&self) -> String {
-        let host = self
-            .local_loopback_host()
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                server::format_url_host(server::connect_host(&self.config.server.host))
-            });
+        if let Some(host) = self.local_loopback_host() {
+            return format!("http://{}:{}", host, self.config.server.port);
+        }
+        let host = server::format_url_host(server::connect_host(&self.config.server.host));
         format!("http://{}:{}", host, self.config.server.port)
     }
 
@@ -284,6 +278,78 @@ impl DamboRuntime {
         self.start_with_room_override(None).await
     }
 
+    fn spawn_event_dispatcher(&self) -> tokio::task::JoinHandle<()> {
+        let mut raw_rx = self.collector.subscribe();
+        let recorder = self.recorder.clone();
+        let hub = self.hub.clone();
+        let event_engine = self.event_engine.clone();
+        let state_store = self.state_store.clone();
+        let tap_cancel = self.cancel.child_token();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tap_cancel.cancelled() => break,
+                    recv = raw_rx.recv() => match recv {
+                        Ok(ev) => {
+                            if ev.kind == "combo_end" {
+                                event_engine.enqueue(ev);
+                                continue;
+                            }
+
+                            let standard_ev = ev.sanitized_for_standard_stream();
+
+                            if (recorder.is_enabled() || recorder.is_record_raw_enabled())
+                                && let Err(e) = recorder.record_sanitized_event(standard_ev.clone())
+                            {
+                                log::error!("Recorder write failed: {}", e);
+                            }
+
+                            if ev.kind == "room_info" {
+                                let connected = hub.room_state().connected;
+                                let snap = crate::model::room_info_snapshot_from_event(
+                                    &ev,
+                                    ev.room_id,
+                                    &ev.room_uname,
+                                );
+                                if let Err(e) = state_store.record_room_info(&snap) {
+                                    log::warn!("Failed to persist room_info into StateStore: {}", e);
+                                }
+                                hub.set_room_info(snap, connected);
+                                event_engine.emit_room_info(standard_ev);
+                                continue;
+                            }
+
+                            if ev.kind == "room_change"
+                                && ev.room_id > 0
+                                && let Some(ref title) = ev.title
+                                && let Err(e) = state_store.record_room_visit(
+                                    ev.room_id,
+                                    &ev.room_uname,
+                                    title,
+                                )
+                            {
+                                log::warn!(
+                                    "Failed to persist room_change metadata into StateStore: {}",
+                                    e
+                                );
+                            }
+
+                            // Channel A (/ws) retains full `face` for OBS visual rendering;
+                            // Channel B (/ws/event) receives paid-only `face` sanitized events.
+                            hub.push_event(&ev);
+                            event_engine.enqueue(standard_ev);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            log::warn!("Dispatcher lagged by {} collector events", n);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
+                }
+            }
+        })
+    }
+
     /// Start runtime services with an optional CLI room override taking precedence over persisted state.
     pub async fn start_with_room_override(&self, room_override: Option<&str>) -> Result<()> {
         // Bind HTTP/WS listeners synchronously first so port conflicts fail fast before spawning
@@ -297,74 +363,7 @@ impl DamboRuntime {
         .await?;
 
         // 1. Isomorphic dispatcher: Collector -> Recorder + StateHub (/ws) + EventEngine (/ws/event)
-        let mut raw_rx = self.collector.subscribe();
-        let recorder = self.recorder.clone();
-        let hub = self.hub.clone();
-        let event_engine = self.event_engine.clone();
-        let state_store = self.state_store.clone();
-        let tap_cancel = self.cancel.child_token();
-
-        let dispatch_handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tap_cancel.cancelled() => break,
-                    recv = raw_rx.recv() => {
-                        match recv {
-                            Ok(ev) => {
-                                if ev.kind == "combo_end" {
-                                    event_engine.enqueue(ev);
-                                    continue;
-                                }
-
-                                let standard_ev = ev.sanitized_for_standard_stream();
-
-                                if let Err(e) = recorder.record_sanitized_event(standard_ev.clone()) {
-                                    log::error!("Recorder write failed: {}", e);
-                                }
-
-                                if ev.kind == "room_info" {
-                                    let connected = hub.room_state().connected;
-                                    let snap = RoomInfoSnapshot {
-                                        room_id: ev.room_id,
-                                        short_id: ev.short_id.unwrap_or(0),
-                                        uid: ev.uid,
-                                        uname: ev.room_uname.clone(),
-                                        title: ev.title.clone().unwrap_or_else(|| ev.content.clone()),
-                                        area_name: ev.area_name.clone().unwrap_or_default(),
-                                        parent_area_name: ev.parent_area_name.clone().unwrap_or_default(),
-                                        live_status: ev.live_status.unwrap_or(0),
-                                        start_time: ev.start_time,
-                                    };
-                                    if let Err(e) = state_store.record_room_info(&snap) {
-                                        log::warn!("Failed to persist room_info into StateStore: {}", e);
-                                    }
-                                    hub.set_room_info(snap, connected);
-                                    event_engine.emit_room_info(standard_ev);
-                                    continue;
-                                }
-
-                                if ev.kind == "room_change"
-                                    && ev.room_id > 0
-                                    && let Some(ref title) = ev.title
-                                    && let Err(e) = state_store.record_room_visit(ev.room_id, &ev.room_uname, title)
-                                {
-                                    log::warn!("Failed to persist room_change metadata into StateStore: {}", e);
-                                }
-
-                                // Channel A (/ws) retains full `face` for OBS visual rendering;
-                                // Channel B (/ws/event) receives paid-only `face` sanitized events.
-                                hub.push_event(&ev);
-                                event_engine.enqueue(standard_ev);
-                            }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                log::warn!("Dispatcher lagged by {} collector events", n);
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }
-            }
-        });
+        let dispatch_handle = self.spawn_event_dispatcher();
 
         // 2. Event Engine loop
         let event_runner = self.event_engine.clone();
@@ -412,13 +411,10 @@ impl DamboRuntime {
 
         // 4. Auto-connect: CLI override > persisted current_room_id > static config.bilibili.room_id
         let connect_result = if let Some(raw) = room_override {
-            match self.switch_room(raw).await {
-                Ok(room_id) => {
-                    log::info!("🎯 CLI room override connected: {}", room_id);
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
+            self.switch_room(raw)
+                .await
+                .inspect(|room_id| log::info!("🎯 CLI room override connected: {}", room_id))
+                .map(|_| ())
         } else if let Some(saved_room) = self.state_store.current_room_id().filter(|&id| id > 0) {
             self.connect_room_internal(saved_room, false).await
         } else if self.config.bilibili.room_id > 0 {
@@ -516,9 +512,9 @@ pub(crate) async fn fetch_room_options_with(
                 let _ = auth.validate_session().await;
             }
         }
-        let my_room = auth.fetch_my_room().await.ok().flatten();
-        let following_live = auth.fetch_following_live().await.unwrap_or_default();
-        (my_room, following_live)
+        let (my_room, following_live) =
+            tokio::join!(auth.fetch_my_room(), auth.fetch_following_live());
+        (my_room.ok().flatten(), following_live.unwrap_or_default())
     } else {
         (None, Vec::new())
     };
@@ -726,7 +722,7 @@ mod tests {
             let _ = fs::remove_dir_all(&rt.rec_dir);
         }
 
-        let info = RoomInfoSnapshot {
+        let info = crate::model::RoomInfoSnapshot {
             room_id: 21452505,
             short_id: 0,
             uid: 100,
@@ -855,7 +851,7 @@ mod tests {
         // Recorder captured room_info + like + superchat + session_end
         let rec_files: Vec<_> = fs::read_dir(&rec_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(Result::ok)
             .collect();
         assert_eq!(rec_files.len(), 1);
         let content = fs::read_to_string(rec_files[0].path()).unwrap();
@@ -962,7 +958,7 @@ mod tests {
         drop(rt);
         let rec_files: Vec<_> = fs::read_dir(&rec_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(Result::ok)
             .collect();
         let rec_content = fs::read_to_string(rec_files[0].path()).unwrap();
         assert!(!rec_content.contains("combo_end"));

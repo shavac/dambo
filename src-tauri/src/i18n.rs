@@ -39,8 +39,8 @@ fn dict_en() -> &'static HashMap<String, String> {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct I18nPayload {
-    pub locale: String,
-    pub messages: HashMap<String, String>,
+    pub locale: &'static str,
+    pub messages: &'static HashMap<String, String>,
 }
 
 /// Detect the operating system UI language (`zh*` -> `"zh-CN"`, `ja*` -> `"ja"`, fallback `"en"`).
@@ -90,28 +90,47 @@ pub fn messages(locale: &str) -> &'static HashMap<String, String> {
     }
 }
 
-pub fn t(locale: &str, key: &str) -> String {
+pub fn t<'a>(locale: &str, key: &'a str) -> &'a str {
     messages(locale)
         .get(key)
         .or_else(|| dict_en().get(key))
-        .cloned()
-        .unwrap_or_else(|| key.to_string())
+        .map_or(key, String::as_str)
 }
 
 pub fn t_fmt(locale: &str, key: &str, args: &[(&str, &str)]) -> String {
-    let mut out = t(locale, key);
-    for &(name, val) in args {
-        let placeholder = format!("{{{}}}", name);
-        out = out.replace(&placeholder, val);
+    let template = t(locale, key);
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let Some(delim) = after_open.find(['{', '}']) else {
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        };
+        if after_open.as_bytes()[delim] == b'{' {
+            out.push_str(&rest[open..open + 1 + delim]);
+            rest = &after_open[delim..];
+            continue;
+        }
+        let name = &after_open[..delim];
+        if let Some(&(_, val)) = args.iter().find(|&&(k, _)| k == name) {
+            out.push_str(val);
+        } else {
+            out.push_str(&rest[open..open + 1 + delim + 1]);
+        }
+        rest = &after_open[delim + 1..];
     }
+    out.push_str(rest);
     out
 }
 
 pub fn build_payload(locale: &str) -> I18nPayload {
     let norm = normalize_locale(locale).unwrap_or(LOCALE_EN);
     I18nPayload {
-        locale: norm.to_string(),
-        messages: messages(norm).clone(),
+        locale: norm,
+        messages: messages(norm),
     }
 }
 
@@ -246,5 +265,13 @@ mod tests {
 
         assert!(!dict_zh_cn().contains_key("plugin.hot_reload"));
         assert_eq!(t(LOCALE_EN, "missing.key"), "missing.key");
+        assert_eq!(
+            t_fmt(
+                LOCALE_EN,
+                "{a}-{a} {unknown} {nest {a}} {} {unclosed",
+                &[("a", "{b}"), ("b", "NOPE")]
+            ),
+            "{b}-{b} {unknown} {nest {b}} {} {unclosed"
+        );
     }
 }

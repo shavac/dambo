@@ -1066,3 +1066,131 @@ async fn test_security_mode_open_auto_grant_and_strict_isolation() {
 
     cleanup_db(&db_path);
 }
+
+#[tokio::test]
+async fn test_persist_quota_consistency_across_puts_overwrites_deletes_and_clear() {
+    let db_path = temp_db_path("persist_quota_consistency");
+    cleanup_db(&db_path);
+    let empty_defs = BTreeMap::new();
+
+    let b1: usize;
+    let b2_updated: usize;
+    {
+        let store = PluginStore::open(db_path.clone()).unwrap();
+        let (e1, _) = store
+            .put_entry(
+                "owner@1",
+                "owner@1",
+                StoreKind::Persist,
+                "ns1",
+                "k1",
+                WriteEntryInput {
+                    data_type: None,
+                    value: json!({"v": 1}),
+                    meta: None,
+                },
+                &empty_defs,
+            )
+            .await
+            .unwrap();
+        let (e2, _) = store
+            .put_entry(
+                "owner@1",
+                "owner@1",
+                StoreKind::Persist,
+                "ns1",
+                "k2",
+                WriteEntryInput {
+                    data_type: None,
+                    value: json!("short"),
+                    meta: None,
+                },
+                &empty_defs,
+            )
+            .await
+            .unwrap();
+
+        b1 = serde_json::to_vec(&e1).unwrap().len();
+        let b2_initial = serde_json::to_vec(&e2).unwrap().len();
+        let q = store.quota_stats("owner@1", StoreKind::Persist);
+        assert_eq!(q.keys, 2);
+        assert_eq!(q.bytes, b1 + b2_initial);
+
+        // Overwrite k2 with larger payload keeps keys == 2 and adjusts bytes
+        let (e2_new, _) = store
+            .put_entry(
+                "owner@1",
+                "owner@1",
+                StoreKind::Persist,
+                "ns1",
+                "k2",
+                WriteEntryInput {
+                    data_type: None,
+                    value: json!("a much longer persisted payload"),
+                    meta: None,
+                },
+                &empty_defs,
+            )
+            .await
+            .unwrap();
+        b2_updated = serde_json::to_vec(&e2_new).unwrap().len();
+        let q_after_overwrite = store.quota_stats("owner@1", StoreKind::Persist);
+        assert_eq!(q_after_overwrite.keys, 2);
+        assert_eq!(q_after_overwrite.bytes, b1 + b2_updated);
+
+        // Delete k1 subtracts exactly k1's serialized bytes
+        let (deleted, _) = store
+            .delete_entry("owner@1", "owner@1", StoreKind::Persist, "ns1", "k1")
+            .await
+            .unwrap();
+        assert!(deleted);
+        let q_after_delete = store.quota_stats("owner@1", StoreKind::Persist);
+        assert_eq!(q_after_delete.keys, 1);
+        assert_eq!(q_after_delete.bytes, b2_updated);
+    }
+
+    // Reopening from redb reproduces exact same quota stats
+    {
+        let reopened = PluginStore::open(db_path.clone()).unwrap();
+        let q_reopened = reopened.quota_stats("owner@1", StoreKind::Persist);
+        assert_eq!(q_reopened.keys, 1);
+        assert_eq!(q_reopened.bytes, b2_updated);
+
+        let (e3, _) = reopened
+            .put_entry(
+                "owner@1",
+                "owner@1",
+                StoreKind::Persist,
+                "ns2",
+                "k3",
+                WriteEntryInput {
+                    data_type: None,
+                    value: json!(true),
+                    meta: None,
+                },
+                &empty_defs,
+            )
+            .await
+            .unwrap();
+        let b3 = serde_json::to_vec(&e3).unwrap().len();
+        let (cleared, _) = reopened
+            .clear_namespace("owner@1", "owner@1", StoreKind::Persist, "ns1")
+            .await
+            .unwrap();
+        assert_eq!(cleared, 1);
+        let q_after_clear_ns1 = reopened.quota_stats("owner@1", StoreKind::Persist);
+        assert_eq!(q_after_clear_ns1.keys, 1);
+        assert_eq!(q_after_clear_ns1.bytes, b3);
+
+        let (cleared_ns2, _) = reopened
+            .clear_namespace("owner@1", "owner@1", StoreKind::Persist, "ns2")
+            .await
+            .unwrap();
+        assert_eq!(cleared_ns2, 1);
+        let q_empty = reopened.quota_stats("owner@1", StoreKind::Persist);
+        assert_eq!(q_empty.keys, 0);
+        assert_eq!(q_empty.bytes, 0);
+    }
+
+    cleanup_db(&db_path);
+}

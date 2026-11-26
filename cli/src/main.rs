@@ -1,21 +1,36 @@
+#[cfg(feature = "tui")]
 mod command;
 mod format;
 mod logger;
+#[cfg(feature = "tui")]
 mod tui;
 
 use crate::format::{
     connect_host, display_listen_host, format_room_info_plain, format_user_info_plain,
     is_wildcard_host,
 };
-use crate::tui::{TuiChannels, wait_for_shutdown};
+#[cfg(feature = "tui")]
+use crate::tui::TuiChannels;
 use anyhow::Result;
 use clap::Parser;
 use dambo_core::DamboRuntime;
 use dambo_core::auth::QrPollStatus;
+#[cfg(feature = "tui")]
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
+
+pub(crate) async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    while rx.changed().await.is_ok() {
+        if *rx.borrow() {
+            return;
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "dambo-cli")]
@@ -42,6 +57,7 @@ struct Args {
     record_raw: bool,
 
     /// Disable interactive TUI and run in headless logging mode
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
     #[arg(long)]
     headless: bool,
 }
@@ -151,13 +167,27 @@ async fn run_cli_qr_login(runtime: &DamboRuntime, shutdown_rx: &mut watch::Recei
     }
 }
 
+fn announce_room_if_connected(
+    runtime: &DamboRuntime,
+    state: &dambo_core::model::RoomStateSnapshot,
+    announced_room_id: &mut Option<u64>,
+) {
+    if state.room_id == 0 {
+        *announced_room_id = None;
+    } else if state.connected && *announced_room_id != Some(state.room_id) {
+        let info = runtime.hub.room_info();
+        println!("{}", format_room_info_plain(&info, state));
+        *announced_room_id = Some(state.room_id);
+    }
+}
+
 async fn run_headless(
     runtime: Arc<DamboRuntime>,
     mut room_rx: watch::Receiver<dambo_core::model::RoomStateSnapshot>,
     mut event_rx: broadcast::Receiver<dambo_core::model::ChannelBMessage>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
-    let cfg = runtime.config_snapshot();
+    let cfg = &runtime.config;
     let listen_host = display_listen_host(&cfg.server.host);
     let url_host = if is_wildcard_host(&cfg.server.host) {
         connect_host(&cfg.server.host)
@@ -183,11 +213,7 @@ async fn run_headless(
 
     let mut announced_room_id: Option<u64> = None;
     let initial_state = room_rx.borrow().clone();
-    if initial_state.room_id > 0 && initial_state.connected {
-        let info = runtime.hub.room_info();
-        println!("{}", format_room_info_plain(&info, &initial_state));
-        announced_room_id = Some(initial_state.room_id);
-    }
+    announce_room_if_connected(&runtime, &initial_state, &mut announced_room_id);
 
     loop {
         tokio::select! {
@@ -197,22 +223,12 @@ async fn run_headless(
                     break;
                 }
                 let state = room_rx.borrow().clone();
-                if state.room_id == 0 {
-                    announced_room_id = None;
-                } else if state.connected && announced_room_id != Some(state.room_id) {
-                    let info = runtime.hub.room_info();
-                    println!("{}", format_room_info_plain(&info, &state));
-                    announced_room_id = Some(state.room_id);
-                }
+                announce_room_if_connected(&runtime, &state, &mut announced_room_id);
             }
             res = event_rx.recv() => {
                 if let Ok(dambo_core::model::ChannelBMessage::RoomInfo(_)) = res {
                     let state = runtime.hub.room_state();
-                    if state.room_id > 0 && state.connected && announced_room_id != Some(state.room_id) {
-                        let info = runtime.hub.room_info();
-                        println!("{}", format_room_info_plain(&info, &state));
-                        announced_room_id = Some(state.room_id);
-                    }
+                    announce_room_if_connected(&runtime, &state, &mut announced_room_id);
                 }
             }
         }
@@ -221,7 +237,7 @@ async fn run_headless(
 
 async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
     let runtime = Arc::new(DamboRuntime::from_config_path(&args.config)?);
-    let log_level = runtime.config_snapshot().log.level_filter();
+    let log_level = runtime.config.log.level_filter();
     let logger_handle = logger::init_logger(log_level)?;
 
     if !args.no_login {
@@ -263,10 +279,18 @@ async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Resul
         runtime.set_record_raw_override(true);
     }
 
-    let ws_rx = runtime.hub.subscribe_ws();
+    #[cfg(feature = "tui")]
+    let use_tui =
+        !args.headless && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    #[cfg(not(feature = "tui"))]
+    let use_tui = false;
+
     let room_rx = runtime.room_state_rx();
-    let auth_rx = runtime.auth_state_rx();
     let event_rx = runtime.subscribe_event();
+    #[cfg(feature = "tui")]
+    let tui_subs = use_tui.then(|| (runtime.hub.subscribe_ws(), runtime.auth_state_rx()));
+    #[cfg(not(feature = "tui"))]
+    let _ = (&logger_handle, use_tui);
 
     let start_res = tokio::select! {
         _ = wait_for_shutdown(&mut shutdown_rx) => {
@@ -294,9 +318,8 @@ async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Resul
         return Err(err);
     }
 
-    let use_tui =
-        !args.headless && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    if use_tui {
+    #[cfg(feature = "tui")]
+    if let Some((ws_rx, auth_rx)) = tui_subs {
         let channels = TuiChannels {
             ws_rx,
             room_rx,
@@ -314,6 +337,9 @@ async fn async_main(args: Args, mut shutdown_rx: watch::Receiver<bool>) -> Resul
     } else {
         run_headless(runtime.clone(), room_rx, event_rx, &mut shutdown_rx).await;
     }
+
+    #[cfg(not(feature = "tui"))]
+    run_headless(runtime.clone(), room_rx, event_rx, &mut shutdown_rx).await;
 
     log::info!("🛑 Shutting down dambo-cli...");
     runtime.shutdown();

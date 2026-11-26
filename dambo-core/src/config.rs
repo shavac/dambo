@@ -17,19 +17,22 @@ impl ConfigManager {
 
     /// Load and deserialize static configuration from disk (strictly read-only).
     pub fn load(&self) -> Result<Config> {
-        if self.path.exists() {
-            let content = fs::read_to_string(&self.path)
-                .with_context(|| format!("Failed to read config file at {:?}", self.path))?;
-            let config: Config = toml::from_str(&content).with_context(|| {
-                format!("Failed to parse TOML configuration from {:?}", self.path)
-            })?;
-            Ok(config)
-        } else {
-            Err(anyhow::anyhow!(
-                "Configuration file does not exist at {:?}",
-                self.path
-            ))
-        }
+        let content = match fs::read_to_string(&self.path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(anyhow::anyhow!(
+                    "Configuration file does not exist at {:?}",
+                    self.path
+                ));
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("Failed to read config file at {:?}", self.path));
+            }
+        };
+        let config: Config = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse TOML configuration from {:?}", self.path))?;
+        Ok(config)
     }
 }
 
