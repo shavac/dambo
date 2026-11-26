@@ -38,26 +38,6 @@
                         <input id="room-input" type="text" data-i18n-placeholder="panel.room_placeholder" placeholder="Room ID or URL..." spellcheck="false" autocomplete="off" />
                         <button id="room-dropdown-btn" class="icon-btn" data-i18n-title="panel.room_dropdown_title" title="Show room list">▾</button>
                     </div>
-
-                    <!-- Quick dropdown panel (hidden by default) -->
-                    <div id="room-dropdown-menu" class="dropdown-menu hidden">
-                        <div class="dropdown-section">
-                            <div class="section-title" data-i18n="panel.my_room">🏠 My Room</div>
-                            <div id="my-room-item" class="menu-item empty-hint" data-i18n="panel.my_room_empty">No room found</div>
-                        </div>
-                        <div class="dropdown-section">
-                            <div class="section-title" data-i18n="panel.following_live">🔴 Following Live</div>
-                            <div id="following-rooms-list" class="menu-items-list">
-                                <div class="menu-item empty-hint" data-i18n="panel.following_empty">No live channels</div>
-                            </div>
-                        </div>
-                        <div class="dropdown-section">
-                            <div class="section-title" data-i18n="panel.recent_rooms">🕒 Recent Rooms</div>
-                            <div id="history-rooms-list" class="menu-items-list">
-                                <div class="menu-item empty-hint" data-i18n="panel.history_empty">No history</div>
-                            </div>
-                        </div>
-                    </div>
                 </div>
                 <button id="room-switch-btn" class="action-btn" data-i18n="panel.connect">Enter</button>
             </div>
@@ -81,15 +61,6 @@
                 <button id="plugin-dropdown-btn" class="pill-btn" data-i18n-title="plugin.trigger_title" title="Manage plugins & desktop overlays" aria-haspopup="true" aria-expanded="false">
                     <span id="plugin-trigger-label">Plugins (0)</span> ▾
                 </button>
-
-                <div id="plugin-dropdown-menu" class="plugin-dropdown-menu hidden">
-                    <div id="plugin-cards-list" class="plugin-cards-list"></div>
-                    <div class="plugin-dropdown-footer" id="plugin-dropdown-footer">
-                        <button id="plugin-open-dir-btn" class="plugin-dir-btn">
-                            📂 <span data-i18n="plugin.open_dir">Open Plugins Folder</span>
-                        </button>
-                    </div>
-                </div>
             </div>
 
             <!-- Standalone Always-on-Top Pin toggle -->
@@ -109,30 +80,6 @@
                         <circle cx="19" cy="12" r="2" />
                     </svg>
                 </button>
-
-                <div id="more-dropdown-menu" class="more-dropdown-menu hidden" role="menu">
-                    <button id="more-record-raw-btn" class="more-menu-item" role="menuitem">
-                        <span class="menu-item-label" data-i18n="more.record_raw">📦 Record Raw Packets (*_raw.jsonl)</span>
-                        <span id="more-record-raw-check" class="menu-check"></span>
-                    </button>
-                    <div class="menu-separator"></div>
-                    <button id="more-open-config-btn" class="more-menu-item" role="menuitem">
-                        <span class="menu-item-label" data-i18n="more.open_config">📄 Open Config File</span>
-                    </button>
-                    <button id="more-open-rec-btn" class="more-menu-item" role="menuitem">
-                        <span class="menu-item-label" data-i18n="more.open_records">📼 Open Recordings Folder</span>
-                    </button>
-                    <button id="more-open-log-btn" class="more-menu-item" role="menuitem">
-                        <span class="menu-item-label" data-i18n="more.open_logs">📝 Open Logs Folder</span>
-                    </button>
-                    <div class="menu-separator"></div>
-                    <div class="more-menu-section-title" data-i18n="more.language">🌐 Language</div>
-                    <div id="more-lang-group" class="more-lang-group" role="group" aria-label="Language">
-                        <button type="button" class="more-lang-btn" data-locale="zh-CN">简体中文</button>
-                        <button type="button" class="more-lang-btn" data-locale="en">English</button>
-                        <button type="button" class="more-lang-btn" data-locale="ja">日本語</button>
-                    </div>
-                </div>
             </div>
 
             <!-- Window controls (minimize / quit) -->
@@ -156,6 +103,63 @@
         <input id="danmaku-input" class="danmaku-input" type="text" maxlength="40" data-i18n-placeholder="danmaku.placeholder" placeholder="Send a danmaku (Enter to send, max 40 chars)..." spellcheck="false" autocomplete="off" />
         <button id="danmaku-send-btn" class="danmaku-send-btn" type="button" disabled data-i18n="danmaku.send">Send</button>
     </section>
+
+    <div id="popover-layer" class="popover-layer">
+        <!-- Quick room dropdown panel (hidden by default) -->
+        <div id="room-dropdown-menu" class="dropdown-menu hidden">
+            <div class="dropdown-section">
+                <div class="section-title" data-i18n="panel.my_room">🏠 My Room</div>
+                <div id="my-room-item" class="menu-item empty-hint" data-i18n="panel.my_room_empty">No room found</div>
+            </div>
+            <div class="dropdown-section">
+                <div class="section-title" data-i18n="panel.following_live">🔴 Following Live</div>
+                <div id="following-rooms-list" class="menu-items-list">
+                    <div class="menu-item empty-hint" data-i18n="panel.following_empty">No live channels</div>
+                </div>
+            </div>
+            <div class="dropdown-section">
+                <div class="section-title" data-i18n="panel.recent_rooms">🕒 Recent Rooms</div>
+                <div id="history-rooms-list" class="menu-items-list">
+                    <div class="menu-item empty-hint" data-i18n="panel.history_empty">No history</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Plugin manager dropdown -->
+        <div id="plugin-dropdown-menu" class="plugin-dropdown-menu hidden">
+            <div id="plugin-cards-list" class="plugin-cards-list"></div>
+            <div class="plugin-dropdown-footer" id="plugin-dropdown-footer">
+                <button id="plugin-open-dir-btn" class="plugin-dir-btn">
+                    📂 <span data-i18n="plugin.open_dir">Open Plugins Folder</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- More actions popover menu -->
+        <div id="more-dropdown-menu" class="more-dropdown-menu hidden" role="menu">
+            <button id="more-record-raw-btn" class="more-menu-item" role="menuitem">
+                <span class="menu-item-label" data-i18n="more.record_raw">📦 Record Raw Packets (*_raw.jsonl)</span>
+                <span id="more-record-raw-check" class="menu-check"></span>
+            </button>
+            <div class="menu-separator"></div>
+            <button id="more-open-config-btn" class="more-menu-item" role="menuitem">
+                <span class="menu-item-label" data-i18n="more.open_config">📄 Open Config File</span>
+            </button>
+            <button id="more-open-rec-btn" class="more-menu-item" role="menuitem">
+                <span class="menu-item-label" data-i18n="more.open_records">📼 Open Recordings Folder</span>
+            </button>
+            <button id="more-open-log-btn" class="more-menu-item" role="menuitem">
+                <span class="menu-item-label" data-i18n="more.open_logs">📝 Open Logs Folder</span>
+            </button>
+            <div class="menu-separator"></div>
+            <div class="more-menu-section-title" data-i18n="more.language">🌐 Language</div>
+            <div id="more-lang-group" class="more-lang-group" role="group" aria-label="Language">
+                <button type="button" class="more-lang-btn" data-locale="zh-CN">简体中文</button>
+                <button type="button" class="more-lang-btn" data-locale="en">English</button>
+                <button type="button" class="more-lang-btn" data-locale="ja">日本語</button>
+            </div>
+        </div>
+    </div>
 
     <div id="toast-banner" class="toast-banner hidden" role="status" aria-live="polite"></div>
 

@@ -65,6 +65,8 @@ let minWidthSyncRaf = null;
 let baseLogicalHeight = null;
 let baseLogicalHeightPromise = null;
 let heightSyncSeq = 0;
+let dropdownOpSeq = 0;
+let activeDropdownMenu = null;
 let danmakuBarOpSeq = 0;
 let isDanmakuBarOpen = false;
 let isSendingDanmaku = false;
@@ -440,6 +442,9 @@ function renderPlugins(plugins) {
         listEl.appendChild(card);
     });
     scheduleSyncPanelMinWidth();
+    if (activeDropdownMenu === 'plugin') {
+        positionPopover('plugin');
+    }
 }
 
 function renderPendingAclBadge(count) {
@@ -491,14 +496,7 @@ function canSendDanmaku() {
 }
 
 function isAnyMenuOpen() {
-    const roomMenu = document.getElementById('room-dropdown-menu');
-    const pluginMenu = document.getElementById('plugin-dropdown-menu');
-    const moreMenu = document.getElementById('more-dropdown-menu');
-    return Boolean(
-        (roomMenu && !roomMenu.classList.contains('hidden')) ||
-        (pluginMenu && !pluginMenu.classList.contains('hidden')) ||
-        (moreMenu && !moreMenu.classList.contains('hidden'))
-    );
+    return activeDropdownMenu !== null;
 }
 
 function computePodMinLogicalHeight() {
@@ -685,6 +683,44 @@ function hideAllDropdownMenusOnly() {
     moreBtn?.setAttribute('aria-expanded', 'false');
 }
 
+function positionPopover(target) {
+    const podRect = document.querySelector('.pod-container')?.getBoundingClientRect();
+    const viewportW = Math.max(window.innerWidth || 0, Math.ceil(podRect?.right || 0));
+    const top = Math.round((podRect ? podRect.bottom : 52) + 6);
+
+    if (target === 'room') {
+        const menu = document.getElementById('room-dropdown-menu');
+        const anchor = document.getElementById('room-input-box') || document.querySelector('.room-picker');
+        if (!menu || !anchor) return;
+        const rect = anchor.getBoundingClientRect();
+        const width = Math.min(Math.max(Math.round(rect.width), 220), Math.max(180, viewportW - 8));
+        const left = Math.min(Math.max(Math.round(rect.left), 4), Math.max(4, viewportW - width - 4));
+        menu.style.top = `${top}px`;
+        menu.style.left = `${left}px`;
+        menu.style.width = `${width}px`;
+    } else if (target === 'plugin') {
+        const menu = document.getElementById('plugin-dropdown-menu');
+        const btn = document.getElementById('plugin-dropdown-btn');
+        if (!menu || !btn) return;
+        const rect = btn.getBoundingClientRect();
+        const width = Math.min(456, Math.max(260, viewportW - 8));
+        const left = Math.min(Math.max(Math.round(rect.right + 64 - width), 4), Math.max(4, viewportW - width - 4));
+        menu.style.top = `${top}px`;
+        menu.style.left = `${left}px`;
+        menu.style.width = `${width}px`;
+    } else if (target === 'more') {
+        const menu = document.getElementById('more-dropdown-menu');
+        const btn = document.getElementById('more-btn');
+        if (!menu || !btn) return;
+        const rect = btn.getBoundingClientRect();
+        const width = Math.min(246, Math.max(200, viewportW - 8));
+        const left = Math.min(Math.max(Math.round(rect.right - width), 4), Math.max(4, viewportW - width - 4));
+        menu.style.top = `${top}px`;
+        menu.style.left = `${left}px`;
+        menu.style.width = `${width}px`;
+    }
+}
+
 async function setDanmakuBarOpen(open) {
     const bar = document.getElementById('danmaku-bar');
     const input = document.getElementById('danmaku-input');
@@ -694,6 +730,8 @@ async function setDanmakuBarOpen(open) {
 
     if (open) {
         if (!canSendDanmaku()) return;
+        dropdownOpSeq++;
+        activeDropdownMenu = null;
         hideAllDropdownMenusOnly();
         isDanmakuBarOpen = true;
         syncDanmakuUiState();
@@ -734,61 +772,85 @@ async function setDanmakuBarOpen(open) {
     }
 }
 
-function openSingleDropdownMenu(target) {
+async function openDropdownMenu(target) {
+    const opSeq = ++dropdownOpSeq;
     danmakuBarOpSeq++;
     if (isDanmakuBarOpen) {
         document.getElementById('danmaku-bar')?.classList.add('hidden');
+        document.getElementById('danmaku-input')?.blur();
         isDanmakuBarOpen = false;
         syncDanmakuUiState();
     }
     hideAllDropdownMenusOnly();
-    if (target === 'room') {
-        document.getElementById('room-dropdown-menu')?.classList.remove('hidden');
-    } else if (target === 'plugin') {
-        document.getElementById('plugin-dropdown-menu')?.classList.remove('hidden');
+    activeDropdownMenu = target;
+    if (target === 'plugin') {
         document.getElementById('plugin-dropdown-btn')?.classList.add('active');
         document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'true');
     } else if (target === 'more') {
-        document.getElementById('more-dropdown-menu')?.classList.remove('hidden');
         document.getElementById('more-btn')?.classList.add('active');
         document.getElementById('more-btn')?.setAttribute('aria-expanded', 'true');
     }
+
+    const baseH = await ensureBaseLogicalHeight();
+    if (opSeq !== dropdownOpSeq || activeDropdownMenu !== target) return;
+
+    await syncWindowHeight();
+    if (opSeq !== dropdownOpSeq || activeDropdownMenu !== target) return;
+
+    await waitForViewportHeightAtLeast(Math.min(PANEL_EXPANDED_HEIGHT, baseH + 180));
+    if (opSeq !== dropdownOpSeq || activeDropdownMenu !== target) return;
+
+    positionPopover(target);
+    const menuId = target === 'room'
+        ? 'room-dropdown-menu'
+        : target === 'plugin'
+            ? 'plugin-dropdown-menu'
+            : 'more-dropdown-menu';
+    document.getElementById(menuId)?.classList.remove('hidden');
+    document.documentElement.scrollTop = 0;
+    if (document.body) document.body.scrollTop = 0;
+    requestAnimationFrame(() => {
+        if (opSeq === dropdownOpSeq && activeDropdownMenu === target) {
+            positionPopover(target);
+        }
+    });
+}
+
+async function closeAllMenus() {
+    const opSeq = ++dropdownOpSeq;
+    activeDropdownMenu = null;
+    hideAllDropdownMenusOnly();
+    document.documentElement.scrollTop = 0;
+    if (document.body) document.body.scrollTop = 0;
+
+    await nextAnimationFrame();
+    if (opSeq !== dropdownOpSeq) return;
+
+    await syncWindowHeight();
 }
 
 function setDropdownOpen(open) {
     if (open) {
-        openSingleDropdownMenu('room');
-    } else {
-        document.getElementById('room-dropdown-menu')?.classList.add('hidden');
+        openDropdownMenu('room');
+    } else if (activeDropdownMenu === 'room') {
+        closeAllMenus();
     }
-    syncWindowHeight();
 }
 
 function setPluginMenuOpen(open) {
     if (open) {
-        openSingleDropdownMenu('plugin');
-    } else {
-        document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
-        document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
-        document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
+        openDropdownMenu('plugin');
+    } else if (activeDropdownMenu === 'plugin') {
+        closeAllMenus();
     }
-    syncWindowHeight();
 }
 
 function setMoreMenuOpen(open) {
     if (open) {
-        openSingleDropdownMenu('more');
-    } else {
-        document.getElementById('more-dropdown-menu')?.classList.add('hidden');
-        document.getElementById('more-btn')?.classList.remove('active');
-        document.getElementById('more-btn')?.setAttribute('aria-expanded', 'false');
+        openDropdownMenu('more');
+    } else if (activeDropdownMenu === 'more') {
+        closeAllMenus();
     }
-    syncWindowHeight();
-}
-
-function closeAllMenus() {
-    hideAllDropdownMenusOnly();
-    syncWindowHeight();
 }
 
 async function connectTarget(target) {
@@ -873,6 +935,9 @@ function renderRoomOptions(payload) {
 
     if (historyEl) {
         renderHistoryList(payload?.history_rooms || []);
+    }
+    if (activeDropdownMenu === 'room') {
+        positionPopover('room');
     }
 }
 
@@ -1331,7 +1396,7 @@ podContainerEl?.addEventListener('pointerdown', (e) => {
     if (
         e.target instanceof Element &&
         e.target.closest(
-            'button, input, textarea, select, a, .room-pill, .resize-handle-right, .dropdown-menu, .plugin-dropdown-menu, .more-dropdown-menu'
+            'button, input, textarea, select, a, .room-pill, .resize-handle-right'
         )
     ) {
         return;
@@ -1366,8 +1431,7 @@ roomInputEl?.addEventListener('keydown', async (e) => {
 });
 
 document.getElementById('room-dropdown-btn')?.addEventListener('click', async () => {
-    const menu = document.getElementById('room-dropdown-menu');
-    const willOpen = menu ? menu.classList.contains('hidden') : false;
+    const willOpen = activeDropdownMenu !== 'room';
     setDropdownOpen(willOpen);
     if (willOpen && invoke) {
         try {
@@ -1408,8 +1472,7 @@ document.getElementById('console-open-btn')?.addEventListener('click', async () 
 });
 
 document.getElementById('plugin-dropdown-btn')?.addEventListener('click', async () => {
-    const menu = document.getElementById('plugin-dropdown-menu');
-    const willOpen = menu ? menu.classList.contains('hidden') : false;
+    const willOpen = activeDropdownMenu !== 'plugin';
     setPluginMenuOpen(willOpen);
     if (willOpen && invoke) {
         try {
@@ -1451,8 +1514,7 @@ document.getElementById('account-badge')?.addEventListener('click', () => {
 });
 
 document.getElementById('more-btn')?.addEventListener('click', () => {
-    const moreMenu = document.getElementById('more-dropdown-menu');
-    const willOpen = moreMenu ? moreMenu.classList.contains('hidden') : false;
+    const willOpen = activeDropdownMenu !== 'more';
     setMoreMenuOpen(willOpen);
 });
 
@@ -1508,22 +1570,50 @@ document.querySelectorAll('#more-lang-group .more-lang-btn').forEach((btn) => {
 });
 
 document.addEventListener('click', (e) => {
+    if (e.target instanceof Node && !e.target.isConnected) {
+        return;
+    }
+
     const roomMenu = document.getElementById('room-dropdown-menu');
     const roomGroup = document.querySelector('.room-selector-group');
-    if (roomMenu && !roomMenu.classList.contains('hidden') && roomGroup && !roomGroup.contains(e.target)) {
+    if (
+        activeDropdownMenu === 'room' &&
+        roomMenu &&
+        roomGroup &&
+        !roomGroup.contains(e.target) &&
+        !roomMenu.contains(e.target)
+    ) {
         setDropdownOpen(false);
     }
 
     const pluginMenu = document.getElementById('plugin-dropdown-menu');
     const pluginGroup = document.querySelector('.plugin-menu-group');
-    if (pluginMenu && !pluginMenu.classList.contains('hidden') && pluginGroup && !pluginGroup.contains(e.target)) {
+    if (
+        activeDropdownMenu === 'plugin' &&
+        pluginMenu &&
+        pluginGroup &&
+        !pluginGroup.contains(e.target) &&
+        !pluginMenu.contains(e.target)
+    ) {
         setPluginMenuOpen(false);
     }
 
     const moreMenu = document.getElementById('more-dropdown-menu');
     const moreGroup = document.querySelector('.more-menu-group');
-    if (moreMenu && !moreMenu.classList.contains('hidden') && moreGroup && !moreGroup.contains(e.target)) {
+    if (
+        activeDropdownMenu === 'more' &&
+        moreMenu &&
+        moreGroup &&
+        !moreGroup.contains(e.target) &&
+        !moreMenu.contains(e.target)
+    ) {
         setMoreMenuOpen(false);
+    }
+});
+
+window.addEventListener('resize', () => {
+    if (activeDropdownMenu) {
+        positionPopover(activeDropdownMenu);
     }
 });
 
