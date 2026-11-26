@@ -217,9 +217,17 @@ mod tests {
         assert_eq!(t(LOCALE_JA, "more.language"), "🌐 言語");
         assert_eq!(t(LOCALE_EN, "more.language"), "🌐 Language");
 
-        assert_eq!(t(LOCALE_ZH_CN, "plugin.tab_mobile_qr"), "📱 手机扫码");
-        assert_eq!(t(LOCALE_JA, "plugin.tab_mobile_qr"), "📱 スマホ QR");
-        assert_eq!(t(LOCALE_EN, "plugin.tab_mobile_qr"), "📱 Mobile QR");
+        assert_eq!(t(LOCALE_ZH_CN, "plugin.qr_admin_btn"), "管理端扫码");
+        assert_eq!(t(LOCALE_JA, "plugin.qr_admin_btn"), "管理画面 QR");
+        assert_eq!(t(LOCALE_EN, "plugin.qr_admin_btn"), "Admin QR");
+
+        assert_eq!(t(LOCALE_ZH_CN, "plugin.qr_back"), "← 返回");
+        assert_eq!(t(LOCALE_JA, "plugin.qr_back"), "← 戻る");
+        assert_eq!(t(LOCALE_EN, "plugin.qr_back"), "← Back");
+
+        assert_eq!(t(LOCALE_ZH_CN, "plugin.desktop_short"), "桌面");
+        assert_eq!(t(LOCALE_JA, "plugin.desktop_short"), "表示");
+        assert_eq!(t(LOCALE_EN, "plugin.desktop_short"), "Desktop");
 
         assert_eq!(t(LOCALE_ZH_CN, "plugin.qr_target_admin"), "管理端 (/)");
         assert_eq!(t(LOCALE_JA, "plugin.qr_target_admin"), "管理画面 (/)");

@@ -27,7 +27,7 @@ let isConnecting = false;
 let connectingTimeoutId = null;
 let isAlwaysOnTop = false;
 let toastTimer = null;
-let activePluginTab = "plugins";
+let pluginViewMode = "list";
 let qrTarget = "__admin__";
 let qrPluginPage = "view";
 let qrSelectedIp = "";
@@ -189,6 +189,7 @@ function applyTranslations(payload) {
     updateAccountDisplay(currentAuthState);
     updateRoomDisplay(currentRoomState, { fromBackendEvent: false });
     renderPlugins(pluginList);
+    syncQrViewControls();
     if (lastQrPayload) {
         renderQrPayload(lastQrPayload);
     }
@@ -313,6 +314,26 @@ function updateRecordRawDisplay(enabled) {
     }
 }
 
+function createSvgIcon(size, specs) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    specs.forEach(([tag, attrs]) => {
+        const node = document.createElementNS(ns, tag);
+        Object.entries(attrs).forEach(([k, v]) => node.setAttribute(k, String(v)));
+        svg.appendChild(node);
+    });
+    return svg;
+}
+
 function renderPlugins(plugins) {
     pluginList = Array.isArray(plugins) ? plugins : [];
     const triggerLabel = document.getElementById('plugin-trigger-label');
@@ -332,54 +353,35 @@ function renderPlugins(plugins) {
     } else {
         pluginList.forEach((p) => {
             const isDesktopOpen = Boolean(p.is_desktop_open);
-            const card = document.createElement('div');
-            card.className = `plugin-card${isDesktopOpen ? ' desktop-open' : ''}`;
-
-            const main = document.createElement('div');
-            main.className = 'plugin-card-main';
-
-            const header = document.createElement('div');
-            header.className = 'plugin-card-header';
-
-            const title = document.createElement('span');
-            title.className = 'plugin-title';
-            title.innerText = p.title || p.name;
-            header.appendChild(title);
-
-            const badge = document.createElement('span');
-            badge.className = `plugin-badge${p.is_builtin ? '' : ' custom'}`;
-            badge.innerText = t(p.is_builtin ? 'plugin.badge_builtin' : 'plugin.badge_custom');
-            header.appendChild(badge);
-
-            if (p.obs_width && p.obs_height) {
-                const size = document.createElement('span');
-                size.className = 'plugin-size-badge';
-                size.innerText = `${p.obs_width}×${p.obs_height}`;
-                header.appendChild(size);
+            const row = document.createElement('div');
+            row.className = `plugin-row${isDesktopOpen ? ' desktop-open' : ''}`;
+            const tooltipParts = [p.description || '', p.url || ''].filter(Boolean);
+            if (tooltipParts.length > 0) {
+                row.title = tooltipParts.join('\n');
             }
 
-            main.appendChild(header);
+            const main = document.createElement('div');
+            main.className = 'plugin-row-main';
 
-            const desc = document.createElement('div');
-            desc.className = 'plugin-desc';
-            desc.innerText = p.description || t('plugin.no_description');
-            desc.title = desc.innerText;
-            main.appendChild(desc);
+            const dot = document.createElement('span');
+            dot.className = `status-dot ${isDesktopOpen ? 'dot-green' : 'dot-off'}`;
+            main.appendChild(dot);
 
-            const urlEl = document.createElement('div');
-            urlEl.className = 'plugin-url';
-            urlEl.innerText = p.url;
-            urlEl.title = p.url;
-            main.appendChild(urlEl);
+            const title = document.createElement('span');
+            title.className = 'plugin-row-title';
+            title.innerText = p.title || p.name;
+            main.appendChild(title);
 
             const actions = document.createElement('div');
-            actions.className = 'plugin-card-actions';
+            actions.className = 'plugin-row-actions';
 
             const toggleDesktopBtn = document.createElement('button');
             toggleDesktopBtn.type = 'button';
             toggleDesktopBtn.className = `plugin-btn ${isDesktopOpen ? 'danger' : 'primary'}`;
-            toggleDesktopBtn.innerText = t(isDesktopOpen ? 'plugin.close_desktop' : 'plugin.open_desktop');
-            toggleDesktopBtn.onclick = async () => {
+            toggleDesktopBtn.innerText = t(isDesktopOpen ? 'plugin.close_short' : 'plugin.desktop_short');
+            toggleDesktopBtn.title = t(isDesktopOpen ? 'plugin.close_desktop' : 'plugin.open_desktop');
+            toggleDesktopBtn.onclick = async (e) => {
+                e.stopPropagation();
                 if (!invoke) return;
                 try {
                     if (isDesktopOpen) {
@@ -391,79 +393,97 @@ function renderPlugins(plugins) {
                     }
                     const fresh = await invoke('get_plugins');
                     renderPlugins(fresh);
-                } catch (e) {
-                    console.error('toggle_plugin_desktop failed:', e);
-                    showToast(t('toast.error_prefix', { error: String(e) }));
+                } catch (err) {
+                    console.error('toggle_plugin_desktop failed:', err);
+                    showToast(t('toast.error_prefix', { error: String(err) }));
                 }
             };
 
             const copyBtn = document.createElement('button');
             copyBtn.type = 'button';
             copyBtn.className = 'plugin-btn';
-            copyBtn.innerText = t('plugin.copy_url');
-            copyBtn.onclick = async () => {
+            copyBtn.innerText = 'OBS';
+            copyBtn.title = t('plugin.copy_url');
+            copyBtn.onclick = async (e) => {
+                e.stopPropagation();
                 try {
                     await navigator.clipboard.writeText(p.url);
                     copyBtn.classList.add('copied');
-                    copyBtn.innerText = t('plugin.copied');
+                    copyBtn.innerText = '✓';
                     setTimeout(() => {
                         copyBtn.classList.remove('copied');
-                        copyBtn.innerText = t('plugin.copy_url');
+                        copyBtn.innerText = 'OBS';
                     }, 1500);
-                } catch (e) {
-                    console.error('Failed to copy plugin url:', e);
-                    showToast(t('toast.error_prefix', { error: String(e) }));
+                } catch (err) {
+                    console.error('Failed to copy plugin url:', err);
+                    showToast(t('toast.error_prefix', { error: String(err) }));
                 }
             };
 
             const manageBtn = document.createElement('button');
             manageBtn.type = 'button';
-            manageBtn.className = 'plugin-btn';
-            manageBtn.innerText = t('plugin.open_manage');
-            manageBtn.title = p.manage_url || p.manage_route || '';
-            manageBtn.onclick = async () => {
+            manageBtn.className = 'plugin-icon-btn';
+            manageBtn.title = t('plugin.open_manage');
+            manageBtn.setAttribute('aria-label', t('plugin.open_manage'));
+            manageBtn.appendChild(
+                createSvgIcon(12, [
+                    ['line', { x1: '4', y1: '6', x2: '20', y2: '6' }],
+                    ['line', { x1: '4', y1: '12', x2: '20', y2: '12' }],
+                    ['line', { x1: '4', y1: '18', x2: '20', y2: '18' }],
+                    ['circle', { cx: '9', cy: '6', r: '2', fill: 'currentColor' }],
+                    ['circle', { cx: '15', cy: '12', r: '2', fill: 'currentColor' }],
+                    ['circle', { cx: '9', cy: '18', r: '2', fill: 'currentColor' }],
+                ])
+            );
+            manageBtn.onclick = async (e) => {
+                e.stopPropagation();
                 if (!invoke) return;
                 try {
                     await invoke('open_plugin_manage', { pluginName: p.name });
                     showToast(t('toast.opened_manage', { name: p.title || p.name }));
-                } catch (e) {
-                    console.error('open_plugin_manage failed:', e);
-                    showToast(t('toast.error_prefix', { error: String(e) }));
+                } catch (err) {
+                    console.error('open_plugin_manage failed:', err);
+                    showToast(t('toast.error_prefix', { error: String(err) }));
                 }
             };
 
             const qrBtn = document.createElement('button');
             qrBtn.type = 'button';
-            qrBtn.className = 'plugin-btn plugin-qr-icon-btn';
-            qrBtn.innerText = '📱';
+            qrBtn.className = 'plugin-icon-btn';
             qrBtn.title = t('plugin.qr_btn_title');
+            qrBtn.setAttribute('aria-label', t('plugin.qr_btn_title'));
+            qrBtn.appendChild(
+                createSvgIcon(12, [
+                    ['rect', { x: '3', y: '3', width: '7', height: '7', rx: '1' }],
+                    ['rect', { x: '14', y: '3', width: '7', height: '7', rx: '1' }],
+                    ['rect', { x: '3', y: '14', width: '7', height: '7', rx: '1' }],
+                    ['path', { d: 'M14 14h3v3h-3zM20 14v3h-3M14 20h6' }],
+                ])
+            );
             qrBtn.onclick = (e) => {
                 e.stopPropagation();
-                openPluginQrFor(p.name, 'view');
+                openPluginQrView(p.name, 'view');
             };
 
-            const secondaryRow = document.createElement('div');
-            secondaryRow.className = 'plugin-card-actions-row';
-            secondaryRow.appendChild(manageBtn);
-            secondaryRow.appendChild(copyBtn);
-            secondaryRow.appendChild(qrBtn);
-
             actions.appendChild(toggleDesktopBtn);
-            actions.appendChild(secondaryRow);
+            actions.appendChild(copyBtn);
+            actions.appendChild(manageBtn);
+            actions.appendChild(qrBtn);
 
-            card.appendChild(main);
-            card.appendChild(actions);
-            listEl.appendChild(card);
+            row.appendChild(main);
+            row.appendChild(actions);
+            listEl.appendChild(row);
         });
     }
 
-    const targetFellBack = renderQrTargetButtons();
     if (
-        targetFellBack &&
-        activePluginTab === 'qr' &&
-        !document.getElementById('plugin-dropdown-menu')?.classList.contains('hidden')
+        pluginViewMode === 'qr' &&
+        qrTarget !== '__admin__' &&
+        !pluginList.some((p) => p.name === qrTarget)
     ) {
-        fetchPluginQrUrls();
+        setPluginViewMode('list');
+    } else {
+        syncQrViewControls();
     }
     scheduleSyncPanelMinWidth();
 }
@@ -477,53 +497,29 @@ function resolveQrRequest() {
                 return {
                     path: `/${matched.name}/m`,
                     includeToken: true,
-                    label: `${title} · ${t('plugin.qr_mode_manage')}`,
+                    title,
                 };
             }
             return {
                 path: `/${matched.name}/`,
                 includeToken: false,
-                label: `${title} · ${t('plugin.qr_mode_view')}`,
+                title,
             };
         }
     }
     return {
         path: '/',
         includeToken: true,
-        label: t('plugin.qr_target_admin'),
+        title: t('plugin.qr_target_admin'),
     };
 }
 
-function renderQrTargetButtons() {
-    let fellBack = false;
-    if (qrTarget !== '__admin__' && !pluginList.some((p) => p.name === qrTarget)) {
-        qrTarget = '__admin__';
-        fellBack = true;
-    }
-
-    const targetsEl = document.getElementById('plugin-qr-targets');
-    if (targetsEl) {
-        targetsEl.replaceChildren();
-        const items = [
-            { id: '__admin__', label: t('plugin.qr_target_admin') },
-            ...pluginList.map((p) => ({ id: p.name, label: p.title || p.name })),
-        ];
-        items.forEach((item) => {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = `plugin-btn qr-pill-btn${qrTarget === item.id ? ' active' : ''}`;
-            btn.setAttribute('data-qr-target', item.id);
-            btn.innerText = item.label;
-            btn.title = item.label;
-            btn.onclick = (e) => {
-                e.stopPropagation();
-                if (qrTarget === item.id) return;
-                qrTarget = item.id;
-                renderQrTargetButtons();
-                fetchPluginQrUrls();
-            };
-            targetsEl.appendChild(btn);
-        });
+function syncQrViewControls() {
+    const req = resolveQrRequest();
+    const titleEl = document.getElementById('plugin-qr-title');
+    if (titleEl) {
+        titleEl.innerText = req.title;
+        titleEl.title = `${req.title} (${req.path})`;
     }
 
     const pageRow = document.getElementById('plugin-qr-page-row');
@@ -531,41 +527,32 @@ function renderQrTargetButtons() {
         pageRow.classList.toggle('hidden', qrTarget === '__admin__');
     }
 
-    const viewBtn = document.getElementById('qr-mode-view-btn');
-    const manageBtn = document.getElementById('qr-mode-manage-btn');
-    viewBtn?.classList.toggle('active', qrPluginPage !== 'manage');
-    manageBtn?.classList.toggle('active', qrPluginPage === 'manage');
-
-    return fellBack;
+    document.getElementById('qr-mode-view-btn')?.classList.toggle('active', qrPluginPage !== 'manage');
+    document.getElementById('qr-mode-manage-btn')?.classList.toggle('active', qrPluginPage === 'manage');
 }
 
-function setPluginTab(tab) {
-    activePluginTab = tab === 'qr' ? 'qr' : 'plugins';
-    const isQr = activePluginTab === 'qr';
-    document.getElementById('tab-plugins-btn')?.classList.toggle('active', !isQr);
-    document.getElementById('tab-mobile-qr-btn')?.classList.toggle('active', isQr);
-    document.getElementById('plugin-cards-list')?.classList.toggle('hidden', isQr);
-    document.getElementById('plugin-dropdown-footer')?.classList.toggle('hidden', isQr);
+function setPluginViewMode(mode) {
+    pluginViewMode = mode === 'qr' ? 'qr' : 'list';
+    const isQr = pluginViewMode === 'qr';
+    document.getElementById('plugin-list-view')?.classList.toggle('hidden', isQr);
     document.getElementById('plugin-qr-panel')?.classList.toggle('hidden', !isQr);
-    if (isQr) {
-        renderQrTargetButtons();
-        fetchPluginQrUrls();
-    }
 }
 
-function openPluginQrFor(target, page = 'view') {
+function openPluginQrView(target, page = 'view') {
     qrTarget = target || '__admin__';
     qrPluginPage = page === 'manage' ? 'manage' : 'view';
-    setPluginTab('qr');
+    syncQrViewControls();
+    setPluginViewMode('qr');
+    fetchPluginQrUrls();
 }
 
 function renderQrPayload(payload) {
     if (!payload) return;
     lastQrPayload = payload;
+    syncQrViewControls();
 
     const modeBadge = document.getElementById('plugin-qr-mode-badge');
     const ipTabsEl = document.getElementById('plugin-qr-ip-tabs');
-    const targetPathEl = document.getElementById('plugin-qr-target-path');
     const urlTextEl = document.getElementById('plugin-qr-url-text');
     const localNoteEl = document.getElementById('plugin-qr-local-note');
     const qrImgEl = document.getElementById('plugin-qr-img');
@@ -575,12 +562,6 @@ function renderQrPayload(payload) {
     if (modeBadge) {
         modeBadge.innerText = t(isOpen ? 'lan.mode_open' : 'lan.mode_strict');
         modeBadge.classList.toggle('open', isOpen);
-    }
-
-    const req = resolveQrRequest();
-    if (targetPathEl) {
-        targetPathEl.innerText = `${req.label} (${payload.path || req.path})`;
-        targetPathEl.title = targetPathEl.innerText;
     }
 
     const urls = Array.isArray(payload.urls) ? payload.urls : [];
@@ -908,6 +889,7 @@ function syncDanmakuUiState() {
 
 function hideAllDropdownMenusOnly() {
     document.getElementById('room-dropdown-menu')?.classList.add('hidden');
+    setPluginViewMode('list');
     document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
     document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
     document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
@@ -1002,6 +984,7 @@ function setPluginMenuOpen(open) {
     if (open) {
         openSingleDropdownMenu('plugin');
     } else {
+        setPluginViewMode('list');
         document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
         document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
         document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
@@ -1650,23 +1633,20 @@ document.getElementById('plugin-dropdown-btn')?.addEventListener('click', async 
         try {
             const plugins = await invoke('get_plugins');
             renderPlugins(plugins);
-            if (activePluginTab === 'qr') {
-                await fetchPluginQrUrls();
-            }
         } catch (e) {
             console.error('Failed to fetch plugins:', e);
         }
     }
 });
 
-document.getElementById('tab-plugins-btn')?.addEventListener('click', (e) => {
+document.getElementById('plugin-admin-qr-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
-    setPluginTab('plugins');
+    openPluginQrView('__admin__', 'view');
 });
 
-document.getElementById('tab-mobile-qr-btn')?.addEventListener('click', (e) => {
+document.getElementById('plugin-qr-back-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
-    setPluginTab('qr');
+    setPluginViewMode('list');
 });
 
 document.querySelectorAll('#plugin-qr-page-row .qr-page-btn').forEach((btn) => {
@@ -1675,7 +1655,7 @@ document.querySelectorAll('#plugin-qr-page-row .qr-page-btn').forEach((btn) => {
         const page = btn.getAttribute('data-qr-page') === 'manage' ? 'manage' : 'view';
         if (qrPluginPage === page) return;
         qrPluginPage = page;
-        renderQrTargetButtons();
+        syncQrViewControls();
         fetchPluginQrUrls();
     });
 });
@@ -1838,7 +1818,7 @@ document.addEventListener('pointerdown', (e) => {
     if (target.closest('#danmaku-bar')) return;
     if (target.closest('#danmaku-toggle-btn')) return;
     if (target.closest('#drag-handle, #resize-handle-right')) return;
-    if (target.closest('button, input, textarea, select, a, .room-pill, .menu-item, .plugin-card')) {
+    if (target.closest('button, input, textarea, select, a, .room-pill, .menu-item, .plugin-row')) {
         setDanmakuBarOpen(false);
     }
 }, true);

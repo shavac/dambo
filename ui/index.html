@@ -77,38 +77,44 @@
                 </button>
 
                 <div id="plugin-dropdown-menu" class="plugin-dropdown-menu hidden">
-                    <div class="plugin-tabs-header">
-                        <button type="button" id="tab-plugins-btn" class="plugin-tab-btn active" data-i18n="plugin.tab_plugins">Plugins</button>
-                        <button type="button" id="tab-mobile-qr-btn" class="plugin-tab-btn" data-i18n="plugin.tab_mobile_qr">📱 Mobile QR</button>
+                    <div id="plugin-list-view" class="plugin-list-view">
+                        <div id="plugin-cards-list" class="plugin-rows-list"></div>
+                        <div class="plugin-dropdown-footer" id="plugin-dropdown-footer">
+                            <button id="plugin-open-dir-btn" class="plugin-dir-btn" type="button">
+                                📂 <span data-i18n="plugin.open_dir">Open Plugins Folder</span>
+                            </button>
+                            <button id="plugin-admin-qr-btn" class="plugin-dir-btn plugin-admin-qr-btn" type="button">
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <rect x="3" y="3" width="7" height="7" rx="1" />
+                                    <rect x="14" y="3" width="7" height="7" rx="1" />
+                                    <rect x="3" y="14" width="7" height="7" rx="1" />
+                                    <path d="M14 14h3v3h-3zM20 14v3h-3M14 20h6" />
+                                </svg>
+                                <span data-i18n="plugin.qr_admin_btn">Admin QR</span>
+                            </button>
+                        </div>
                     </div>
-                    <div id="plugin-cards-list" class="plugin-cards-list"></div>
                     <div id="plugin-qr-panel" class="plugin-qr-panel hidden">
-                        <div class="lan-menu-header">
-                            <span class="lan-menu-title" data-i18n="console.lan_section">Mobile / LAN QR Code</span>
+                        <div class="qr-view-header">
+                            <button type="button" id="plugin-qr-back-btn" class="plugin-btn qr-back-btn" data-i18n="plugin.qr_back">← Back</button>
+                            <span id="plugin-qr-title" class="qr-view-title">Admin (/)</span>
                             <span id="plugin-qr-mode-badge" class="lan-mode-badge">Open</span>
                         </div>
-                        <div id="plugin-qr-targets" class="qr-targets-row"></div>
                         <div id="plugin-qr-page-row" class="qr-page-row hidden">
                             <button type="button" id="qr-mode-view-btn" class="plugin-btn qr-page-btn active" data-qr-page="view" data-i18n="plugin.qr_mode_view">Plugin View</button>
                             <button type="button" id="qr-mode-manage-btn" class="plugin-btn qr-page-btn" data-qr-page="manage" data-i18n="plugin.qr_mode_manage">Plugin Manage</button>
                         </div>
                         <div id="plugin-qr-ip-tabs" class="lan-ip-tabs hidden"></div>
                         <div class="lan-body">
+                            <img id="plugin-qr-img" class="lan-qr-img hidden" alt="QR" />
                             <div class="lan-url-col">
-                                <div id="plugin-qr-target-path" class="qr-target-path"></div>
                                 <div id="plugin-qr-url-text" class="lan-url-text"></div>
                                 <div id="plugin-qr-local-note" class="lan-local-note hidden"></div>
                                 <div class="lan-actions">
                                     <button type="button" id="plugin-qr-copy-btn" class="plugin-btn primary" data-i18n="lan.copy_url">Copy URL</button>
                                 </div>
                             </div>
-                            <img id="plugin-qr-img" class="lan-qr-img hidden" alt="QR" />
                         </div>
-                    </div>
-                    <div class="plugin-dropdown-footer" id="plugin-dropdown-footer">
-                        <button id="plugin-open-dir-btn" class="plugin-dir-btn">
-                            📂 <span data-i18n="plugin.open_dir">Open Plugins Folder</span>
-                        </button>
                     </div>
                 </div>
             </div>
@@ -130,21 +136,6 @@
                 </button>
 
                 <div id="more-dropdown-menu" class="more-dropdown-menu hidden" role="menu">
-                    <button id="more-record-raw-btn" class="more-menu-item" role="menuitem">
-                        <span class="menu-item-label" data-i18n="more.record_raw">📦 Record Raw Packets (*_raw.jsonl)</span>
-                        <span id="more-record-raw-check" class="menu-check"></span>
-                    </button>
-                    <div class="menu-separator"></div>
-                    <button id="more-open-config-btn" class="more-menu-item" role="menuitem">
-                        <span class="menu-item-label" data-i18n="more.open_config">📄 Open Config File</span>
-                    </button>
-                    <button id="more-open-rec-btn" class="more-menu-item" role="menuitem">
-                        <span class="menu-item-label" data-i18n="more.open_records">📼 Open Recordings Folder</span>
-                    </button>
-                    <button id="more-open-log-btn" class="more-menu-item" role="menuitem">
-                        <span class="menu-item-label" data-i18n="more.open_logs">📝 Open Logs Folder</span>
-                    </button>
-                    <div class="menu-separator"></div>
                     <div id="more-lang-submenu-group" class="more-submenu-group">
                         <button id="more-lang-trigger" class="more-menu-item more-submenu-trigger" type="button" role="menuitem" aria-haspopup="menu" aria-expanded="false">
                             <span class="menu-item-label" data-i18n="more.language">🌐 Language</span>
@@ -168,6 +159,21 @@
                             </button>
                         </div>
                     </div>
+                    <div class="menu-separator"></div>
+                    <button id="more-record-raw-btn" class="more-menu-item" role="menuitem">
+                        <span class="menu-item-label" data-i18n="more.record_raw">📦 Record Raw Packets (*_raw.jsonl)</span>
+                        <span id="more-record-raw-check" class="menu-check"></span>
+                    </button>
+                    <div class="menu-separator"></div>
+                    <button id="more-open-config-btn" class="more-menu-item" role="menuitem">
+                        <span class="menu-item-label" data-i18n="more.open_config">📄 Open Config File</span>
+                    </button>
+                    <button id="more-open-rec-btn" class="more-menu-item" role="menuitem">
+                        <span class="menu-item-label" data-i18n="more.open_records">📼 Open Recordings Folder</span>
+                    </button>
+                    <button id="more-open-log-btn" class="more-menu-item" role="menuitem">
+                        <span class="menu-item-label" data-i18n="more.open_logs">📝 Open Logs Folder</span>
+                    </button>
                 </div>
             </div>
 

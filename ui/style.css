@@ -344,9 +344,9 @@ body {
 .plugin-dropdown-menu {
     position: absolute;
     top: calc(100% + 12px);
-    right: -172px;
-    width: min(456px, calc(100vw - 24px));
-    max-height: 344px;
+    right: -116px;
+    width: min(344px, calc(100vw - 24px));
+    max-height: 336px;
     display: flex;
     flex-direction: column;
     background: rgba(20, 22, 28, 0.97);
@@ -363,47 +363,93 @@ body {
     display: none;
 }
 
-.plugin-tabs-header {
+.plugin-list-view {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    max-height: 336px;
+}
+.plugin-list-view.hidden,
+.plugin-qr-panel.hidden {
+    display: none;
+}
+
+.plugin-rows-list {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    touch-action: pan-y;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    cursor: default;
+}
+
+.plugin-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 8px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 6px;
+    cursor: default;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+.plugin-row:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.16);
+}
+.plugin-row.desktop-open {
+    border-color: rgba(34, 197, 94, 0.4);
+}
+
+.plugin-row-main {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.plugin-row-title {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-main);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.plugin-row-actions {
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 6px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
     flex-shrink: 0;
 }
 
-.plugin-tab-btn {
-    flex: 1 1 0;
-    height: 24px;
+.plugin-icon-btn {
+    width: 22px;
+    height: 22px;
+    padding: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 5px;
     border-radius: 5px;
-    border: 1px solid transparent;
-    background: transparent;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.06);
     color: var(--text-sub);
-    font-size: 11px;
-    font-weight: 500;
     cursor: pointer;
     transition: all 0.15s ease;
 }
-.plugin-tab-btn:hover {
+.plugin-icon-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-hover);
     color: var(--text-main);
-    background: rgba(255, 255, 255, 0.05);
 }
-.plugin-tab-btn.active {
-    color: var(--accent-blue);
-    background: rgba(56, 189, 248, 0.14);
-    border-color: rgba(56, 189, 248, 0.35);
-    font-weight: 600;
-}
-
-.plugin-cards-list.hidden,
-.plugin-dropdown-footer.hidden,
-.plugin-qr-panel.hidden {
-    display: none;
+.plugin-icon-btn svg {
+    pointer-events: none;
 }
 
 .plugin-qr-panel {
@@ -417,17 +463,28 @@ body {
     cursor: default;
 }
 
-.lan-menu-header {
+.qr-view-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
 }
 
-.lan-menu-title {
+.qr-back-btn {
+    flex-shrink: 0;
+    padding: 0 7px;
+}
+
+.qr-view-title {
+    flex: 1 1 auto;
+    min-width: 0;
     font-size: 12px;
     font-weight: 600;
     color: var(--text-main);
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .lan-mode-badge {
@@ -438,6 +495,7 @@ body {
     border: 1px solid var(--border-color);
     background: rgba(56, 189, 248, 0.16);
     color: var(--accent-blue);
+    flex-shrink: 0;
 }
 .lan-mode-badge.open {
     background: rgba(245, 158, 11, 0.18);
@@ -445,21 +503,16 @@ body {
     color: #fcd34d;
 }
 
-.qr-targets-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    max-height: 54px;
-    overflow-y: auto;
-    touch-action: pan-y;
-}
-
 .qr-page-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 4px;
 }
 .qr-page-row.hidden {
     display: none;
+}
+.qr-page-btn {
+    text-align: center;
 }
 
 .lan-ip-tabs {
@@ -471,7 +524,6 @@ body {
     display: none;
 }
 
-.qr-pill-btn.active,
 .qr-page-btn.active,
 .lan-ip-btn.active {
     border-color: rgba(56, 189, 248, 0.65);
@@ -493,15 +545,6 @@ body {
     display: flex;
     flex-direction: column;
     gap: 6px;
-}
-
-.qr-target-path {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--text-sub);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
 .lan-url-text {
@@ -532,8 +575,8 @@ body {
 }
 
 .lan-qr-img {
-    width: 108px;
-    height: 108px;
+    width: 112px;
+    height: 112px;
     border-radius: 6px;
     background: #ffffff;
     padding: 4px;
@@ -544,126 +587,12 @@ body {
     display: none;
 }
 
-.plugin-qr-icon-btn {
-    flex: 0 0 auto !important;
-    padding: 0 6px;
-}
-
 .plugin-btn.warn {
     border-color: rgba(245, 158, 11, 0.45);
     color: #fcd34d;
 }
 .plugin-btn.warn:hover {
     background: rgba(245, 158, 11, 0.16);
-}
-
-.plugin-cards-list {
-    flex: 1 1 auto;
-    overflow-y: auto;
-    touch-action: pan-y;
-    padding: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    cursor: default;
-}
-
-.plugin-card {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 8px 10px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 7px;
-    cursor: default;
-    transition: background 0.15s ease, border-color 0.15s ease;
-}
-.plugin-card:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.18);
-}
-.plugin-card.desktop-open {
-    border-color: rgba(34, 197, 94, 0.42);
-}
-
-.plugin-card-main {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-}
-
-.plugin-card-header {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex-wrap: wrap;
-}
-
-.plugin-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-main);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.plugin-badge {
-    font-size: 9px;
-    font-weight: 600;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: rgba(56, 189, 248, 0.16);
-    color: var(--accent-blue);
-    border: 1px solid rgba(56, 189, 248, 0.3);
-}
-.plugin-badge.custom {
-    background: rgba(168, 85, 247, 0.16);
-    color: #d8b4fe;
-    border-color: rgba(168, 85, 247, 0.3);
-}
-
-.plugin-size-badge {
-    font-size: 9px;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.07);
-    color: var(--text-sub);
-}
-
-.plugin-desc {
-    font-size: 10px;
-    color: var(--text-sub);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.plugin-url {
-    font-size: 10px;
-    color: rgba(148, 163, 184, 0.8);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.plugin-card-actions {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    flex-shrink: 0;
-}
-.plugin-card-actions-row {
-    display: flex;
-    gap: 4px;
-}
-.plugin-card-actions-row .plugin-btn {
-    flex: 1 1 auto;
 }
 
 .plugin-btn {
@@ -715,11 +644,12 @@ body {
 .plugin-dropdown-footer {
     display: flex;
     align-items: center;
-    justify-content: flex-start;
+    justify-content: space-between;
     gap: 8px;
     padding: 7px 10px;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     background: rgba(255, 255, 255, 0.03);
+    flex-shrink: 0;
     cursor: default;
 }
 
@@ -739,6 +669,18 @@ body {
 .plugin-dir-btn:hover {
     background: var(--bg-hover);
     border-color: var(--border-hover);
+}
+.plugin-dir-btn svg {
+    pointer-events: none;
+}
+
+.plugin-admin-qr-btn {
+    color: var(--accent-blue);
+    border-color: rgba(56, 189, 248, 0.32);
+}
+.plugin-admin-qr-btn:hover {
+    background: rgba(56, 189, 248, 0.15);
+    border-color: rgba(56, 189, 248, 0.55);
 }
 
 .toast-banner {
