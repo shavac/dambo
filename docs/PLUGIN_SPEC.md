@@ -33,11 +33,11 @@
 ## 2. 目录结构、路由与 `plugin.json` 规范
 
 ### 2.1 插件目录与识别规则
-插件放在 `static/html/<plugin-name>/`（支持约 200ms 自动热重载）。`<plugin-name>` 必须匹配 `^[A-Za-z0-9_-]{1,64}$`，且不得与保留顶层路由冲突（`ws`、`api`、`sdk`）。
+插件放在 `static/html/<plugin-name>/`（支持约 200ms 自动热重载）。`<plugin-name>` 必须匹配 `^[A-Za-z0-9_-]{1,64}$`，且不得与保留顶层路由冲突（`ws`、`api`、`sdk`、`admin`）。
 
 ```text
 static/html/<plugin-name>/
-├── plugin.html     # [必需] OBS 展示端（不再兼容旧 index.html），映射 GET /{plugin-name}/
+├── plugin.html     # [必需] OBS 展示端（不再兼容旧 index.html），映射 GET /{plugin-name}/plugin.html（默认挂件示例 http://localhost:3838/default/plugin.html）与 GET /{plugin-name}/
 ├── plugin.json     # [推荐] 清单、OBS 建议尺寸与强类型默认配置 defaults
 ├── plugin.css      # [可选] 展示端样式
 ├── plugin.js       # [可选] 展示端脚本
@@ -330,11 +330,11 @@ await Dambo.plugin.unlockManage(token)
 ### 5.2 AI 交付前自检与给用户的操作提示
 
 生成完整文件后，AI 应自行核对以下 5 项再输出给用户：
-1. 确认所有文件完整输出，目录名 `<plugin-name>` 仅含 `[A-Za-z0-9_-]` 且不为 `ws`、`api`、`sdk`。
+1. 确认所有文件完整输出，目录名 `<plugin-name>` 仅含 `[A-Za-z0-9_-]` 且不为 `ws`、`api`、`sdk`、`admin`。
 2. 确认 `plugin.html` 含 `<meta name="referrer" content="no-referrer">` 与 `<base href="/<plugin-name>/">`，且自定义 `manage.html`（如有）**不含** `no-referrer`。
 3. 确认全部 `.html` / `.js` 中**零 `.innerHTML`**、**零硬编码主机端口**、**`<script src="/sdk/dambo.js"></script>` 同步加载且在插件脚本之前**，且除 `/sdk/dambo.js` 外，所有插件本地 `.css`/`.js`/静态资源均为 `./...` 相对路径（不存在 `/plugin.js`、`/manage.js`、`/static/html/...` 等绝对路径）。
 4. 确认 `plugin.json` JSON 语法合法，未包含 `permissions` 字段，且展示端保持透明无遮挡、避开右上角 `100×44px`。
 5. 在回答最后附上清晰的 3 步使用指引：
    - 在 Dambo 控制舱点击 **插件 -> 打开插件目录**（即 `static/html/`），新建 `<plugin-name>` 文件夹并将生成的全部文件放入其中；
-   - 无需重启 Dambo（约 200ms 自动识别），点击 **桌面打开** 或 **复制 OBS URL** 添加到 OBS「浏览器」源；
-   - 在控制舱点击 **管理页**（或访问 `http://localhost:<port>/<plugin-name>/m`）即可实时调整配置、审批跨插件权限或操作自定义管理面板。
+   - 无需重启 Dambo（约 200ms 自动识别），点击 **桌面打开** 或 **复制 OBS URL**（格式为 `http://localhost:3838/<plugin-name>/plugin.html`，内置默认挂件示例为 `http://localhost:3838/default/plugin.html`）添加到 OBS「浏览器」源；
+   - 在控制舱或统一后台 `http://localhost:3838/admin` 点击 **管理页**（或直接访问 `http://localhost:<port>/<plugin-name>/m`）即可实时调整配置、审批跨插件权限或操作自定义管理面板。

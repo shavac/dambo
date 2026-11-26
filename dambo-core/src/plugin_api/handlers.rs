@@ -1,9 +1,11 @@
 use super::auth::{
-    ApiError, ManageSession, OptionalPeerIp, api_security_middleware,
+    AdminGuard, ApiError, ManageSession, OptionalPeerIp, api_security_middleware,
     build_admin_set_cookie_for_mode, check_remote_manage_allowed, configured_admin_token,
     constant_time_eq, extract_admin_cookie, is_peer_loopback, is_peer_loopback_or_private,
-    optional_caller_plugin, parse_url_authority_and_path, require_caller_plugin,
+    optional_caller_plugin, parse_url_authority_and_path, require_admin_session,
+    require_caller_plugin,
 };
+use crate::auth::SendDanmakuError;
 use crate::plugin::{PluginInfo, PluginRegistry, is_valid_plugin_id};
 use crate::plugin_hub::{
     AcceptedTopic, AcceptedWatch, PluginEventHub, RejectedSub, RequesterDisplay, SseOutbound,
@@ -22,7 +24,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use futures_util::stream::{self, Stream};
-use http::{HeaderMap, HeaderValue, header};
+use http::{HeaderMap, HeaderValue, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -238,6 +240,36 @@ pub(super) struct LanUrlsQuery {
 }
 
 #[derive(Deserialize)]
+struct SystemDanmakuBody {
+    msg: String,
+}
+
+#[derive(Serialize)]
+struct AdminAclItem {
+    #[serde(flatten)]
+    record: AclRecord,
+    owner_display: RequesterDisplay,
+    requester_display: RequesterDisplay,
+}
+
+#[derive(Deserialize)]
+struct AdminAclGrantBody {
+    owner: String,
+    requester: String,
+    resource: String,
+    level: AclLevel,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AdminAclDeleteQuery {
+    owner: String,
+    requester: String,
+    resource: String,
+}
+
+#[derive(Deserialize)]
 struct EventsQuery {
     plugin: Option<String>,
     mode: Option<String>,
@@ -298,6 +330,114 @@ pub(super) async fn get_system_lan_urls(
         query.path.as_deref(),
         include_token,
     ))
+}
+
+async fn get_system_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let room_state = state.hub.room_state();
+    let room_info = state.hub.room_info();
+    let plugin_count = state.plugins.list().len();
+
+    let (rec_enabled, rec_raw, rec_active, rec_file) = match state.recorder.as_ref() {
+        Some(rec) => {
+            let current_path = rec.current_path();
+            let file_name = current_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().to_string());
+            (
+                rec.is_enabled(),
+                rec.is_record_raw_enabled(),
+                file_name.is_some(),
+                file_name,
+            )
+        }
+        None => (
+            state.config.record.enabled,
+            state.config.record.record_raw,
+            false,
+            None,
+        ),
+    };
+
+    let auth_dto = state.auth.as_ref().map(|a| {
+        let s = a.current_state();
+        serde_json::json!({
+            "is_login": s.is_login,
+            "mid": s.mid,
+            "uname": s.uname,
+        })
+    });
+
+    Json(serde_json::json!({
+        "room_state": room_state,
+        "room_info": room_info,
+        "recording": {
+            "enabled": rec_enabled,
+            "record_raw": rec_raw,
+            "active": rec_active,
+            "current_file": rec_file,
+        },
+        "security_mode": state.config.server.security_mode,
+        "plugin_count": plugin_count,
+        "auth": auth_dto.unwrap_or_else(|| serde_json::json!({
+            "is_login": false,
+            "mid": 0,
+            "uname": "",
+        })),
+    }))
+}
+
+async fn post_system_danmaku(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SystemDanmakuBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some(auth) = state.auth.as_ref() else {
+        return Err(ApiError(PluginApiError::internal(
+            "Danmaku sender is unavailable in this runtime context",
+        )));
+    };
+    crate::send_danmaku_with(&state.hub, auth, &state.last_danmaku_sent_at, &body.msg)
+        .await
+        .map_err(|err| {
+            let api_err = match err {
+                SendDanmakuError::NotLoggedIn => PluginApiError::new(
+                    StatusCode::PRECONDITION_FAILED,
+                    "BILIBILI_NOT_LOGGED_IN",
+                    "Not signed in to Bilibili",
+                ),
+                SendDanmakuError::AuthExpired(_) => PluginApiError::new(
+                    StatusCode::PRECONDITION_FAILED,
+                    "BILIBILI_AUTH_EXPIRED",
+                    "Bilibili session expired",
+                ),
+                SendDanmakuError::NotConnected => PluginApiError::new(
+                    StatusCode::CONFLICT,
+                    "NOT_CONNECTED",
+                    "Not connected to a live room",
+                ),
+                SendDanmakuError::EmptyMessage => {
+                    PluginApiError::invalid_argument("Danmaku message cannot be empty")
+                }
+                SendDanmakuError::MessageTooLong { max } => PluginApiError::invalid_argument(
+                    format!("Danmaku exceeds maximum {} characters", max),
+                ),
+                SendDanmakuError::RateLimited(_) => {
+                    PluginApiError::too_many_requests("Sending too fast; retry in 1s")
+                }
+                SendDanmakuError::Rejected(reason) => {
+                    PluginApiError::invalid_argument(format!("Danmaku rejected: {}", reason))
+                }
+                SendDanmakuError::Network(reason) => PluginApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "UPSTREAM_ERROR",
+                    format!("Failed to send danmaku: {}", reason),
+                ),
+            };
+            ApiError(api_err)
+        })?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn health() -> impl IntoResponse {
@@ -586,14 +726,8 @@ async fn delete_topic(
     Ok(Json(serde_json::json!({ "deleted": existed })))
 }
 
-async fn publish_topic(
-    AxumPath(name): AxumPath<String>,
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<TopicPublishBody>,
-) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
-    let payload_bytes = serde_json::to_vec(&body.payload).map_err(|e| {
+fn validate_topic_payload(payload: &serde_json::Value) -> Result<(), ApiError> {
+    let payload_bytes = serde_json::to_vec(payload).map_err(|e| {
         ApiError(PluginApiError::invalid_argument(format!(
             "Invalid topic payload JSON: {}",
             e
@@ -606,6 +740,17 @@ async fn publish_topic(
             crate::plugin_types::MAX_VALUE_BYTES
         ))));
     }
+    Ok(())
+}
+
+async fn publish_topic(
+    AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TopicPublishBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = require_caller_plugin(&headers, &state.plugins)?;
+    validate_topic_payload(&body.payload)?;
 
     let (meta, demoted) = state
         .plugin_store
@@ -633,7 +778,28 @@ async fn get_acl(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let caller = require_caller_plugin(&headers, &state.plugins)?;
+    let Some(caller) = optional_caller_plugin(&headers, &state.plugins)? else {
+        // Global `/admin` ACL view when `X-Dambo-Plugin` is omitted
+        require_admin_session(&headers, peer_ip, &state)?;
+        let records_raw = state.plugin_store.list_all_acl().await?;
+        let records: Vec<AdminAclItem> = records_raw
+            .into_iter()
+            .map(|record| {
+                let owner_display = resolve_requester_display(&state.plugins, &record.owner);
+                let requester_display =
+                    resolve_requester_display(&state.plugins, &record.requester);
+                AdminAclItem {
+                    record,
+                    owner_display,
+                    requester_display,
+                }
+            })
+            .collect();
+        return Ok(Json(serde_json::json!({
+            "records": records,
+            "security_mode": state.config.server.security_mode
+        })));
+    };
 
     // Mode A: single effective permission check via `?target=...&resource=...`
     if let (Some(target), Some(resource)) = (query.target.as_deref(), query.resource.as_deref()) {
@@ -722,28 +888,22 @@ async fn request_acl(
     Ok(Json(record))
 }
 
-async fn put_acl_grant(
-    AxumPath(requester): AxumPath<String>,
-    ManageSession { caller }: ManageSession,
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<AclGrantBody>,
-) -> Result<impl IntoResponse, ApiError> {
-    let requester_domain = resolve_requester_domain(&state.plugins, &requester)?;
-
+async fn apply_acl_grant_and_broadcast(
+    state: &AppState,
+    owner_domain: &str,
+    requester_domain: &str,
+    resource: &str,
+    level: AclLevel,
+    note: Option<String>,
+) -> Result<AclRecord, ApiError> {
     let record = state
         .plugin_store
-        .set_acl_grant(
-            &caller.namedomain,
-            &requester_domain,
-            &body.resource,
-            body.level,
-            body.note,
-        )
+        .set_acl_grant(owner_domain, requester_domain, resource, level, note)
         .await?;
 
     state
         .plugin_hub
-        .prune_unauthorized_for_owner(&state.plugin_store, &caller.namedomain)
+        .prune_unauthorized_for_owner(&state.plugin_store, owner_domain)
         .await;
 
     let action = if record.level == AclLevel::None {
@@ -755,25 +915,23 @@ async fn put_acl_grant(
     state
         .plugin_hub
         .publish_acl_changed(action, &record, Some(&display));
-    Ok(Json(record))
+    Ok(record)
 }
 
-async fn delete_acl_grant(
-    AxumPath(requester): AxumPath<String>,
-    Query(query): Query<AclDeleteQuery>,
-    ManageSession { caller }: ManageSession,
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, ApiError> {
-    let requester_domain = resolve_requester_domain(&state.plugins, &requester)?;
-
+async fn remove_acl_grant_and_broadcast(
+    state: &AppState,
+    owner_domain: &str,
+    requester_domain: &str,
+    resource: &str,
+) -> Result<bool, ApiError> {
     let removed = state
         .plugin_store
-        .delete_acl_record(&caller.namedomain, &requester_domain, &query.resource)
+        .delete_acl_record(owner_domain, requester_domain, resource)
         .await?;
 
     state
         .plugin_hub
-        .prune_unauthorized_for_owner(&state.plugin_store, &caller.namedomain)
+        .prune_unauthorized_for_owner(&state.plugin_store, owner_domain)
         .await;
 
     if let Some(mut rec) = removed {
@@ -785,10 +943,228 @@ async fn delete_acl_grant(
         state
             .plugin_hub
             .publish_acl_changed("revoked", &rec, Some(&display));
-        Ok(Json(serde_json::json!({ "deleted": true })))
+        Ok(true)
     } else {
-        Ok(Json(serde_json::json!({ "deleted": false })))
+        Ok(false)
     }
+}
+
+async fn put_acl_grant(
+    AxumPath(requester): AxumPath<String>,
+    ManageSession { caller }: ManageSession,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AclGrantBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let requester_domain = resolve_requester_domain(&state.plugins, &requester)?;
+    let record = apply_acl_grant_and_broadcast(
+        &state,
+        &caller.namedomain,
+        &requester_domain,
+        &body.resource,
+        body.level,
+        body.note,
+    )
+    .await?;
+    Ok(Json(record))
+}
+
+async fn delete_acl_grant(
+    AxumPath(requester): AxumPath<String>,
+    Query(query): Query<AclDeleteQuery>,
+    ManageSession { caller }: ManageSession,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let requester_domain = resolve_requester_domain(&state.plugins, &requester)?;
+    let deleted = remove_acl_grant_and_broadcast(
+        &state,
+        &caller.namedomain,
+        &requester_domain,
+        &query.resource,
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+async fn put_admin_acl(
+    _: AdminGuard,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AdminAclGrantBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner_domain = resolve_requester_domain(&state.plugins, &body.owner)?;
+    let requester_domain = resolve_requester_domain(&state.plugins, &body.requester)?;
+    let record = apply_acl_grant_and_broadcast(
+        &state,
+        &owner_domain,
+        &requester_domain,
+        &body.resource,
+        body.level,
+        body.note,
+    )
+    .await?;
+    Ok(Json(record))
+}
+
+async fn delete_admin_acl(
+    _: AdminGuard,
+    Query(query): Query<AdminAclDeleteQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner_domain = resolve_requester_domain(&state.plugins, &query.owner)?;
+    let requester_domain = resolve_requester_domain(&state.plugins, &query.requester)?;
+    let deleted =
+        remove_acl_grant_and_broadcast(&state, &owner_domain, &requester_domain, &query.resource)
+            .await?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+fn resolve_admin_owner_and_store(
+    plugins: &PluginRegistry,
+    store_raw: &str,
+    owner: &str,
+) -> Result<(StoreKind, PluginInfo), ApiError> {
+    let store = StoreKind::parse(store_raw)?;
+    let target_info = resolve_target_plugin(plugins, None, owner)?;
+    Ok((store, target_info))
+}
+
+async fn admin_list_namespaces(
+    _: AdminGuard,
+    AxumPath((store_raw, owner)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (store, target_info) = resolve_admin_owner_and_store(&state.plugins, &store_raw, &owner)?;
+    let namespaces = state
+        .plugin_store
+        .list_namespaces(
+            &target_info.namedomain,
+            &target_info.namedomain,
+            store,
+            &target_info.defaults,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({
+        "owner": target_info.namedomain,
+        "namespaces": namespaces
+    })))
+}
+
+async fn admin_list_entries(
+    _: AdminGuard,
+    AxumPath((store_raw, owner, ns)): AxumPath<(String, String, String)>,
+    Query(query): Query<ListEntriesQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (store, target_info) = resolve_admin_owner_and_store(&state.plugins, &store_raw, &owner)?;
+    let keys_vec: Option<Vec<String>> = query.keys.map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    });
+    let (entries, _) = state
+        .plugin_store
+        .list_entries_cached_with_acl(
+            &target_info.namedomain,
+            &target_info.namedomain,
+            store,
+            &ns,
+            query.prefix.as_deref(),
+            keys_vec.as_deref(),
+            query.limit,
+            &target_info.parsed_defaults,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({ "entries": entries })))
+}
+
+async fn admin_clear_namespace(
+    _: AdminGuard,
+    AxumPath((store_raw, owner, ns)): AxumPath<(String, String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (store, target_info) = resolve_admin_owner_and_store(&state.plugins, &store_raw, &owner)?;
+    let (deleted, mutation) = state
+        .plugin_store
+        .clear_namespace(&target_info.namedomain, &target_info.namedomain, store, &ns)
+        .await?;
+    if let Some(m) = mutation {
+        state.plugin_hub.publish_data_changed(&m, "admin@0");
+    }
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+async fn admin_put_key(
+    _: AdminGuard,
+    AxumPath((store_raw, owner, ns, key)): AxumPath<(String, String, String, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<WriteEntryInput>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (store, target_info) = resolve_admin_owner_and_store(&state.plugins, &store_raw, &owner)?;
+    let (entry, mutation) = state
+        .plugin_store
+        .put_entry_cached(
+            &target_info.namedomain,
+            &target_info.namedomain,
+            store,
+            &ns,
+            &key,
+            input,
+            &target_info.parsed_defaults,
+        )
+        .await?;
+    state.plugin_hub.publish_data_changed(&mutation, "admin@0");
+    Ok(Json(SingleKeyResponse { key, entry }))
+}
+
+async fn admin_delete_key(
+    _: AdminGuard,
+    AxumPath((store_raw, owner, ns, key)): AxumPath<(String, String, String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (store, target_info) = resolve_admin_owner_and_store(&state.plugins, &store_raw, &owner)?;
+    let (existed, mutation) = state
+        .plugin_store
+        .delete_entry(
+            &target_info.namedomain,
+            &target_info.namedomain,
+            store,
+            &ns,
+            &key,
+        )
+        .await?;
+    if let Some(m) = mutation {
+        state.plugin_hub.publish_data_changed(&m, "admin@0");
+    }
+    Ok(Json(serde_json::json!({ "deleted": existed })))
+}
+
+async fn admin_publish_topic(
+    _: AdminGuard,
+    AxumPath((owner, name)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TopicPublishBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner_info = resolve_target_plugin(&state.plugins, None, &owner)?;
+    validate_topic_payload(&body.payload)?;
+    let (meta, demoted) = state
+        .plugin_store
+        .ensure_topic_for_publish(&owner_info.namedomain, &name, body.public, body.description)
+        .await?;
+    if demoted {
+        state
+            .plugin_hub
+            .prune_unauthorized_for_owner(&state.plugin_store, &owner_info.namedomain)
+            .await;
+    }
+    let delivered =
+        state
+            .plugin_hub
+            .publish_topic_message(&owner_info.namedomain, &name, &body.payload);
+    Ok(Json(serde_json::json!({
+        "delivered": delivered,
+        "topic": meta
+    })))
 }
 
 pub(super) async fn auth_manage(
@@ -857,10 +1233,92 @@ impl Drop for SseClientGuard {
     }
 }
 
+fn build_sse_response(
+    state: &AppState,
+    client_id: String,
+    rx: mpsc::Receiver<SseOutbound>,
+    initial_data: String,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>> + use<>> {
+    let initial_event = SseOutbound {
+        event: "connected",
+        data: initial_data,
+    };
+    let guard = SseClientGuard {
+        hub: state.plugin_hub.clone(),
+        client_id,
+    };
+    let cancel = state.cancel.child_token();
+
+    struct StreamState {
+        rx: mpsc::Receiver<SseOutbound>,
+        initial: Option<SseOutbound>,
+        _guard: SseClientGuard,
+        cancel: tokio_util::sync::CancellationToken,
+    }
+
+    let st = StreamState {
+        rx,
+        initial: Some(initial_event),
+        _guard: guard,
+        cancel,
+    };
+
+    let event_stream = stream::unfold(st, |mut s| async move {
+        if let Some(first) = s.initial.take() {
+            let ev = Event::default().event(first.event).data(first.data);
+            return Some((Ok::<Event, Infallible>(ev), s));
+        }
+
+        tokio::select! {
+            _ = s.cancel.cancelled() => None,
+            item = s.rx.recv() => {
+                item.map(|msg| {
+                    let ev = Event::default().event(msg.event).data(msg.data);
+                    (Ok::<Event, Infallible>(ev), s)
+                })
+            }
+        }
+    });
+
+    Sse::new(event_stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
 async fn sse_events(
+    OptionalPeerIp(peer_ip): OptionalPeerIp,
+    headers: HeaderMap,
     Query(query): Query<EventsQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let mode = query
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("view");
+
+    if mode == "admin" {
+        require_admin_session(&headers, peer_ip, &state)?;
+        let (client_id, rx) = state.plugin_hub.register_admin_client();
+        let initial_data = serde_json::json!({
+            "client_id": client_id,
+            "mode": "admin",
+            "security_mode": state.config.server.security_mode
+        })
+        .to_string();
+        return Ok(build_sse_response(&state, client_id, rx, initial_data));
+    }
+
+    if mode != "view" && mode != "manage" {
+        return Err(ApiError(PluginApiError::invalid_argument(format!(
+            "Invalid mode '{}': expected 'view', 'manage', or 'admin'",
+            mode
+        ))));
+    }
+
     let plugin_name = query
         .plugin
         .as_deref()
@@ -878,19 +1336,6 @@ async fn sse_events(
             plugin_name
         )))
     })?;
-
-    let mode = query
-        .mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("view");
-    if mode != "view" && mode != "manage" {
-        return Err(ApiError(PluginApiError::invalid_argument(format!(
-            "Invalid mode '{}': expected 'view' or 'manage'",
-            mode
-        ))));
-    }
 
     let raw_watches: Vec<WatchSubInput> = match query.watches.as_deref().map(str::trim) {
         Some(raw) if !raw.is_empty() => serde_json::from_str(raw).map_err(|e| {
@@ -948,52 +1393,7 @@ async fn sse_events(
         )))
     })?;
 
-    let initial_event = SseOutbound {
-        event: "connected",
-        data: initial_data,
-    };
-    let guard = SseClientGuard {
-        hub: state.plugin_hub.clone(),
-        client_id,
-    };
-    let cancel = state.cancel.child_token();
-
-    struct StreamState {
-        rx: mpsc::Receiver<SseOutbound>,
-        initial: Option<SseOutbound>,
-        _guard: SseClientGuard,
-        cancel: tokio_util::sync::CancellationToken,
-    }
-
-    let st = StreamState {
-        rx,
-        initial: Some(initial_event),
-        _guard: guard,
-        cancel,
-    };
-
-    let event_stream = stream::unfold(st, |mut s| async move {
-        if let Some(first) = s.initial.take() {
-            let ev = Event::default().event(first.event).data(first.data);
-            return Some((Ok::<Event, Infallible>(ev), s));
-        }
-
-        tokio::select! {
-            _ = s.cancel.cancelled() => None,
-            item = s.rx.recv() => {
-                item.map(|msg| {
-                    let ev = Event::default().event(msg.event).data(msg.data);
-                    (Ok::<Event, Infallible>(ev), s)
-                })
-            }
-        }
-    });
-
-    Ok(Sse::new(event_stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("ping"),
-    ))
+    Ok(build_sse_response(&state, client_id, rx, initial_data))
 }
 
 async fn update_sse_subscriptions(
@@ -1035,7 +1435,23 @@ async fn update_sse_subscriptions(
 pub fn api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/health", get(health))
+        .route("/system/status", get(get_system_status))
+        .route("/system/danmaku", post(post_system_danmaku))
         .route("/system/lan-urls", get(get_system_lan_urls))
+        .route("/admin/acl", put(put_admin_acl).delete(delete_admin_acl))
+        .route(
+            "/admin/data/{store}/{owner}/namespaces",
+            get(admin_list_namespaces),
+        )
+        .route(
+            "/admin/data/{store}/{owner}/ns/{ns}",
+            get(admin_list_entries).delete(admin_clear_namespace),
+        )
+        .route(
+            "/admin/data/{store}/{owner}/ns/{ns}/keys/{key}",
+            put(admin_put_key).delete(admin_delete_key),
+        )
+        .route("/admin/topics/{owner}/{name}", post(admin_publish_topic))
         .route("/plugins", get(list_plugins))
         .route("/plugins/{target}", get(get_plugin))
         .route(

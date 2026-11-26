@@ -103,7 +103,7 @@ Dambo 默认自带 4 款即开即用的网页插件：
 
 | 插件 | 访问路径 | 适用场景与玩法 |
 | --- | --- | --- |
-| **`default`** | `/` 或 `/default/` | **主力透明弹幕挂件**：底部进房停靠栏、顶部 SC/大航海倒计时置顶条、礼物 4 秒滑动连击归并跳动与自动跟随置底 |
+| **`default`** | `/default/plugin.html` | **主力透明弹幕挂件**：底部进房停靠栏、顶部 SC/大航海倒计时置顶条、礼物 4 秒滑动连击归并跳动与自动跟随置底（OBS 浏览器源示例：`http://localhost:3838/default/plugin.html`） |
 | **`list`** | `/list/` | **主播 / 场控监看列表**：支持按全部 / 弹幕 / 礼物与SC / 粉丝牌筛选，向上翻看历史时自动锁屏并统计未读数 |
 | **`sc-ticker`** | `/sc-ticker/` | **SC 与大航海独立卡片**：仅聚焦展示醒目留言（SC）与上舰倒计时滚动条，适合单独摆放在画面角落 |
 | **`game24`** | `/game24/` | **扑克 24 点弹幕抢答游戏**：每局随机发 4 张 A–K 扑克牌，观众在弹幕发算式（如 `(3+3)*(8-4)`）抢答计分并显示排行榜；默认单局 `300s`，支持 `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` 参数定制 |
@@ -135,7 +135,7 @@ Dambo 默认自带 4 款即开即用的网页插件：
 ### 配置与数据目录说明
 
 - **`etc/config.toml`**（只读配置，从源码运行若不存在可从 [etc/config.sample.toml](etc/config.sample.toml) 复制）：
-  - `[server]`：默认监听 `localhost:3838`（局域网共享可改 `host = "0.0.0.0"`）。
+  - `[server]`：默认监听 `0.0.0.0:3838`，并默认启用 `security_mode = "open"`（局域网私网 IP 免密查看与自动放行跨插件读/订阅；切换为 `"strict"` 可开启零信任令牌防护）。
   - `[feed]`：控制快照保留条数、是否展示进房提醒（`show_enter`）及粉丝牌（`show_medal`）。
   - `[record]`：控制是否自动录制以及文件名模板（默认保存在 `var/records/dambo_{主播名}_YYYYMMDD_HHMMSS.jsonl`）。
 - **`var/`**（运行期自动生成）：集中存放统一嵌入式数据库 `dambo.redb`（登录态、最近房间、语言偏好、录制开关及插件持久化/ACL/订阅源）、运行日志 `logs/` 与直播录制 `records/`。
@@ -144,8 +144,10 @@ Dambo 默认自带 4 款即开即用的网页插件：
 
 | 地址 | 用途说明 |
 | --- | --- |
-| `GET /` 或 `GET /{插件名}/` | 直接在浏览器 / OBS 中打开对应挂件展示页 |
-| `GET /{插件名}/m` | 在浏览器中打开插件配置、跨插件存储与 ACL 审批管理页 |
+| `GET /` | 打开统一服务门户索引页（展示局域网二维码、`/admin` 入口及插件目录与 `http://localhost:3838/default/plugin.html` 等 OBS 源地址一键复制） |
+| `GET /admin` | 打开统一管理后台（实时概览、发弹幕、内嵌插件控制台、跨插件权限审批中心、KV/Topic 数据检视器） |
+| `GET /{插件名}/plugin.html` | 直接在浏览器 / OBS「浏览器」源中打开对应挂件展示页（如 `http://localhost:3838/default/plugin.html`） |
+| `GET /{插件名}/m` | 在浏览器或 `/admin` 抽屉中打开插件配置、跨插件存储与 ACL 审批管理页 |
 | `GET /sdk/dambo.js` | 内置零依赖纯 Web 插件 SDK |
 | `GET /api/v1/*` | 插件平台 Layer 1 HTTP REST + SSE 接口 |
 | `GET /ws` | 实时弹幕与挂件事件流 WebSocket（`Snapshot`、`Event`、`RoomState`） |

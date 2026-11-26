@@ -10,8 +10,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-/// Reserved top-level route segments that cannot be claimed as plugin directories.
-pub const RESERVED_PLUGIN_NAMES: &[&str] = &["ws", "api", "sdk"];
+/// Reserved top-level route segments that cannot be claimed as plugin directories or plugin IDs.
+pub const RESERVED_PLUGIN_NAMES: &[&str] = &["ws", "api", "sdk", "admin"];
 
 /// Maximum allowed byte length for `plugin_name` and `plugin_id`.
 pub const MAX_PLUGIN_IDENT_LEN: usize = 64;
@@ -87,13 +87,14 @@ struct PluginManifest {
     defaults: Option<serde_json::Value>,
 }
 
-/// Validates a logical `plugin_id` (`[A-Za-z0-9_-]`, 1..=64 bytes).
+/// Validates a logical `plugin_id` (`[A-Za-z0-9_-]`, 1..=64 bytes, excluding reserved routes).
 pub fn is_valid_plugin_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_PLUGIN_IDENT_LEN
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !RESERVED_PLUGIN_NAMES.contains(&id.to_ascii_lowercase().as_str())
 }
 
 /// Validates a plugin directory name (`[A-Za-z0-9_-]`, 1..=64 bytes, excluding reserved routes).
@@ -610,7 +611,7 @@ mod tests {
         fs::create_dir_all(dir.join("assets")).unwrap();
         fs::write(dir.join("assets/plugin.html"), "<html>assets plugin</html>").unwrap();
 
-        // Ignored directories: legacy index.html only (no plugin.html), reserved ws/api/sdk, invalid chars
+        // Ignored directories: legacy index.html only (no plugin.html), reserved ws/api/sdk/admin, invalid chars
         fs::create_dir_all(dir.join("legacy-only")).unwrap();
         fs::write(dir.join("legacy-only/index.html"), "<html>legacy</html>").unwrap();
         fs::create_dir_all(dir.join("no-entry")).unwrap();
@@ -620,6 +621,15 @@ mod tests {
         fs::write(dir.join("api/plugin.html"), "<html>reserved</html>").unwrap();
         fs::create_dir_all(dir.join("sdk")).unwrap();
         fs::write(dir.join("sdk/plugin.html"), "<html>reserved</html>").unwrap();
+        fs::create_dir_all(dir.join("admin")).unwrap();
+        fs::write(dir.join("admin/plugin.html"), "<html>reserved</html>").unwrap();
+        fs::create_dir_all(dir.join("ADMIN")).unwrap();
+        fs::write(dir.join("ADMIN/plugin.html"), "<html>reserved</html>").unwrap();
+        assert!(!is_valid_plugin_id("admin"));
+        assert!(!is_valid_plugin_id("Admin"));
+        assert!(!is_valid_plugin_id("sdk"));
+        assert!(!is_valid_plugin_id("api"));
+        assert!(!is_valid_plugin_id("ws"));
         fs::create_dir_all(dir.join("bad.name")).unwrap();
         fs::write(dir.join("bad.name/plugin.html"), "<html>dot</html>").unwrap();
 

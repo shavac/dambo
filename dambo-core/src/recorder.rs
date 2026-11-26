@@ -127,6 +127,10 @@ impl Recorder {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     pub fn is_record_raw_enabled(&self) -> bool {
         self.record_raw.load(Ordering::Acquire)
     }

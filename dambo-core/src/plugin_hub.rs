@@ -83,6 +83,7 @@ pub struct RequesterDisplay {
 }
 
 struct SseClientRecord {
+    is_admin: bool,
     plugin_name: String,
     namedomain: String,
     watches: Vec<AcceptedWatch>,
@@ -172,6 +173,29 @@ impl PluginEventHub {
         watches: Vec<AcceptedWatch>,
         topics: Vec<AcceptedTopic>,
     ) -> (String, mpsc::Receiver<SseOutbound>) {
+        self.register_client_inner(false, plugin_name, namedomain, watches, topics)
+    }
+
+    /// Register a privileged unified admin SSE client (`GET /api/v1/events?mode=admin`)
+    /// receiving global `acl.changed`, `data.changed`, and `plugins.changed` events.
+    pub fn register_admin_client(&self) -> (String, mpsc::Receiver<SseOutbound>) {
+        self.register_client_inner(
+            true,
+            "admin".to_string(),
+            "admin@0".to_string(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    fn register_client_inner(
+        &self,
+        is_admin: bool,
+        plugin_name: String,
+        namedomain: String,
+        watches: Vec<AcceptedWatch>,
+        topics: Vec<AcceptedTopic>,
+    ) -> (String, mpsc::Receiver<SseOutbound>) {
         let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
         let client_id = format!("c_{}", seq);
         let (tx, rx) = mpsc::channel(128);
@@ -179,6 +203,7 @@ impl PluginEventHub {
             map.insert(
                 client_id.clone(),
                 SseClientRecord {
+                    is_admin,
                     plugin_name,
                     namedomain,
                     watches,
@@ -234,47 +259,51 @@ impl PluginEventHub {
         };
 
         for (client_id, rec) in map.iter() {
-            let matching: Vec<&AcceptedWatch> = rec
-                .watches
-                .iter()
-                .filter(|w| {
-                    w.store == mutation.store
-                        && w.owner == mutation.owner_namedomain
-                        && w.namespace == mutation.namespace
-                })
-                .collect();
-            if matching.is_empty() {
-                continue;
-            }
-
-            let wildcard_match =
-                mutation.op == MutationOp::Clear || matching.iter().any(|w| w.prefix.is_none());
-
-            let (filtered_keys, filtered_values) = if wildcard_match {
+            let (filtered_keys, filtered_values) = if rec.is_admin {
                 (mutation.keys.clone(), mutation.inline_values.clone())
             } else {
-                let mut matched_keys = Vec::new();
-                for k in &mutation.keys {
-                    if matching
-                        .iter()
-                        .any(|w| w.prefix.as_deref().is_some_and(|p| k.starts_with(p)))
-                    {
-                        matched_keys.push(k.clone());
-                    }
-                }
-                if matched_keys.is_empty() {
+                let matching: Vec<&AcceptedWatch> = rec
+                    .watches
+                    .iter()
+                    .filter(|w| {
+                        w.store == mutation.store
+                            && w.owner == mutation.owner_namedomain
+                            && w.namespace == mutation.namespace
+                    })
+                    .collect();
+                if matching.is_empty() {
                     continue;
                 }
-                let matched_values = mutation.inline_values.as_ref().map(|all_vals| {
-                    let mut out = BTreeMap::new();
-                    for k in &matched_keys {
-                        if let Some(v) = all_vals.get(k) {
-                            out.insert(k.clone(), v.clone());
+
+                let wildcard_match =
+                    mutation.op == MutationOp::Clear || matching.iter().any(|w| w.prefix.is_none());
+
+                if wildcard_match {
+                    (mutation.keys.clone(), mutation.inline_values.clone())
+                } else {
+                    let mut matched_keys = Vec::new();
+                    for k in &mutation.keys {
+                        if matching
+                            .iter()
+                            .any(|w| w.prefix.as_deref().is_some_and(|p| k.starts_with(p)))
+                        {
+                            matched_keys.push(k.clone());
                         }
                     }
-                    out
-                });
-                (matched_keys, matched_values)
+                    if matched_keys.is_empty() {
+                        continue;
+                    }
+                    let matched_values = mutation.inline_values.as_ref().map(|all_vals| {
+                        let mut out = BTreeMap::new();
+                        for k in &matched_keys {
+                            if let Some(v) = all_vals.get(k) {
+                                out.insert(k.clone(), v.clone());
+                            }
+                        }
+                        out
+                    });
+                    (matched_keys, matched_values)
+                }
             };
 
             let payload = DataChangedPayload {
@@ -388,7 +417,8 @@ impl PluginEventHub {
         };
 
         for (client_id, rec) in map.iter() {
-            if rec.namedomain != record.owner && rec.namedomain != record.requester {
+            if !rec.is_admin && rec.namedomain != record.owner && rec.namedomain != record.requester
+            {
                 continue;
             }
             if rec
@@ -417,7 +447,8 @@ impl PluginEventHub {
             };
             map.iter()
                 .filter(|(_, rec)| {
-                    rec.namedomain != owner_namedomain
+                    !rec.is_admin
+                        && rec.namedomain != owner_namedomain
                         && (rec.watches.iter().any(|w| w.owner == owner_namedomain)
                             || rec.topics.iter().any(|t| t.owner == owner_namedomain))
                 })
@@ -549,7 +580,7 @@ impl PluginEventHub {
         };
         let to_remove: Vec<String> = map
             .iter()
-            .filter(|(_, rec)| rec.plugin_name == plugin_name)
+            .filter(|(_, rec)| !rec.is_admin && rec.plugin_name == plugin_name)
             .map(|(cid, _)| cid.clone())
             .collect();
         for cid in &to_remove {
@@ -561,6 +592,32 @@ impl PluginEventHub {
                 to_remove.len(),
                 plugin_name
             );
+        }
+    }
+
+    /// Broadcast a `plugins.changed` frame to active unified `/admin` SSE clients.
+    pub fn publish_plugins_changed(&self) {
+        let data = serde_json::json!({ "ts": Utc::now().timestamp_millis() }).to_string();
+        let Ok(map) = self.clients.read() else {
+            return;
+        };
+        for (client_id, rec) in map.iter() {
+            if !rec.is_admin {
+                continue;
+            }
+            if rec
+                .tx
+                .try_send(SseOutbound {
+                    event: "plugins.changed",
+                    data: data.clone(),
+                })
+                .is_err()
+            {
+                log::warn!(
+                    "Dropped plugins.changed SSE frame for slow admin client '{}'",
+                    client_id
+                );
+            }
         }
     }
 
@@ -598,6 +655,7 @@ impl PluginEventHub {
                                 _ => hub.disconnect_plugin_clients(name),
                             }
                         }
+                        hub.publish_plugins_changed();
                         known_domains = next_domains;
                     }
                 }

@@ -33,11 +33,11 @@
 ## 2. Directory Layout, Routes & `plugin.json` Schema
 
 ### 2.1 Plugin Directory & Recognition Rules
-Place plugins under `static/html/<plugin-name>/` (auto hot-reloaded in ~200ms). `<plugin-name>` must match `^[A-Za-z0-9_-]{1,64}$` and must not collide with reserved top-level routes (`ws`, `api`, `sdk`).
+Place plugins under `static/html/<plugin-name>/` (auto hot-reloaded in ~200ms). `<plugin-name>` must match `^[A-Za-z0-9_-]{1,64}$` and must not collide with reserved top-level routes (`ws`, `api`, `sdk`, `admin`).
 
 ```text
 static/html/<plugin-name>/
-├── plugin.html     # [Required] OBS view page (legacy index.html is no longer supported), served at GET /{plugin-name}/
+├── plugin.html     # [Required] OBS view page (legacy index.html is no longer supported), served at GET /{plugin-name}/plugin.html (e.g. http://localhost:3838/default/plugin.html) and GET /{plugin-name}/
 ├── plugin.json     # [Recommended] Manifest, recommended OBS dimensions, and typed defaults
 ├── plugin.css      # [Optional] View stylesheet
 ├── plugin.js       # [Optional] View script
@@ -330,11 +330,11 @@ Standard view script (`plugin.js`):
 ### 5.2 AI Pre-Delivery Self-Check & User Instructions
 
 Verify all 5 points before outputting the code:
-1. All files are complete; `<plugin-name>` contains only `[A-Za-z0-9_-]` and is not `ws`, `api`, or `sdk`.
+1. All files are complete; `<plugin-name>` contains only `[A-Za-z0-9_-]` and is not `ws`, `api`, `sdk`, or `admin`.
 2. `plugin.html` includes `<meta name="referrer" content="no-referrer">` and `<base href="/<plugin-name>/">`; custom `manage.html` (if any) omits `no-referrer`.
 3. **Zero `.innerHTML`**, **zero hardcoded hosts/ports**, `<script src="/sdk/dambo.js"></script>` is loaded **synchronously before** plugin scripts, and every local `.css`/`.js`/asset reference (everything except `/sdk/dambo.js`) uses a `./...` relative path (no `/plugin.js`, `/manage.js`, or `/static/html/...` absolute paths).
 4. `plugin.json` is valid JSON with no `permissions` field, and the view page stays transparent and clear of the top-right `100×44px` region.
 5. End with a clear 3-step install guide:
    - In Dambo's capsule, click **Plugins -> Open Plugins Folder** (`static/html/`), create `<plugin-name>/`, and drop all generated files inside;
-   - No restart needed (~200ms hot-reload)—click **Open on Desktop** or **Copy OBS URL** and add it as an OBS Browser Source;
-   - Click **Manage** in Dambo (or visit `http://localhost:<port>/<plugin-name>/m`) to edit settings, manage ACLs, or use your custom control panel.
+   - No restart needed (~200ms hot-reload)—click **Open on Desktop** or **Copy OBS URL** (such as `http://localhost:3838/default/plugin.html` for the default overlay or `http://localhost:3838/<plugin-name>/plugin.html`) and add it as an OBS Browser Source;
+   - Click **Manage** in Dambo or open the unified Admin Console (`http://localhost:3838/admin`), or visit `http://localhost:<port>/<plugin-name>/m` to edit settings, manage ACLs, or use your custom control panel.

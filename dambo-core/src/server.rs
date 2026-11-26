@@ -72,12 +72,21 @@ pub struct AppState {
     pub admin_sessions: Arc<AdminSessionStore>,
     pub hub: Arc<StateHub>,
     pub event_tx: broadcast::Sender<ChannelBMessage>,
+    pub recorder: Option<Arc<crate::recorder::Recorder>>,
+    pub auth: Option<Arc<crate::auth::AuthManager>>,
+    pub last_danmaku_sent_at: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     pub html_dir: PathBuf,
     pub cancel: CancellationToken,
 }
 
 /// Embedded official pure-Web Plugin SDK served at `GET /sdk/dambo.js`.
 pub const DAMBO_SDK_JS: &str = include_str!("../assets/dambo.js");
+
+/// Embedded unified portal index page served at `GET /`.
+pub const PORTAL_INDEX_HTML: &str = include_str!("../assets/index.html");
+
+/// Embedded unified admin console page served at `GET /admin`.
+pub const ADMIN_CONSOLE_HTML: &str = include_str!("../assets/admin.html");
 
 /// Embedded built-in fallback management page rendered at `GET /{plugin}/m` when `manage.html` is absent.
 pub const MANAGE_FALLBACK_HTML: &str = include_str!("../assets/manage_fallback.html");
@@ -153,12 +162,25 @@ fn redirect_with_query(status: StatusCode, target_path: &str, uri: &Uri) -> Resp
     }
 }
 
-fn attach_manage_security_headers(mut res: Response) -> Response {
+fn attach_admin_security_headers(mut res: Response) -> Response {
     let headers = res.headers_mut();
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    res
+}
+
+fn attach_manage_security_headers(mut res: Response) -> Response {
+    let headers = res.headers_mut();
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'self'"),
     );
     res
 }
@@ -189,12 +211,45 @@ fn safe_join_subpath(plugin_dir: &Path, rel_path: &str) -> Option<PathBuf> {
     }
 }
 
-async fn serve_root(State(state): State<Arc<AppState>>) -> Response {
-    if !state.plugins.contains("default") {
-        return (StatusCode::NOT_FOUND, "Plugin not found").into_response();
+async fn serve_root() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        PORTAL_INDEX_HTML,
+    )
+        .into_response()
+}
+
+async fn serve_admin(
+    plugin_api::OptionalPeerIp(peer_ip): plugin_api::OptionalPeerIp,
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let set_cookie = match plugin_api::authorize_and_maybe_mint_manage_cookie(
+        &headers,
+        peer_ip,
+        &state.config.server,
+        &state.admin_sessions,
+    ) {
+        Ok(cookie) => cookie,
+        Err(err) => return plugin_api::ApiError(err).into_response(),
+    };
+    let mut res = (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        ADMIN_CONSOLE_HTML,
+    )
+        .into_response();
+    if let Some(cookie_hdr) = set_cookie {
+        res.headers_mut().append(header::SET_COOKIE, cookie_hdr);
     }
-    let view_path = state.html_dir.join("default").join("plugin.html");
-    serve_file_response(&view_path).await
+    if state.config.server.security_mode.is_strict() {
+        attach_admin_security_headers(res)
+    } else {
+        res
+    }
+}
+
+async fn redirect_admin_slash(uri: Uri) -> Response {
+    redirect_with_query(StatusCode::MOVED_PERMANENTLY, "/admin", &uri)
 }
 
 async fn redirect_plugin_root(
@@ -402,6 +457,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let api = plugin_api::api_router(state.clone());
     Router::new()
         .route("/", get(serve_root))
+        .route("/admin", get(serve_admin))
+        .route("/admin/", get(redirect_admin_slash))
         .route("/sdk/dambo.js", get(serve_sdk_js))
         .route("/ws", get(ws_channel_a))
         .route("/ws/event", get(ws_channel_b))
@@ -693,6 +750,9 @@ mod tests {
             admin_sessions,
             hub: hub.clone(),
             event_tx: event_tx.clone(),
+            recorder: None,
+            auth: None,
+            last_danmaku_sent_at: Arc::new(std::sync::Mutex::new(None)),
             html_dir: temp_dir.clone(),
             cancel: cancel.clone(),
         });
@@ -708,7 +768,7 @@ mod tests {
                 .unwrap();
         });
 
-        // 1. Verify GET / directly serves default plugin.html (no 302 redirect, preserves URL '/')
+        // 1. Verify GET / serves the unified service portal (no redirect to default plugin)
         let root_res = http_get_raw(addr, "/?debug=1").await;
         assert!(root_res.contains("200 OK"));
         assert!(
@@ -717,7 +777,33 @@ mod tests {
                 .contains("cache-control: no-store, no-cache, must-revalidate")
         );
         assert!(!root_res.to_lowercase().contains("location:"));
-        assert!(root_res.contains("OBS Default"));
+        assert!(root_res.contains("id=\"dambo-portal-root\""));
+        assert!(!root_res.contains("OBS Default"));
+
+        // Verify GET /admin and GET /admin/ -> 301 redirect to /admin
+        let admin_res = http_get_raw(addr, "/admin").await;
+        assert!(admin_res.contains("200 OK"));
+        assert!(
+            admin_res
+                .to_lowercase()
+                .contains("cache-control: no-store, no-cache, must-revalidate")
+        );
+        assert!(admin_res.to_lowercase().contains("x-frame-options: deny"));
+        assert!(
+            admin_res
+                .to_lowercase()
+                .contains("content-security-policy: frame-ancestors 'none'")
+        );
+        assert!(admin_res.contains("id=\"dambo-admin-root\""));
+
+        let admin_slash = http_get_raw(addr, "/admin/").await;
+        assert!(admin_slash.contains("301 Moved Permanently"));
+        assert!(admin_slash.to_lowercase().contains("location: /admin"));
+
+        // Verify explicit /default/plugin.html OBS Browser Source URL works
+        let default_plugin_html = http_get_raw(addr, "/default/plugin.html").await;
+        assert!(default_plugin_html.contains("200 OK"));
+        assert!(default_plugin_html.contains("OBS Default"));
 
         // 2. Verify GET /{plugin} -> 301 /{plugin}/ preserving Query String
         let list_redir = http_get_raw(addr, "/list?timeout=60&solvable=true").await;
@@ -749,12 +835,12 @@ mod tests {
         assert!(
             custom_manage
                 .to_lowercase()
-                .contains("x-frame-options: deny")
+                .contains("x-frame-options: sameorigin")
         );
         assert!(
             custom_manage
                 .to_lowercase()
-                .contains("content-security-policy: frame-ancestors 'none'")
+                .contains("content-security-policy: frame-ancestors 'self'")
         );
 
         let fallback_manage = http_get_raw(addr, "/list/m").await;
@@ -763,7 +849,12 @@ mod tests {
         assert!(
             fallback_manage
                 .to_lowercase()
-                .contains("x-frame-options: deny")
+                .contains("x-frame-options: sameorigin")
+        );
+        assert!(
+            fallback_manage
+                .to_lowercase()
+                .contains("content-security-policy: frame-ancestors 'self'")
         );
 
         let manage_redir = http_get_raw(addr, "/custom/m/?tab=acl").await;
@@ -913,5 +1004,24 @@ mod tests {
         assert!(!MANAGE_FALLBACK_HTML.contains("innerHTML"));
         assert!(!MANAGE_FALLBACK_HTML.contains("no-referrer"));
         assert!(!MANAGE_FALLBACK_HTML.contains("fetch("));
+    }
+
+    #[test]
+    fn test_embedded_portal_and_admin_html_security() {
+        assert!(PORTAL_INDEX_HTML.contains("id=\"dambo-portal-root\""));
+        assert!(PORTAL_INDEX_HTML.contains("/admin"));
+        assert!(PORTAL_INDEX_HTML.contains("/plugin.html"));
+        assert!(!PORTAL_INDEX_HTML.contains("innerHTML"));
+
+        assert!(ADMIN_CONSOLE_HTML.contains("id=\"dambo-admin-root\""));
+        assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/events?mode=admin"));
+        assert!(ADMIN_CONSOLE_HTML.contains("/ws/event"));
+        assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/system/status"));
+        assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/acl"));
+        assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/admin/acl"));
+        assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/admin/data/"));
+        assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/admin/topics/"));
+        assert!(!ADMIN_CONSOLE_HTML.contains("innerHTML"));
+        assert!(!ADMIN_CONSOLE_HTML.contains("no-referrer"));
     }
 }

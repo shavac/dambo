@@ -97,7 +97,7 @@ pub struct DamboRuntime {
     pub event_engine: Arc<EventEngine>,
     startup_auto_connect: Arc<AtomicBool>,
     loopback_accessible: Arc<AtomicBool>,
-    last_danmaku_sent_at: Mutex<Option<Instant>>,
+    last_danmaku_sent_at: Arc<Mutex<Option<Instant>>>,
     service_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
 }
@@ -182,7 +182,7 @@ impl DamboRuntime {
             event_engine,
             startup_auto_connect,
             loopback_accessible,
-            last_danmaku_sent_at: Mutex::new(None),
+            last_danmaku_sent_at: Arc::new(Mutex::new(None)),
             service_tasks: Mutex::new(Vec::new()),
             cancel,
         })
@@ -376,6 +376,9 @@ impl DamboRuntime {
             admin_sessions: self.admin_sessions.clone(),
             hub: self.hub.clone(),
             event_tx: self.event_engine.sender(),
+            recorder: Some(self.recorder.clone()),
+            auth: Some(self.auth.clone()),
+            last_danmaku_sent_at: self.last_danmaku_sent_at.clone(),
             html_dir: self.html_dir.clone(),
             cancel: self.cancel.child_token(),
         });
@@ -457,38 +460,51 @@ impl DamboRuntime {
 
     /// Validate logged-in session and live room connection, enforce cooldown, and send a danmaku message.
     pub async fn send_danmaku(&self, msg: &str) -> std::result::Result<(), SendDanmakuError> {
-        let room = self.hub.room_state();
-        if !room.connected || room.room_id == 0 {
-            return Err(SendDanmakuError::NotConnected);
-        }
-        if !self.auth.current_state().is_login || self.auth.current_session().is_none() {
-            return Err(SendDanmakuError::NotLoggedIn);
-        }
+        send_danmaku_with(&self.hub, &self.auth, &self.last_danmaku_sent_at, msg).await
+    }
+}
 
-        let trimmed = msg.trim();
-        if trimmed.is_empty() {
-            return Err(SendDanmakuError::EmptyMessage);
-        }
-        if trimmed.chars().count() > DANMAKU_MAX_CHARS {
-            return Err(SendDanmakuError::MessageTooLong {
-                max: DANMAKU_MAX_CHARS,
-            });
-        }
-
-        if let Ok(guard) = self.last_danmaku_sent_at.lock()
-            && let Some(prev) = *guard
-            && prev.elapsed() < Duration::from_millis(1000)
-        {
-            return Err(SendDanmakuError::RateLimited("cooldown".to_string()));
-        }
-
-        self.auth.send_danmaku(room.room_id, trimmed).await?;
-        if let Ok(mut guard) = self.last_danmaku_sent_at.lock() {
-            *guard = Some(Instant::now());
-        }
-        Ok(())
+/// Shared danmaku validation, cooldown enforcement, and upstream dispatch used by both
+/// Tauri/CLI runtime callers and HTTP `POST /api/v1/system/danmaku`.
+pub(crate) async fn send_danmaku_with(
+    hub: &StateHub,
+    auth: &AuthManager,
+    last_sent: &Mutex<Option<Instant>>,
+    msg: &str,
+) -> std::result::Result<(), SendDanmakuError> {
+    let room = hub.room_state();
+    if !room.connected || room.room_id == 0 {
+        return Err(SendDanmakuError::NotConnected);
+    }
+    if !auth.current_state().is_login || auth.current_session().is_none() {
+        return Err(SendDanmakuError::NotLoggedIn);
     }
 
+    let trimmed = msg.trim();
+    if trimmed.is_empty() {
+        return Err(SendDanmakuError::EmptyMessage);
+    }
+    if trimmed.chars().count() > DANMAKU_MAX_CHARS {
+        return Err(SendDanmakuError::MessageTooLong {
+            max: DANMAKU_MAX_CHARS,
+        });
+    }
+
+    if let Ok(guard) = last_sent.lock()
+        && let Some(prev) = *guard
+        && prev.elapsed() < Duration::from_millis(1000)
+    {
+        return Err(SendDanmakuError::RateLimited("cooldown".to_string()));
+    }
+
+    auth.send_danmaku(room.room_id, trimmed).await?;
+    if let Ok(mut guard) = last_sent.lock() {
+        *guard = Some(Instant::now());
+    }
+    Ok(())
+}
+
+impl DamboRuntime {
     pub fn list_plugins(&self) -> Vec<PluginInfo> {
         self.plugins.list()
     }

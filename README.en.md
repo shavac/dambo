@@ -103,7 +103,7 @@ Dambo includes four ready-to-use web plugins out of the box:
 
 | Plugin | Route | Use Case |
 | --- | --- | --- |
-| **`default`** | `/` or `/default/` | **Primary OBS Transparent Overlay**: pinned SuperChat/Guard bar, ephemeral enter dock, 4s sliding gift combo merging with pulse feedback, and auto-follow bottom scroll |
+| **`default`** | `/default/plugin.html` | **Primary OBS Transparent Overlay**: pinned SuperChat/Guard bar, ephemeral enter dock, 4s sliding gift combo merging with pulse feedback, and auto-follow bottom scroll (OBS Browser Source example: `http://localhost:3838/default/plugin.html`) |
 | **`list`** | `/list/` | **Streamer / Moderator Monitor**: category filters (All / Chat / Gift & SC / Medal), manual scroll-up pause with unread counter, and sticky SC header |
 | **`sc-ticker`** | `/sc-ticker/` | **SC & Guard Countdown Cards**: compact corner widget focused purely on SuperChats and Guard subscriptions |
 | **`game24`** | `/game24/` | **24-Point Poker Chat Game**: deals 4 cards (A–K) each round for viewers to solve via danmaku math expressions (e.g. `(3+3)*(8-4)`), with live scoring & leaderboard; defaults to `300s` per round and supports `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` |
@@ -134,7 +134,7 @@ No coding required—turn an idea into a working plugin in two simple steps with
 ### Configuration & Runtime Data
 
 - **`etc/config.toml`** (read-only; when running from source, copy [etc/config.sample.toml](etc/config.sample.toml) to `etc/config.toml` to customize):
-  - `[server]`: defaults to `localhost:3838` (change `host = "0.0.0.0"` for LAN access).
+  - `[server]`: defaults to `0.0.0.0:3838` with `security_mode = "open"` (LAN private IPs can access management views and auto-grant cross-plugin Read/Subscribe; set `"strict"` for zero-trust token enforcement).
   - `[feed]`: controls snapshot history depth (`max_history`), room-enter alerts (`show_enter`), and fan medals (`show_medal`).
   - `[record]`: controls lossless JSONL recording and filename patterns (saved under `var/records/`).
 - **`var/`** (runtime data): stores the unified embedded database `dambo.redb` (login session, room history, language preference, recording toggle, and plugin storage/ACL/topics), logs (`logs/`), and recordings (`records/`).
@@ -143,8 +143,10 @@ No coding required—turn an idea into a working plugin in two simple steps with
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /` or `GET /{plugin}/` | Open any built-in or custom plugin view page in a browser / OBS |
-| `GET /{plugin}/m` | Open the plugin configuration, storage & ACL management page in a browser |
+| `GET /` | Open the unified service portal (LAN URLs/QR codes, `/admin` shortcut, and plugin catalog with one-click OBS URL copy such as `http://localhost:3838/default/plugin.html`) |
+| `GET /admin` | Open the unified Admin Console (live overview, chat input, embedded plugin drawer, ACL approvals, and KV/Topic data inspector) |
+| `GET /{plugin}/plugin.html` | Open any built-in or custom plugin view page in a browser / OBS Browser Source (e.g. `http://localhost:3838/default/plugin.html`) |
+| `GET /{plugin}/m` | Open the plugin configuration, storage & ACL management page in a browser or inside `/admin` |
 | `GET /sdk/dambo.js` | Embedded zero-dependency Pure-Web Plugin SDK |
 | `GET /api/v1/*` | Layer 1 Plugin Platform HTTP REST + SSE APIs |
 | `GET /ws` | Channel A WebSocket — real-time danmaku & overlay event feed (`Snapshot`, `Event`, `RoomState`) |

@@ -70,6 +70,9 @@ impl TestServer {
             admin_sessions,
             hub,
             event_tx,
+            recorder: None,
+            auth: None,
+            last_danmaku_sent_at: Arc::new(std::sync::Mutex::new(None)),
             html_dir,
             cancel: cancel.clone(),
         });
@@ -1067,14 +1070,14 @@ async fn test_e2e_game24_and_scoreboard_cross_plugin_flow() {
     assert_eq!(manage.status(), StatusCode::OK);
     assert_eq!(
         manage.headers().get(header::X_FRAME_OPTIONS).unwrap(),
-        "DENY"
+        "SAMEORIGIN"
     );
     assert_eq!(
         manage
             .headers()
             .get(header::CONTENT_SECURITY_POLICY)
             .unwrap(),
-        "frame-ancestors 'none'"
+        "frame-ancestors 'self'"
     );
     let manage_cookie = manage
         .headers()
@@ -1906,4 +1909,403 @@ async fn test_system_lan_urls_endpoint_open_and_strict() {
             .starts_with("http://127.0.0.1:")
     );
     local_srv.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_system_status_global_acl_admin_guard_and_admin_sse() {
+    let srv = TestServer::start_with_config(
+        |html_dir, cfg| {
+            cfg.server.host = "192.168.50.10".to_string();
+            cfg.server.port = 3838;
+            cfg.server.security_mode = SecurityMode::Strict;
+            cfg.server.admin_token = Some("adm-secret".to_string());
+
+            fs::create_dir_all(html_dir.join("game24")).unwrap();
+            fs::write(html_dir.join("game24/plugin.html"), "<html>game24</html>").unwrap();
+            fs::create_dir_all(html_dir.join("scoreboard")).unwrap();
+            fs::write(
+                html_dir.join("scoreboard/plugin.html"),
+                "<html>scoreboard</html>",
+            )
+            .unwrap();
+            // Reserved "admin" folder must be ignored during discovery.
+            fs::create_dir_all(html_dir.join("admin")).unwrap();
+            fs::write(html_dir.join("admin/plugin.html"), "<html>reserved</html>").unwrap();
+        },
+        "127.0.0.1:0",
+    )
+    .await;
+
+    // 1. Plugin catalog excludes reserved "admin" directory
+    let plugins_json: Value = srv
+        .client
+        .get(format!("{}/api/v1/plugins", srv.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let plugins_arr = plugins_json["plugins"].as_array().unwrap();
+    assert_eq!(plugins_arr.len(), 2);
+    assert!(plugins_arr.iter().all(|p| p["plugin_id"] != "admin"));
+
+    // 2. Public system status & LAN URLs with /admin path
+    let status_json: Value = srv
+        .client
+        .get(format!("{}/api/v1/system/status", srv.base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status_json["security_mode"], "strict");
+    assert_eq!(status_json["plugin_count"], 2);
+    assert_eq!(status_json["room_state"]["connected"], false);
+    assert_eq!(status_json["recording"]["enabled"], true);
+    assert_eq!(status_json["recording"]["active"], false);
+    assert_eq!(status_json["auth"]["is_login"], false);
+
+    let lan_json: Value = srv
+        .client
+        .get(format!(
+            "{}/api/v1/system/lan-urls?path=%2Fadmin",
+            srv.base_url
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        lan_json["urls"][0]["url"],
+        "http://192.168.50.10:3838/admin#t=adm-secret"
+    );
+
+    // 3. Unauthenticated admin endpoints are rejected (401)
+    assert_eq!(
+        srv.client
+            .get(format!("{}/api/v1/acl", srv.base_url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        srv.client
+            .get(format!("{}/api/v1/events?mode=admin", srv.base_url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        srv.client
+            .put(format!("{}/api/v1/admin/acl", srv.base_url))
+            .json(&json!({
+                "owner": "scoreboard",
+                "requester": "game24",
+                "resource": "persist:scores",
+                "level": "write"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        srv.client
+            .put(format!(
+                "{}/api/v1/admin/data/persist/scoreboard/ns/scores/keys/top",
+                srv.base_url
+            ))
+            .json(&json!({ "value": 42 }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        srv.client
+            .post(format!("{}/api/v1/admin/topics/game24/ping", srv.base_url))
+            .json(&json!({ "payload": { "hello": 1 } }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        srv.client
+            .post(format!("{}/api/v1/system/danmaku", srv.base_url))
+            .json(&json!({ "msg": "hi" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 4. Unlock admin cookie via POST /api/v1/auth/manage
+    let auth_res = srv
+        .client
+        .post(format!("{}/api/v1/auth/manage", srv.base_url))
+        .header(header::HOST, format!("127.0.0.1:{}", srv.addr.port()))
+        .header(header::ORIGIN, srv.base_url.clone())
+        .json(&json!({ "token": "adm-secret" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(auth_res.status(), StatusCode::OK);
+    let set_cookie = auth_res
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
+    let admin_referer = format!("{}/admin", srv.base_url);
+
+    // Valid cookie with disallowed plugin view-page Referer must be rejected (401) in Strict mode
+    assert_eq!(
+        srv.client
+            .get(format!("{}/api/v1/acl", srv.base_url))
+            .header(header::COOKIE, &cookie_pair)
+            .header(header::REFERER, format!("{}/game24/", srv.base_url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 5. Connect global admin SSE stream
+    let sse_res = srv
+        .client
+        .get(format!("{}/api/v1/events?mode=admin", srv.base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse_res.status(), StatusCode::OK);
+    let mut admin_sse = SseReader::new(sse_res);
+    let (conn_ev, _) = admin_sse.next_event().await.unwrap();
+    assert_eq!(conn_ev, "connected");
+
+    // 6. Cross-plugin pending ACL request -> global ACL query -> AdminGuard approve, revoke & delete
+    let req_acl = srv
+        .client
+        .post(format!("{}/api/v1/acl/requests", srv.base_url))
+        .header(header::ORIGIN, srv.base_url.clone())
+        .header("X-Dambo-Plugin", "game24")
+        .json(&json!({
+            "target": "scoreboard",
+            "resource": "persist:scores",
+            "level": "write",
+            "reason": "update score"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(req_acl.status(), StatusCode::OK);
+    let (ev_name, ev_val) = admin_sse.next_event().await.unwrap();
+    assert_eq!(ev_name, "acl.changed");
+    assert_eq!(ev_val["status"], "pending");
+
+    let acl_list: Value = srv
+        .client
+        .get(format!("{}/api/v1/acl", srv.base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(acl_list["security_mode"], "strict");
+    assert!(acl_list["records"].as_array().unwrap().iter().any(|r| {
+        r["owner"] == "scoreboard@0"
+            && r["requester"] == "game24@0"
+            && r["resource"] == "persist:scores"
+            && r["status"] == "pending"
+    }));
+
+    let approve_res = srv
+        .client
+        .put(format!("{}/api/v1/admin/acl", srv.base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, srv.base_url.clone())
+        .json(&json!({
+            "owner": "scoreboard",
+            "requester": "game24",
+            "resource": "persist:scores",
+            "level": "write",
+            "note": "approved by admin"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(approve_res.status(), StatusCode::OK);
+    let (ev_name, ev_val) = admin_sse.next_event().await.unwrap();
+    assert_eq!(ev_name, "acl.changed");
+    assert_eq!(ev_val["status"], "granted");
+
+    let revoke_res = srv
+        .client
+        .put(format!("{}/api/v1/admin/acl", srv.base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, srv.base_url.clone())
+        .json(&json!({
+            "owner": "scoreboard",
+            "requester": "game24",
+            "resource": "persist:scores",
+            "level": "none",
+            "note": "revoked by admin"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoke_res.status(), StatusCode::OK);
+    let (ev_name, ev_val) = admin_sse.next_event().await.unwrap();
+    assert_eq!(ev_name, "acl.changed");
+    assert_eq!(ev_val["status"], "denied");
+
+    let del_acl_res = srv
+        .client
+        .delete(format!(
+            "{}/api/v1/admin/acl?owner=scoreboard&requester=game24&resource=persist%3Ascores",
+            srv.base_url
+        ))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, srv.base_url.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_acl_res.status(), StatusCode::OK);
+    let (ev_name, _) = admin_sse.next_event().await.unwrap();
+    assert_eq!(ev_name, "acl.changed");
+
+    // 7. Admin data CRUD + SSE data.changed
+    let put_kv = srv
+        .client
+        .put(format!(
+            "{}/api/v1/admin/data/persist/scoreboard/ns/scores/keys/top",
+            srv.base_url
+        ))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, srv.base_url.clone())
+        .json(&json!({ "value": { "score": 99 }, "type": "struct" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put_kv.status(), StatusCode::OK);
+    let (ev_name, ev_val) = admin_sse.next_event().await.unwrap();
+    assert_eq!(ev_name, "data.changed");
+    assert_eq!(ev_val["owner"], "scoreboard@0");
+    assert_eq!(ev_val["namespace"], "scores");
+
+    let ns_list: Value = srv
+        .client
+        .get(format!(
+            "{}/api/v1/admin/data/persist/scoreboard/namespaces",
+            srv.base_url
+        ))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        ns_list["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "scores")
+    );
+
+    let ns_entries: Value = srv
+        .client
+        .get(format!(
+            "{}/api/v1/admin/data/persist/scoreboard/ns/scores",
+            srv.base_url
+        ))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ns_entries["entries"]["top"]["value"]["score"], 99);
+
+    let del_key: Value = srv
+        .client
+        .delete(format!(
+            "{}/api/v1/admin/data/persist/scoreboard/ns/scores/keys/top",
+            srv.base_url
+        ))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, srv.base_url.clone())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(del_key["deleted"], true);
+    let (ev_name, _) = admin_sse.next_event().await.unwrap();
+    assert_eq!(ev_name, "data.changed");
+
+    // 8. Admin topic test publish & danmaku guard check
+    let pub_topic = srv
+        .client
+        .post(format!("{}/api/v1/admin/topics/game24/ping", srv.base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, srv.base_url.clone())
+        .json(&json!({ "payload": { "test": true }, "public": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pub_topic.status(), StatusCode::OK);
+    let pub_json: Value = pub_topic.json().await.unwrap();
+    assert_eq!(pub_json["delivered"], 0);
+    assert_eq!(pub_json["topic"]["name"], "ping");
+
+    let danmaku_res = srv
+        .client
+        .post(format!("{}/api/v1/system/danmaku", srv.base_url))
+        .header(header::COOKIE, &cookie_pair)
+        .header(header::REFERER, &admin_referer)
+        .header(header::ORIGIN, srv.base_url.clone())
+        .json(&json!({ "msg": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(danmaku_res.status(), StatusCode::UNAUTHORIZED);
+
+    // 9. Admin SSE receives plugins.changed
+    srv.state.plugin_hub.publish_plugins_changed();
+    let (ev_name, _) = admin_sse.next_event().await.unwrap();
+    assert_eq!(ev_name, "plugins.changed");
+
+    srv.shutdown().await;
 }

@@ -1722,7 +1722,7 @@
             // keep raw segment
         }
         const lower = decoded.toLowerCase();
-        if (lower === 'sdk' || lower === 'api' || lower === 'ws') {
+        if (lower === 'sdk' || lower === 'api' || lower === 'ws' || lower === 'admin') {
             return '';
         }
         return decoded;

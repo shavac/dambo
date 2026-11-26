@@ -1,0 +1,2356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Dambo · 统一管理后台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f172a;
+      --bg-elev: #131d33;
+      --panel: #1e293b;
+      --panel-alt: #162032;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --radius: 12px;
+      --sidebar-w: 240px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100%;
+    }
+    #dambo-admin-root {
+      display: flex;
+      min-height: 100vh;
+    }
+    .sidebar {
+      width: var(--sidebar-w);
+      flex: 0 0 var(--sidebar-w);
+      background: var(--bg-elev);
+      border-right: 1px solid var(--border);
+      padding: 18px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+    }
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .nav-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex: 1;
+    }
+    .nav-btn {
+      appearance: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      text-align: left;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .nav-btn:hover {
+      background: var(--panel);
+      color: var(--text);
+    }
+    .nav-btn.active {
+      background: rgba(56, 189, 248, 0.14);
+      border-color: rgba(56, 189, 248, 0.45);
+      color: #e0f2fe;
+    }
+    .sidebar-foot {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .main-shell {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: rgba(15, 23, 42, 0.92);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .content {
+      padding: 20px;
+      max-width: 1280px;
+      width: 100%;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      flex: 1;
+    }
+    .mobile-nav {
+      display: none;
+    }
+    @media (max-width: 860px) {
+      .sidebar {
+        display: none;
+      }
+      .main-shell {
+        padding-bottom: calc(68px + env(safe-area-inset-bottom));
+      }
+      .topbar {
+        padding: 10px 14px;
+      }
+      .content {
+        padding: 14px;
+      }
+      .mobile-nav {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 30;
+        background: var(--bg-elev);
+        border-top: 1px solid var(--border);
+        padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+        gap: 4px;
+      }
+      .mobile-nav .nav-btn {
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+        padding: 6px 4px;
+        font-size: 12px;
+        gap: 2px;
+      }
+    }
+    h2, h3 {
+      margin: 0;
+    }
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .mono {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+    }
+    .card.pending-alert {
+      border-color: rgba(245, 158, 11, 0.7);
+      background: linear-gradient(180deg, rgba(245, 158, 11, 0.08), var(--panel));
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1.55fr 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    .grid-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+      gap: 14px;
+    }
+    @media (max-width: 960px) {
+      .grid-3 { grid-template-columns: 1fr; }
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    .between {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .stack {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 9px;
+      border-radius: 999px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .badge.ok { border-color: rgba(34, 197, 94, 0.5); color: #86efac; }
+    .badge.warn { border-color: rgba(245, 158, 11, 0.5); color: #fcd34d; }
+    .badge.danger { border-color: rgba(239, 68, 68, 0.55); color: #fca5a5; }
+    .badge.accent { border-color: rgba(56, 189, 248, 0.5); color: #7dd3fc; }
+    .count-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 18px;
+      padding: 0 6px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--danger);
+      color: #fff;
+    }
+    .count-pill.hidden { display: none; }
+    button, .btn-link {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--panel-alt);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 7px 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    button:hover, .btn-link:hover {
+      border-color: var(--accent);
+      color: #fff;
+    }
+    button:disabled {
+      opacity: 0.48;
+      cursor: not-allowed;
+    }
+    button.primary, .btn-link.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #082f49;
+    }
+    button.primary:hover, .btn-link.primary:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+      color: #082f49;
+    }
+    button.ok {
+      background: rgba(34, 197, 94, 0.16);
+      border-color: rgba(34, 197, 94, 0.5);
+      color: #86efac;
+    }
+    button.danger {
+      background: rgba(239, 68, 68, 0.14);
+      border-color: rgba(239, 68, 68, 0.5);
+      color: #fca5a5;
+    }
+    button.warn {
+      background: rgba(245, 158, 11, 0.14);
+      border-color: rgba(245, 158, 11, 0.5);
+      color: #fcd34d;
+    }
+    button.sm {
+      padding: 4px 10px;
+      font-size: 12px;
+    }
+    input, select, textarea {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+      font-size: 13px;
+      outline: none;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent);
+    }
+    textarea {
+      font-family: var(--mono);
+      font-size: 12px;
+      resize: vertical;
+      width: 100%;
+    }
+    .view-panel { display: none; flex-direction: column; gap: 16px; }
+    .view-panel.active { display: flex; }
+    .feed-box {
+      max-height: 460px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-right: 4px;
+    }
+    .feed-item {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .feed-item.kind-superchat { border-left-color: var(--warn); }
+    .feed-item.kind-gift { border-left-color: #f472b6; }
+    .feed-item.kind-guard { border-left-color: #a78bfa; }
+    .feed-item.kind-chat,
+    .feed-item.kind-danmaku { border-left-color: var(--accent); }
+    .feed-item.kind-system { border-left-color: var(--ok); }
+    .qr-box {
+      width: 176px;
+      height: 176px;
+      border-radius: 10px;
+      background: #fff;
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+    .qr-box svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .url-chip {
+      font-family: var(--mono);
+      font-size: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      word-break: break-all;
+      color: #bae6fd;
+    }
+    .acl-item {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .acl-item.urgent {
+      border-color: rgba(239, 68, 68, 0.7);
+      background: rgba(239, 68, 68, 0.08);
+    }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: var(--panel-alt);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 12px;
+    }
+    tr:last-child td { border-bottom: none; }
+    .val-preview {
+      font-family: var(--mono);
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-width: 420px;
+      max-height: 120px;
+      overflow: auto;
+      margin: 0;
+    }
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      background: rgba(2, 6, 23, 0.72);
+      display: none;
+      justify-content: flex-end;
+    }
+    .drawer-backdrop.open {
+      display: flex;
+    }
+    .drawer-panel {
+      width: min(760px, 100vw);
+      height: 100%;
+      background: var(--bg-elev);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+    .drawer-head {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .drawer-frame {
+      flex: 1;
+      width: 100%;
+      border: none;
+      background: var(--bg);
+    }
+    .auth-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      background: rgba(2, 6, 23, 0.8);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .auth-modal.open {
+      display: flex;
+    }
+    .auth-card {
+      width: min(440px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .toast-bar {
+      position: fixed;
+      right: 16px;
+      top: 66px;
+      z-index: 90;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: min(380px, calc(100vw - 32px));
+      pointer-events: none;
+    }
+    .toast {
+      pointer-events: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      border-radius: 10px;
+      padding: 10px 12px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+      font-size: 13px;
+    }
+    .toast.warn { border-left-color: var(--warn); }
+    .toast.ok { border-left-color: var(--ok); }
+    .toast.danger { border-left-color: var(--danger); }
+    .empty-state {
+      padding: 20px;
+      text-align: center;
+      color: var(--muted);
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div id="dambo-admin-root">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <div class="between">
+          <h1>Dambo Admin</h1>
+          <span id="sidebar-mode-badge" class="badge">加载中</span>
+        </div>
+        <span class="muted">统一服务管理控制台</span>
+      </div>
+      <nav class="nav-list" id="desktop-nav">
+        <button type="button" class="nav-btn active" data-view="overview">
+          <span>实时概览</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="plugins">
+          <span>插件控制台</span>
+          <span id="nav-plugin-count" class="badge">0</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="acl">
+          <span>权限中心</span>
+          <span id="desktop-pending-pill" class="count-pill hidden">0</span>
+        </button>
+        <button type="button" class="nav-btn" data-view="data">
+          <span>数据检视器</span>
+        </button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="row">
+          <span id="sse-badge-side" class="badge">SSE: 初始化</span>
+          <span id="ws-badge-side" class="badge">WS: 初始化</span>
+        </div>
+        <a class="btn-link" href="/">返回服务门户 (/)</a>
+      </div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <div class="row">
+          <strong id="topbar-view-title">实时概览</strong>
+          <span id="topbar-room-pill" class="badge">房间状态未知</span>
+          <span id="topbar-mode-pill" class="badge">模式: -</span>
+          <span id="topbar-auth-pill" class="badge">管理员未解锁</span>
+        </div>
+        <div class="row">
+          <span id="topbar-conn-summary" class="muted">SSE / WS 初始化中</span>
+          <button type="button" id="btn-open-auth" class="sm">解锁口令</button>
+          <button type="button" id="btn-refresh-all" class="sm">刷新全部</button>
+        </div>
+      </header>
+
+      <main class="content">
+        <div id="global-pending-banner" class="card pending-alert" style="display: none;">
+          <div class="between">
+            <div>
+              <strong id="global-pending-text">有待审批的跨插件权限请求</strong>
+              <div class="muted">跨插件 Write / Publish 操作需管理员明确批准后才会放行。</div>
+            </div>
+            <button type="button" id="btn-jump-acl" class="warn sm">前往权限中心处理</button>
+          </div>
+        </div>
+
+        <!-- 1. 实时概览 -->
+        <section id="view-overview" class="view-panel active">
+          <div class="grid-3">
+            <div class="card stack">
+              <div class="between">
+                <h3>直播间连接</h3>
+                <span id="ov-live-badge" class="badge">未知</span>
+              </div>
+              <div id="ov-room-title" style="font-weight: 600;">等待读取房间信息…</div>
+              <div id="ov-room-meta" class="muted">-</div>
+            </div>
+            <div class="card stack">
+              <div class="between">
+                <h3>录制状态</h3>
+                <span id="ov-rec-badge" class="badge">未启用</span>
+              </div>
+              <div id="ov-rec-detail">等待状态同步…</div>
+              <div id="ov-rec-file" class="muted mono">-</div>
+            </div>
+            <div class="card stack">
+              <div class="between">
+                <h3>运行环境与账号</h3>
+                <span id="ov-mode-badge" class="badge">-</span>
+              </div>
+              <div id="ov-plugin-summary">活跃插件数：-</div>
+              <div id="ov-auth-summary" class="muted">B站账号：未检测</div>
+            </div>
+          </div>
+
+          <div class="card stack">
+            <div class="between">
+              <div>
+                <h3>发送弹幕到当前直播间</h3>
+                <div class="muted">通过服务端登录态直接发送；受直播间冷却限制。</div>
+              </div>
+              <span id="danmaku-login-hint" class="badge">等待账号状态</span>
+            </div>
+            <form id="danmaku-form" class="row" style="align-items: stretch;">
+              <input id="danmaku-input" type="text" maxlength="40" placeholder="输入弹幕内容，回车发送…" style="flex: 1; min-width: 220px;" />
+              <button type="submit" id="danmaku-submit" class="primary">发送弹幕</button>
+            </form>
+            <div id="danmaku-status" class="muted"></div>
+          </div>
+
+          <div class="grid-2">
+            <div class="card stack">
+              <div class="between">
+                <div>
+                  <h3>Channel B 实时弹幕 / SC / 礼物观察流</h3>
+                  <div class="muted">仅使用单一 WebSocket (`/ws/event`) 观察实时广播事件</div>
+                </div>
+                <div class="row">
+                  <select id="feed-filter" aria-label="事件过滤">
+                    <option value="all">全部事件</option>
+                    <option value="danmaku">仅弹幕</option>
+                    <option value="paid">SC 与大航海</option>
+                    <option value="gift">礼物与互动</option>
+                  </select>
+                  <button type="button" id="btn-feed-pause" class="sm">暂停滚动</button>
+                  <button type="button" id="btn-feed-clear" class="sm">清空</button>
+                </div>
+              </div>
+              <div id="feed-list" class="feed-box">
+                <div class="empty-state">等待实时事件流连接…</div>
+              </div>
+            </div>
+
+            <div class="card stack">
+              <div class="between">
+                <div>
+                  <h3>管理后台局域网链接与二维码</h3>
+                  <div id="lan-hint" class="muted">正在读取局域网地址…</div>
+                </div>
+                <button type="button" id="btn-copy-lan" class="sm">复制当前链接</button>
+              </div>
+              <div id="lan-ip-tabs" class="row"></div>
+              <div class="row" style="align-items: flex-start; gap: 14px;">
+                <div id="lan-qr-box" class="qr-box">
+                  <span class="muted">暂无</span>
+                </div>
+                <div class="stack" style="flex: 1; min-width: 180px;">
+                  <div class="muted">当前目标地址</div>
+                  <div id="lan-url-text" class="url-chip">-</div>
+                  <div id="lan-strict-note" class="muted"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. 插件控制台 -->
+        <section id="view-plugins" class="view-panel">
+          <div class="card between">
+            <div>
+              <h3>已发现插件控制台</h3>
+              <div class="muted">点击“打开控制面板”将在本页右侧抽屉加载插件 `/{id}/m`，也可复制 OBS 源地址 `/{id}/plugin.html`。</div>
+            </div>
+            <div class="row">
+              <input id="plugin-search" type="search" placeholder="搜索插件 ID、名称或描述…" />
+              <button type="button" id="btn-reload-plugins" class="sm">刷新插件</button>
+            </div>
+          </div>
+          <div id="plugins-grid" class="grid-cards">
+            <div class="empty-state">正在加载插件目录…</div>
+          </div>
+        </section>
+
+        <!-- 3. 权限中心 -->
+        <section id="view-acl" class="view-panel">
+          <div class="card between">
+            <div>
+              <h3>跨插件权限中心</h3>
+              <div class="muted">明确区分 `AutoGranted`（Open 模式自动放行读/订阅）与 `Granted`（管理员明确授权），跨插件 `Write` / `Publish` 始终待审批。</div>
+            </div>
+            <div class="row">
+              <select id="acl-filter" aria-label="权限状态过滤">
+                <option value="all">全部规则</option>
+                <option value="pending">仅待审批</option>
+                <option value="auto_granted">仅 AutoGranted</option>
+                <option value="granted">仅 Granted</option>
+                <option value="denied">仅 Denied</option>
+              </select>
+              <button type="button" id="btn-reload-acl" class="sm">刷新规则</button>
+            </div>
+          </div>
+
+          <div class="card pending-alert stack" id="acl-pending-section">
+            <div class="between">
+              <h3>待审批权限请求（置顶高亮）</h3>
+              <span id="acl-pending-count-badge" class="badge warn">0 条待处理</span>
+            </div>
+            <div id="acl-pending-list" class="stack">
+              <div class="empty-state">当前没有待审批权限请求。</div>
+            </div>
+          </div>
+
+          <div class="card stack">
+            <div class="between">
+              <h3>已生效与历史规则列表</h3>
+              <span id="acl-other-count-badge" class="badge">0 条记录</span>
+            </div>
+            <div id="acl-other-list" class="stack">
+              <div class="empty-state">暂无已授权或已拒绝规则。</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. 数据检视器 -->
+        <section id="view-data" class="view-panel">
+          <div class="card stack">
+            <div class="between">
+              <div>
+                <h3>KV 数据检视器与 Topic 测试发布</h3>
+                <div class="muted">按插件域查看或编辑 `persist`（持久化）/ `memory`（内存）数据，或向指定 Topic 推送测试 JSON。</div>
+              </div>
+              <button type="button" id="btn-reload-data" class="sm">刷新数据</button>
+            </div>
+            <div class="row">
+              <label class="row">
+                <span class="muted">插件域</span>
+                <select id="data-owner"></select>
+              </label>
+              <label class="row">
+                <span class="muted">存储区</span>
+                <select id="data-store">
+                  <option value="persist">persist（持久化）</option>
+                  <option value="memory">memory（内存态）</option>
+                </select>
+              </label>
+              <label class="row">
+                <span class="muted">命名空间</span>
+                <select id="data-namespace-select"></select>
+              </label>
+              <input id="data-namespace-custom" type="text" placeholder="或输入新命名空间…" style="min-width: 170px;" />
+              <button type="button" id="btn-load-ns" class="sm primary">载入命名空间</button>
+              <button type="button" id="btn-clear-ns" class="sm danger">清空当前命名空间</button>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="card stack">
+              <div class="between">
+                <h3>键值列表 (<span id="data-scope-label" class="mono">-</span>)</h3>
+                <span id="data-entry-count" class="badge">0 项</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Key</th>
+                      <th>Type</th>
+                      <th>Value</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="data-tbody">
+                    <tr>
+                      <td colspan="4" class="muted">请选择插件域与命名空间…</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="card" style="background: var(--panel-alt);">
+                <h4 style="margin: 0 0 10px;">写入 / 修改键值</h4>
+                <form id="kv-edit-form" class="stack">
+                  <div class="row">
+                    <input id="kv-ns-input" type="text" placeholder="命名空间 (ns)" style="flex: 1; min-width: 130px;" />
+                    <input id="kv-key-input" type="text" placeholder="键名 (key)" style="flex: 1; min-width: 140px;" />
+                    <select id="kv-type-select" aria-label="值类型">
+                      <option value="auto">auto（自动/仅更新值）</option>
+                      <option value="struct">struct</option>
+                      <option value="list">list</option>
+                      <option value="string">string</option>
+                      <option value="number">number</option>
+                      <option value="bool">bool</option>
+                      <option value="enum">enum</option>
+                    </select>
+                  </div>
+                  <textarea id="kv-value-input" rows="4" placeholder='值内容，如 {"count": 1} 或文本'></textarea>
+                  <input id="kv-meta-input" type="text" placeholder='可选 meta JSON，如 {"source":"admin"}（留空不传）' />
+                  <div class="between">
+                    <span id="kv-form-status" class="muted"></span>
+                    <button type="submit" class="primary sm">保存键值</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+
+            <div class="card stack">
+              <div>
+                <h3>Topic 测试 JSON 发布器</h3>
+                <div class="muted">向当前选中插件域下的指定 Topic 广播一条实时测试事件。</div>
+              </div>
+              <form id="topic-pub-form" class="stack">
+                <label class="stack" style="gap: 4px;">
+                  <span class="muted">目标插件 Topic 名称</span>
+                  <input id="topic-name-input" list="topic-suggestions" type="text" placeholder="例如 round_end" />
+                  <datalist id="topic-suggestions"></datalist>
+                </label>
+                <label class="stack" style="gap: 4px;">
+                  <span class="muted">JSON Payload</span>
+                  <textarea id="topic-payload-input" rows="7">{
+  "test": true,
+  "message": "hello from dambo admin"
+}</textarea>
+                </label>
+                <div class="row">
+                  <label class="row" style="cursor: pointer;">
+                    <input id="topic-public-check" type="checkbox" checked />
+                    <span>声明为公开可订阅 (`public`)</span>
+                  </label>
+                  <input id="topic-desc-input" type="text" placeholder="可选 Topic 描述" style="flex: 1; min-width: 150px;" />
+                </div>
+                <div class="between">
+                  <span id="topic-form-status" class="muted"></span>
+                  <button type="submit" class="primary">发布测试消息</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <nav class="mobile-nav" id="mobile-nav" aria-label="移动端底部导航">
+      <button type="button" class="nav-btn active" data-view="overview">
+        <span>概览</span>
+      </button>
+      <button type="button" class="nav-btn" data-view="plugins">
+        <span>插件</span>
+      </button>
+      <button type="button" class="nav-btn" data-view="acl">
+        <span>权限</span>
+        <span id="mobile-pending-pill" class="count-pill hidden">0</span>
+      </button>
+      <button type="button" class="nav-btn" data-view="data">
+        <span>数据</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- 插件控制台内嵌抽屉 -->
+  <div id="plugin-drawer" class="drawer-backdrop" aria-hidden="true">
+    <div class="drawer-panel">
+      <div class="drawer-head">
+        <div>
+          <strong id="drawer-title">插件控制面板</strong>
+          <div id="drawer-subtitle" class="muted mono">-</div>
+        </div>
+        <div class="row">
+          <a id="drawer-external-link" class="btn-link sm" href="/" target="_blank" rel="noopener">新标签打开</a>
+          <button type="button" id="btn-close-drawer" class="sm">关闭</button>
+        </div>
+      </div>
+      <iframe id="drawer-iframe" class="drawer-frame" title="插件管理控制台"></iframe>
+    </div>
+  </div>
+
+  <!-- 管理员口令解锁弹窗 -->
+  <div id="auth-modal" class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+    <div class="auth-card">
+      <div class="between">
+        <h3 id="auth-modal-title">解锁管理员会话</h3>
+        <button type="button" id="btn-close-auth" class="sm">关闭</button>
+      </div>
+      <p class="muted" style="margin: 0;">
+        当前模式或来源要求验证 `admin_token`（可在 `config.toml` 或程序启动日志中找到；若通过二维码打开则会自动携带并清理 `#t=`）。
+      </p>
+      <form id="auth-form" class="stack">
+        <input id="auth-token-input" type="password" autocomplete="current-password" placeholder="粘贴 admin_token…" />
+        <div id="auth-error-msg" class="muted" style="color: #fca5a5;"></div>
+        <div class="row" style="justify-content: flex-end;">
+          <button type="submit" class="primary">验证并解锁</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast-bar" class="toast-bar" aria-live="polite"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var state = {
+        activeView: 'overview',
+        status: null,
+        plugins: [],
+        aclRecords: [],
+        securityMode: 'open',
+        adminUnlocked: false,
+        lanInfo: null,
+        selectedLanIndex: 0,
+        sse: null,
+        sseConnected: false,
+        ws: null,
+        wsConnected: false,
+        wsRetryMs: 1500,
+        wsTimer: null,
+        feedPaused: false,
+        feedFilter: 'all',
+        feedItems: [],
+        dataNamespaces: [],
+        dataEntries: {},
+        selectedOwner: '',
+        selectedStore: 'persist',
+        selectedNamespace: ''
+      };
+
+      function $(id) {
+        return document.getElementById(id);
+      }
+
+      function showToast(msg, tone) {
+        var bar = $('toast-bar');
+        var item = document.createElement('div');
+        item.className = 'toast' + (tone ? ' ' + tone : '');
+        item.textContent = String(msg || '');
+        bar.appendChild(item);
+        window.setTimeout(function () {
+          if (item.parentNode) {
+            item.parentNode.removeChild(item);
+          }
+        }, 4200);
+      }
+
+      function setBadge(el, text, tone) {
+        if (!el) return;
+        el.textContent = text;
+        el.className = 'badge' + (tone ? ' ' + tone : '');
+      }
+
+      function apiFetch(url, options) {
+        var opts = Object.assign({ credentials: 'same-origin' }, options || {});
+        return window.fetch(url, opts).then(function (res) {
+          return res.text().then(function (raw) {
+            var data = null;
+            if (raw) {
+              try {
+                data = JSON.parse(raw);
+              } catch (_) {
+                data = { raw: raw };
+              }
+            }
+            if (!res.ok) {
+              var msg = (data && data.error && data.error.message)
+                || (data && data.message)
+                || ('HTTP ' + res.status);
+              var err = new Error(msg);
+              err.status = res.status;
+              err.code = data && data.error && data.error.code;
+              err.payload = data;
+              if (res.status === 401) {
+                setAuthLocked(true);
+              }
+              throw err;
+            }
+            return data;
+          });
+        });
+      }
+
+      function setAuthLocked(locked) {
+        state.adminUnlocked = !locked;
+        if (locked) {
+          setBadge($('topbar-auth-pill'), '需管理员解锁', 'warn');
+          openAuthModal();
+        } else {
+          setBadge($('topbar-auth-pill'), '管理会话已就绪', 'ok');
+        }
+      }
+
+      function openAuthModal() {
+        $('auth-error-msg').textContent = '';
+        $('auth-modal').classList.add('open');
+      }
+
+      function closeAuthModal() {
+        $('auth-modal').classList.remove('open');
+      }
+
+      function consumeHashTokenIfPresent() {
+        var hash = window.location.hash || '';
+        if (!hash.startsWith('#')) return Promise.resolve(false);
+        var params = new URLSearchParams(hash.slice(1));
+        var token = params.get('t');
+        if (!token) return Promise.resolve(false);
+        try {
+          window.history.replaceState(null, '', window.location.pathname + window.location.search);
+        } catch (_) {}
+        return unlockWithToken(token, true);
+      }
+
+      function unlockWithToken(token, silent) {
+        return apiFetch('/api/v1/auth/manage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: String(token || '').trim() })
+        }).then(function () {
+          setAuthLocked(false);
+          closeAuthModal();
+          if (!silent) {
+            showToast('管理员会话已解锁', 'ok');
+          }
+          connectAdminSse();
+          return refreshProtectedData().then(function () {
+            return true;
+          });
+        }).catch(function (err) {
+          if (!silent) {
+            $('auth-error-msg').textContent = err.message || '口令验证失败';
+          }
+          return false;
+        });
+      }
+
+      function switchView(viewName) {
+        state.activeView = viewName;
+        var titleMap = {
+          overview: '实时概览',
+          plugins: '插件控制台',
+          acl: '权限中心',
+          data: '数据检视器'
+        };
+        $('topbar-view-title').textContent = titleMap[viewName] || '管理后台';
+        document.querySelectorAll('.view-panel').forEach(function (el) {
+          el.classList.toggle('active', el.id === 'view-' + viewName);
+        });
+        document.querySelectorAll('.nav-btn').forEach(function (btn) {
+          btn.classList.toggle('active', btn.getAttribute('data-view') === viewName);
+        });
+        if (viewName === 'data' && state.selectedOwner) {
+          loadNamespaces();
+        }
+      }
+
+      function renderStatus() {
+        var st = state.status;
+        if (!st) return;
+        var mode = String(st.security_mode || 'open').toLowerCase();
+        state.securityMode = mode;
+        var modeLabel = mode === 'strict' ? 'Strict' : 'Open';
+        var modeTone = mode === 'strict' ? 'warn' : 'ok';
+        setBadge($('sidebar-mode-badge'), modeLabel, modeTone);
+        setBadge($('topbar-mode-pill'), '模式: ' + modeLabel, modeTone);
+        setBadge($('ov-mode-badge'), modeLabel + ' 模式', modeTone);
+
+        var rs = st.room_state || {};
+        var ri = st.room_info || {};
+        var isConnected = Boolean(rs.connected);
+        var isLive = Boolean(rs.is_live) || Number(ri.live_status) === 1;
+        var roomId = rs.room_id || ri.room_id || '-';
+        var title = rs.room_title || ri.title || '暂无直播间标题';
+        var uname = rs.room_uname || ri.uname || '未知主播';
+
+        if (!isConnected) {
+          setBadge($('topbar-room-pill'), '房间未连接', 'danger');
+          setBadge($('ov-live-badge'), '未连接', 'danger');
+        } else if (isLive) {
+          setBadge($('topbar-room-pill'), '直播中 · ' + roomId, 'ok');
+          setBadge($('ov-live-badge'), '直播中', 'ok');
+        } else {
+          setBadge($('topbar-room-pill'), '已连接(未开播) · ' + roomId, 'accent');
+          setBadge($('ov-live-badge'), '未开播', 'accent');
+        }
+        $('ov-room-title').textContent = title;
+        var areaText = [ri.parent_area_name, ri.area_name].filter(Boolean).join(' / ');
+        $('ov-room-meta').textContent = '主播：' + uname + ' · 房间号：' + roomId + (areaText ? ' · 分区：' + areaText : '');
+
+        var rec = st.recording || {};
+        if (rec.active) {
+          setBadge($('ov-rec-badge'), '录制中', 'ok');
+          $('ov-rec-detail').textContent = rec.record_raw ? '开启原始数据包落盘 (record_raw)' : '录制已激活';
+        } else if (rec.enabled) {
+          setBadge($('ov-rec-badge'), '待命', 'accent');
+          $('ov-rec-detail').textContent = '已启用录制等待数据写入';
+        } else {
+          setBadge($('ov-rec-badge'), '未启用', '');
+          $('ov-rec-detail').textContent = '配置未开启录制功能';
+        }
+        $('ov-rec-file').textContent = rec.current_file || '无活跃录制文件';
+
+        $('ov-plugin-summary').textContent = '已发现活跃插件：' + Number(st.plugin_count || 0) + ' 个';
+        var auth = st.auth || {};
+        if (auth.is_login) {
+          $('ov-auth-summary').textContent = 'B站已登录：' + (auth.uname || '-') + ' (UID ' + (auth.mid || '-') + ')';
+          setBadge($('danmaku-login-hint'), '已登录可发送', 'ok');
+          $('danmaku-submit').disabled = false;
+          $('danmaku-input').placeholder = '输入弹幕内容，回车发送…';
+        } else {
+          $('ov-auth-summary').textContent = 'B站未登录（只读监听模式）';
+          setBadge($('danmaku-login-hint'), '未登录', 'warn');
+          $('danmaku-submit').disabled = true;
+          $('danmaku-input').placeholder = '请先登录 B 站账号后再发送弹幕';
+        }
+      }
+
+      function renderQrSvg(container, svgMarkup) {
+        container.replaceChildren();
+        if (!svgMarkup) {
+          var empty = document.createElement('span');
+          empty.className = 'muted';
+          empty.textContent = '无二维码';
+          container.appendChild(empty);
+          return;
+        }
+        try {
+          var parser = new window.DOMParser();
+          var doc = parser.parseFromString(svgMarkup, 'image/svg+xml');
+          var svgEl = doc && doc.documentElement;
+          if (svgEl && svgEl.tagName && svgEl.tagName.toLowerCase() === 'svg') {
+            container.appendChild(document.importNode(svgEl, true));
+            return;
+          }
+        } catch (_) {}
+        var fallback = document.createElement('span');
+        fallback.className = 'muted';
+        fallback.textContent = 'SVG 渲染失败';
+        container.appendChild(fallback);
+      }
+
+      function renderLanPanel() {
+        var info = state.lanInfo;
+        var tabs = $('lan-ip-tabs');
+        tabs.replaceChildren();
+        if (!info) return;
+        var list = Array.isArray(info.urls) ? info.urls : [];
+        if (list.length === 0) {
+          $('lan-hint').textContent = info.local_only
+            ? '当前监听仅限本机访问，未检测到可用私网 IPv4 地址。'
+            : '未检测到局域网私网 IP，使用本机回环地址。';
+          $('lan-url-text').textContent = info.local_url || window.location.origin + '/admin';
+          $('lan-strict-note').textContent = info.security_mode === 'strict'
+            ? 'Strict 模式下可手动附加 #t=<admin_token>'
+            : 'Open 模式下局域网私网 IP 可直接访问。';
+          renderQrSvg($('lan-qr-box'), '');
+          return;
+        }
+        if (state.selectedLanIndex >= list.length) {
+          state.selectedLanIndex = 0;
+        }
+        $('lan-hint').textContent = '检测到 ' + list.length + ' 个可用局域网私网入口，点击切换：';
+        list.forEach(function (item, idx) {
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'sm' + (idx === state.selectedLanIndex ? ' primary' : '');
+          btn.textContent = item.ip;
+          btn.addEventListener('click', function () {
+            state.selectedLanIndex = idx;
+            renderLanPanel();
+          });
+          tabs.appendChild(btn);
+        });
+        var active = list[state.selectedLanIndex];
+        $('lan-url-text').textContent = active.url;
+        $('lan-strict-note').textContent = info.security_mode === 'strict'
+          ? 'Strict 模式：扫码链接已自动附带 #t= 口令，请勿公开截图。'
+          : 'Open 模式：局域网设备扫码即可直接免密管理。';
+        renderQrSvg($('lan-qr-box'), active.qr_svg);
+      }
+
+      function buildObsPluginUrl(plugin) {
+        var routeName = plugin.plugin_name || plugin.plugin_id || '';
+        return new URL('/' + encodeURIComponent(routeName) + '/plugin.html', window.location.origin).href;
+      }
+
+      function copyText(text, label) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            showToast('已复制' + (label || '内容'), 'ok');
+          }).catch(function () {
+            fallbackCopy(text, label);
+          });
+        } else {
+          fallbackCopy(text, label);
+        }
+      }
+
+      function fallbackCopy(text, label) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          showToast('已复制' + (label || '内容'), 'ok');
+        } catch (_) {
+          showToast('复制失败，请手动复制', 'warn');
+        }
+        document.body.removeChild(ta);
+      }
+
+      function openPluginDrawer(plugin) {
+        var routeName = plugin.plugin_name || plugin.plugin_id || '';
+        var manageUrl = plugin.manage_route || ('/' + encodeURIComponent(routeName) + '/m');
+        $('drawer-title').textContent = (plugin.name || routeName) + ' · 控制面板';
+        $('drawer-subtitle').textContent = manageUrl + ' (' + (plugin.namedomain || routeName) + ')';
+        $('drawer-external-link').setAttribute('href', manageUrl);
+        $('drawer-iframe').setAttribute('src', manageUrl);
+        $('plugin-drawer').classList.add('open');
+        $('plugin-drawer').setAttribute('aria-hidden', 'false');
+      }
+
+      function closePluginDrawer() {
+        $('plugin-drawer').classList.remove('open');
+        $('plugin-drawer').setAttribute('aria-hidden', 'true');
+        $('drawer-iframe').setAttribute('src', 'about:blank');
+      }
+
+      function renderPlugins() {
+        var grid = $('plugins-grid');
+        grid.replaceChildren();
+        var q = String($('plugin-search').value || '').trim().toLowerCase();
+        $('nav-plugin-count').textContent = String(state.plugins.length);
+
+        var filtered = state.plugins.filter(function (p) {
+          if (!q) return true;
+          return [p.plugin_id, p.plugin_name, p.name, p.description]
+            .filter(Boolean)
+            .some(function (s) { return String(s).toLowerCase().indexOf(q) !== -1; });
+        });
+
+        if (filtered.length === 0) {
+          var empty = document.createElement('div');
+          empty.className = 'empty-state';
+          empty.textContent = q ? '没有匹配的插件' : '未发现插件';
+          grid.appendChild(empty);
+          return;
+        }
+
+        filtered.forEach(function (plugin) {
+          var card = document.createElement('div');
+          card.className = 'card stack';
+
+          var top = document.createElement('div');
+          top.className = 'between';
+          var titleWrap = document.createElement('div');
+          var title = document.createElement('strong');
+          title.textContent = plugin.name || plugin.plugin_id;
+          var sub = document.createElement('div');
+          sub.className = 'muted mono';
+          sub.textContent = plugin.plugin_id + ' · v' + (plugin.version || '1.0.0');
+          titleWrap.appendChild(title);
+          titleWrap.appendChild(sub);
+
+          var badges = document.createElement('div');
+          badges.className = 'row';
+          var originBadge = document.createElement('span');
+          originBadge.className = 'badge' + (plugin.is_builtin ? '' : ' accent');
+          originBadge.textContent = plugin.is_builtin ? '内置' : '外部';
+          var manageBadge = document.createElement('span');
+          manageBadge.className = 'badge' + (plugin.has_custom_manage ? ' ok' : '');
+          manageBadge.textContent = plugin.has_custom_manage ? '自定义管理页' : '内置兜底';
+          badges.appendChild(originBadge);
+          badges.appendChild(manageBadge);
+
+          top.appendChild(titleWrap);
+          top.appendChild(badges);
+          card.appendChild(top);
+
+          var desc = document.createElement('div');
+          desc.className = 'muted';
+          desc.textContent = plugin.description || '无插件描述。';
+          card.appendChild(desc);
+
+          var metaRow = document.createElement('div');
+          metaRow.className = 'row muted';
+          var obsText = plugin.obs && plugin.obs.width && plugin.obs.height
+            ? ('建议 OBS: ' + plugin.obs.width + '×' + plugin.obs.height)
+            : 'OBS 源: ' + plugin.plugin_id + '/plugin.html';
+          var topicCount = Array.isArray(plugin.topics) ? plugin.topics.length : 0;
+          metaRow.textContent = obsText + ' · Topics: ' + topicCount;
+          card.appendChild(metaRow);
+
+          var actions = document.createElement('div');
+          actions.className = 'row';
+
+          var btnManage = document.createElement('button');
+          btnManage.type = 'button';
+          btnManage.className = 'primary sm';
+          btnManage.textContent = '打开控制面板';
+          btnManage.addEventListener('click', function () {
+            openPluginDrawer(plugin);
+          });
+
+          var obsUrl = buildObsPluginUrl(plugin);
+          var btnCopy = document.createElement('button');
+          btnCopy.type = 'button';
+          btnCopy.className = 'sm';
+          btnCopy.textContent = '复制 OBS URL';
+          btnCopy.addEventListener('click', function () {
+            copyText(obsUrl, 'OBS 浏览器源 URL');
+          });
+
+          var linkPreview = document.createElement('a');
+          linkPreview.className = 'btn-link sm';
+          linkPreview.href = '/' + encodeURIComponent(plugin.plugin_name || plugin.plugin_id) + '/plugin.html';
+          linkPreview.target = '_blank';
+          linkPreview.rel = 'noopener';
+          linkPreview.textContent = '预览挂件';
+
+          var btnInspect = document.createElement('button');
+          btnInspect.type = 'button';
+          btnInspect.className = 'sm';
+          btnInspect.textContent = '查数据';
+          btnInspect.addEventListener('click', function () {
+            var ownerDomain = plugin.namedomain || plugin.plugin_id;
+            state.selectedOwner = ownerDomain;
+            state.selectedNamespace = '';
+            $('data-owner').value = ownerDomain;
+            updateTopicSuggestions();
+            switchView('data');
+          });
+
+          actions.appendChild(btnManage);
+          actions.appendChild(btnCopy);
+          actions.appendChild(linkPreview);
+          actions.appendChild(btnInspect);
+          card.appendChild(actions);
+
+          grid.appendChild(card);
+        });
+      }
+
+      function syncDataOwnerOptions() {
+        var select = $('data-owner');
+        var owners = [];
+        var seen = Object.create(null);
+        state.plugins.forEach(function (p) {
+          var key = p.namedomain;
+          if (key && !seen[key]) {
+            seen[key] = true;
+            owners.push({
+              id: key,
+              label: (p.name || p.plugin_name) + ' (' + p.plugin_name + ')'
+            });
+          }
+        });
+
+        var current = state.selectedOwner || select.value;
+        select.replaceChildren();
+        owners.forEach(function (o) {
+          var opt = document.createElement('option');
+          opt.value = o.id;
+          opt.textContent = o.label;
+          select.appendChild(opt);
+        });
+        if (current && seen[current]) {
+          select.value = current;
+          state.selectedOwner = current;
+        } else if (owners.length > 0) {
+          select.value = owners[0].id;
+          state.selectedOwner = owners[0].id;
+        } else {
+          state.selectedOwner = '';
+        }
+        updateTopicSuggestions();
+      }
+
+      function updateTopicSuggestions() {
+        var dl = $('topic-suggestions');
+        dl.replaceChildren();
+        var plugin = state.plugins.find(function (p) {
+          return p.namedomain === state.selectedOwner;
+        });
+        if (!plugin || !Array.isArray(plugin.topics)) return;
+        plugin.topics.forEach(function (t) {
+          var topicName = t.name || t.topic || '';
+          if (!topicName) return;
+          var opt = document.createElement('option');
+          opt.value = topicName;
+          if (t.description) {
+            opt.textContent = topicName + ' - ' + t.description;
+          }
+          dl.appendChild(opt);
+        });
+      }
+
+      function formatDisplay(display, fallback) {
+        if (display && typeof display === 'object') {
+          return display.name || display.plugin_name || fallback || '-';
+        }
+        return display || fallback || '-';
+      }
+
+      function formatStatusBadge(status) {
+        switch (status) {
+          case 'pending': return { label: 'Pending（待审批）', tone: 'warn' };
+          case 'auto_granted': return { label: 'AutoGranted（Open自动放行）', tone: 'accent' };
+          case 'granted': return { label: 'Granted（已明确授权）', tone: 'ok' };
+          case 'denied': return { label: 'Denied（已拒绝）', tone: 'danger' };
+          default: return { label: String(status || '-'), tone: '' };
+        }
+      }
+
+      function sendAdminAclPut(owner, requester, resource, level, note) {
+        return apiFetch('/api/v1/admin/acl', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            owner: owner,
+            requester: requester,
+            resource: resource,
+            level: level,
+            note: note || null
+          })
+        }).then(function () {
+          showToast('权限规则已更新', 'ok');
+          return refreshAcl();
+        }).catch(function (err) {
+          showToast('更新权限失败: ' + err.message, 'danger');
+        });
+      }
+
+      function sendAdminAclDelete(owner, requester, resource) {
+        var qs = new URLSearchParams({
+          owner: owner,
+          requester: requester,
+          resource: resource
+        });
+        return apiFetch('/api/v1/admin/acl?' + qs.toString(), {
+          method: 'DELETE'
+        }).then(function () {
+          showToast('已删除权限规则', 'ok');
+          return refreshAcl();
+        }).catch(function (err) {
+          showToast('删除规则失败: ' + err.message, 'danger');
+        });
+      }
+
+      function buildAclItemNode(rec) {
+        var box = document.createElement('div');
+        var reqLevel = rec.requested_level || rec.level || 'read';
+        var isUrgentWrite = rec.status === 'pending' && (reqLevel === 'write' || reqLevel === 'publish');
+        box.className = 'acl-item' + (isUrgentWrite ? ' urgent' : '');
+
+        var head = document.createElement('div');
+        head.className = 'between';
+
+        var title = document.createElement('div');
+        title.className = 'row';
+        var flow = document.createElement('strong');
+        flow.textContent = formatDisplay(rec.requester_display, rec.requester)
+          + '  ->  '
+          + formatDisplay(rec.owner_display, rec.owner);
+        var resPill = document.createElement('span');
+        resPill.className = 'badge mono';
+        resPill.textContent = rec.resource;
+        var stInfo = formatStatusBadge(rec.status);
+        var stPill = document.createElement('span');
+        stPill.className = 'badge ' + stInfo.tone;
+        stPill.textContent = stInfo.label;
+        var lvlPill = document.createElement('span');
+        lvlPill.className = 'badge' + (isUrgentWrite ? ' danger' : '');
+        lvlPill.textContent = rec.status === 'pending' ? ('申请级别: ' + reqLevel) : ('当前级别: ' + rec.level);
+
+        title.appendChild(flow);
+        title.appendChild(resPill);
+        title.appendChild(stPill);
+        title.appendChild(lvlPill);
+        head.appendChild(title);
+
+        if (rec.updated_at) {
+          var ts = document.createElement('span');
+          ts.className = 'muted';
+          ts.textContent = new Date(Number(rec.updated_at)).toLocaleString();
+          head.appendChild(ts);
+        }
+        box.appendChild(head);
+
+        var detailParts = [];
+        if (rec.reason) detailParts.push('请求原因：' + rec.reason);
+        if (rec.note) detailParts.push('备注：' + rec.note);
+        if (rec.status === 'auto_granted' && state.securityMode === 'strict') {
+          detailParts.push('提示：Strict 模式下 AutoGranted 不会自动生效，如需放行请点击“转为明确授权”。');
+        }
+        if (detailParts.length > 0) {
+          var detail = document.createElement('div');
+          detail.className = 'muted';
+          detail.textContent = detailParts.join(' · ');
+          box.appendChild(detail);
+        }
+
+        var actions = document.createElement('div');
+        actions.className = 'row';
+
+        if (rec.status === 'pending') {
+          var btnApprove = document.createElement('button');
+          btnApprove.type = 'button';
+          btnApprove.className = 'ok sm';
+          btnApprove.textContent = '批准放行 (' + reqLevel + ')';
+          btnApprove.addEventListener('click', function () {
+            sendAdminAclPut(rec.owner, rec.requester, rec.resource, reqLevel, rec.note);
+          });
+
+          var btnDeny = document.createElement('button');
+          btnDeny.type = 'button';
+          btnDeny.className = 'danger sm';
+          btnDeny.textContent = '拒绝';
+          btnDeny.addEventListener('click', function () {
+            sendAdminAclPut(rec.owner, rec.requester, rec.resource, 'none', rec.note);
+          });
+          actions.appendChild(btnApprove);
+          actions.appendChild(btnDeny);
+        } else if (rec.status === 'auto_granted') {
+          var btnPromote = document.createElement('button');
+          btnPromote.type = 'button';
+          btnPromote.className = 'ok sm';
+          btnPromote.textContent = '转为明确授权 (' + rec.level + ')';
+          btnPromote.addEventListener('click', function () {
+            sendAdminAclPut(rec.owner, rec.requester, rec.resource, rec.level, rec.note);
+          });
+
+          var btnRevokeAuto = document.createElement('button');
+          btnRevokeAuto.type = 'button';
+          btnRevokeAuto.className = 'danger sm';
+          btnRevokeAuto.textContent = '一键撤销并拒绝';
+          btnRevokeAuto.addEventListener('click', function () {
+            sendAdminAclPut(rec.owner, rec.requester, rec.resource, 'none', rec.note);
+          });
+          actions.appendChild(btnPromote);
+          actions.appendChild(btnRevokeAuto);
+        } else if (rec.status === 'granted') {
+          var btnRevoke = document.createElement('button');
+          btnRevoke.type = 'button';
+          btnRevoke.className = 'danger sm';
+          btnRevoke.textContent = '撤销授权 (Denied)';
+          btnRevoke.addEventListener('click', function () {
+            sendAdminAclPut(rec.owner, rec.requester, rec.resource, 'none', rec.note);
+          });
+          actions.appendChild(btnRevoke);
+        } else if (rec.status === 'denied') {
+          var isTopic = String(rec.resource || '').startsWith('topic:');
+          var levelSel = document.createElement('select');
+          (isTopic ? ['subscribe'] : ['read', 'write']).forEach(function (optVal) {
+            var opt = document.createElement('option');
+            opt.value = optVal;
+            opt.textContent = optVal;
+            levelSel.appendChild(opt);
+          });
+          if (rec.requested_level && rec.requested_level !== 'none') {
+            levelSel.value = rec.requested_level;
+          }
+          var btnRestore = document.createElement('button');
+          btnRestore.type = 'button';
+          btnRestore.className = 'ok sm';
+          btnRestore.textContent = '重新放行';
+          btnRestore.addEventListener('click', function () {
+            sendAdminAclPut(rec.owner, rec.requester, rec.resource, levelSel.value, rec.note);
+          });
+          actions.appendChild(levelSel);
+          actions.appendChild(btnRestore);
+        }
+
+        var btnDel = document.createElement('button');
+        btnDel.type = 'button';
+        btnDel.className = 'sm';
+        btnDel.textContent = '删除规则';
+        btnDel.addEventListener('click', function () {
+          sendAdminAclDelete(rec.owner, rec.requester, rec.resource);
+        });
+        actions.appendChild(btnDel);
+
+        box.appendChild(actions);
+        return box;
+      }
+
+      function renderAcl() {
+        var filter = $('acl-filter').value || 'all';
+        var all = state.aclRecords || [];
+        var pending = all.filter(function (r) { return r.status === 'pending'; });
+        var others = all.filter(function (r) {
+          if (r.status === 'pending') return false;
+          if (filter === 'all') return true;
+          if (filter === 'pending') return false;
+          return r.status === filter;
+        });
+
+        ['desktop-pending-pill', 'mobile-pending-pill'].forEach(function (id) {
+          var pill = $(id);
+          if (!pill) return;
+          pill.textContent = String(pending.length);
+          pill.classList.toggle('hidden', pending.length === 0);
+        });
+
+        var banner = $('global-pending-banner');
+        if (pending.length > 0 && state.activeView !== 'acl') {
+          $('global-pending-text').textContent = '共有 ' + pending.length + ' 条跨插件权限请求等待审批';
+          banner.style.display = 'block';
+        } else {
+          banner.style.display = 'none';
+        }
+
+        $('acl-pending-count-badge').textContent = pending.length + ' 条待处理';
+        var pendingList = $('acl-pending-list');
+        pendingList.replaceChildren();
+        if (filter !== 'all' && filter !== 'pending') {
+          $('acl-pending-section').style.display = 'none';
+        } else {
+          $('acl-pending-section').style.display = 'flex';
+          if (pending.length === 0) {
+            var emptyP = document.createElement('div');
+            emptyP.className = 'empty-state';
+            emptyP.textContent = '当前没有待审批的跨插件权限请求。';
+            pendingList.appendChild(emptyP);
+          } else {
+            pending.forEach(function (rec) {
+              pendingList.appendChild(buildAclItemNode(rec));
+            });
+          }
+        }
+
+        var otherList = $('acl-other-list');
+        otherList.replaceChildren();
+        $('acl-other-count-badge').textContent = others.length + ' 条记录';
+        if (others.length === 0) {
+          var emptyO = document.createElement('div');
+          emptyO.className = 'empty-state';
+          emptyO.textContent = filter === 'pending' ? '当前仅查看待审批请求。' : '暂无已生效或已拒绝规则。';
+          otherList.appendChild(emptyO);
+        } else {
+          others.forEach(function (rec) {
+            otherList.appendChild(buildAclItemNode(rec));
+          });
+        }
+      }
+
+      function inferEntryType(value) {
+        if (typeof value === 'boolean') return 'bool';
+        if (typeof value === 'number') return 'number';
+        if (typeof value === 'string') return 'string';
+        if (Array.isArray(value)) return 'list';
+        return 'struct';
+      }
+
+      function renderDataTable() {
+        var tbody = $('data-tbody');
+        tbody.replaceChildren();
+        var ns = state.selectedNamespace || '(未选择)';
+        $('data-scope-label').textContent = (state.selectedOwner || '-') + ' / ' + state.selectedStore + ' / ' + ns;
+
+        var entries = state.dataEntries || {};
+        var keys = Object.keys(entries).sort();
+        $('data-entry-count').textContent = keys.length + ' 项';
+
+        if (keys.length === 0) {
+          var tr = document.createElement('tr');
+          var td = document.createElement('td');
+          td.colSpan = 4;
+          td.className = 'muted';
+          td.textContent = state.selectedNamespace ? '当前命名空间下暂无键值。' : '请选择或输入命名空间。';
+          tr.appendChild(td);
+          tbody.appendChild(tr);
+          return;
+        }
+
+        keys.forEach(function (key) {
+          var entry = entries[key] || {};
+          var tr = document.createElement('tr');
+
+          var tdKey = document.createElement('td');
+          tdKey.className = 'mono';
+          tdKey.textContent = key;
+
+          var tdType = document.createElement('td');
+          var tBadge = document.createElement('span');
+          tBadge.className = 'badge';
+          tBadge.textContent = entry.type || inferEntryType(entry.value);
+          tdType.appendChild(tBadge);
+
+          var tdVal = document.createElement('td');
+          var pre = document.createElement('pre');
+          pre.className = 'val-preview';
+          if (typeof entry.value === 'string') {
+            pre.textContent = entry.value;
+          } else {
+            try {
+              pre.textContent = JSON.stringify(entry.value, null, 2);
+            } catch (_) {
+              pre.textContent = String(entry.value);
+            }
+          }
+          tdVal.appendChild(pre);
+
+          var tdAct = document.createElement('td');
+          var actRow = document.createElement('div');
+          actRow.className = 'row';
+
+          var btnEdit = document.createElement('button');
+          btnEdit.type = 'button';
+          btnEdit.className = 'sm';
+          btnEdit.textContent = '编辑';
+          btnEdit.addEventListener('click', function () {
+            $('kv-ns-input').value = state.selectedNamespace;
+            $('kv-key-input').value = key;
+            $('kv-type-select').value = 'auto';
+            try {
+              $('kv-value-input').value = JSON.stringify(entry.value, null, 2);
+            } catch (_) {
+              $('kv-value-input').value = String(entry.value);
+            }
+            $('kv-meta-input').value = '';
+            $('kv-form-status').textContent = '已载入键 "' + key + '" 到编辑器（默认 auto 仅更新值）';
+          });
+
+          var btnDel = document.createElement('button');
+          btnDel.type = 'button';
+          btnDel.className = 'danger sm';
+          btnDel.textContent = '删除';
+          btnDel.addEventListener('click', function () {
+            deleteDataKey(key);
+          });
+
+          actRow.appendChild(btnEdit);
+          actRow.appendChild(btnDel);
+          tdAct.appendChild(actRow);
+
+          tr.appendChild(tdKey);
+          tr.appendChild(tdType);
+          tr.appendChild(tdVal);
+          tr.appendChild(tdAct);
+          tbody.appendChild(tr);
+        });
+      }
+
+      function loadNamespaces() {
+        var owner = $('data-owner').value;
+        var store = $('data-store').value || 'persist';
+        if (!owner) return Promise.resolve();
+        state.selectedOwner = owner;
+        state.selectedStore = store;
+        var path = '/api/v1/admin/data/' + encodeURIComponent(store) + '/' + encodeURIComponent(owner) + '/namespaces';
+        return apiFetch(path).then(function (data) {
+          var list = Array.isArray(data && data.namespaces) ? data.namespaces : [];
+          state.dataNamespaces = list;
+          var nsSelect = $('data-namespace-select');
+          var prev = state.selectedNamespace || nsSelect.value;
+          nsSelect.replaceChildren();
+          list.forEach(function (ns) {
+            var opt = document.createElement('option');
+            opt.value = ns;
+            opt.textContent = ns;
+            nsSelect.appendChild(opt);
+          });
+          if (prev && list.indexOf(prev) !== -1) {
+            nsSelect.value = prev;
+            state.selectedNamespace = prev;
+          } else if (list.length > 0) {
+            nsSelect.value = list[0];
+            state.selectedNamespace = list[0];
+          } else {
+            state.selectedNamespace = '';
+          }
+          $('kv-ns-input').value = state.selectedNamespace;
+          if (state.selectedNamespace) {
+            return loadNamespaceEntries(state.selectedNamespace);
+          }
+          state.dataEntries = {};
+          renderDataTable();
+        }).catch(function (err) {
+          if (err.status !== 401) {
+            showToast('读取命名空间失败: ' + err.message, 'danger');
+          }
+        });
+      }
+
+      function loadNamespaceEntries(ns) {
+        var targetNs = String(ns || '').trim();
+        if (!state.selectedOwner || !targetNs) {
+          state.dataEntries = {};
+          renderDataTable();
+          return Promise.resolve();
+        }
+        state.selectedNamespace = targetNs;
+        $('kv-ns-input').value = targetNs;
+        var path = '/api/v1/admin/data/'
+          + encodeURIComponent(state.selectedStore) + '/'
+          + encodeURIComponent(state.selectedOwner) + '/ns/'
+          + encodeURIComponent(targetNs);
+        return apiFetch(path).then(function (data) {
+          state.dataEntries = (data && data.entries) || {};
+          renderDataTable();
+        }).catch(function (err) {
+          if (err.status !== 401) {
+            showToast('读取键值失败: ' + err.message, 'danger');
+          }
+        });
+      }
+
+      function deleteDataKey(key) {
+        if (!state.selectedOwner || !state.selectedNamespace) return;
+        var path = '/api/v1/admin/data/'
+          + encodeURIComponent(state.selectedStore) + '/'
+          + encodeURIComponent(state.selectedOwner) + '/ns/'
+          + encodeURIComponent(state.selectedNamespace) + '/keys/'
+          + encodeURIComponent(key);
+        apiFetch(path, { method: 'DELETE' }).then(function () {
+          showToast('已删除键 ' + key, 'ok');
+          return loadNamespaceEntries(state.selectedNamespace);
+        }).catch(function (err) {
+          showToast('删除键失败: ' + err.message, 'danger');
+        });
+      }
+
+      function pushFeedItem(ev, tsMs) {
+        state.feedItems.unshift({
+          ev: ev || {},
+          ts: tsMs || Date.now()
+        });
+        if (state.feedItems.length > 140) {
+          state.feedItems.length = 140;
+        }
+        if (!state.feedPaused) {
+          renderFeed();
+        }
+      }
+
+      function matchFeedFilter(kind, filter) {
+        if (filter === 'all') return true;
+        if (filter === 'danmaku') return kind === 'chat' || kind === 'danmaku';
+        if (filter === 'paid') return kind === 'superchat' || kind === 'guard';
+        if (filter === 'gift') return kind === 'gift' || kind === 'enter' || kind === 'interact' || kind === 'like';
+        return true;
+      }
+
+      function renderFeed() {
+        var box = $('feed-list');
+        box.replaceChildren();
+        var items = state.feedItems.filter(function (item) {
+          return matchFeedFilter(String(item.ev.kind || '').toLowerCase(), state.feedFilter);
+        });
+        if (items.length === 0) {
+          var empty = document.createElement('div');
+          empty.className = 'empty-state';
+          empty.textContent = state.wsConnected ? '已连接实时流，等待直播间事件…' : '等待 WebSocket 事件…';
+          box.appendChild(empty);
+          return;
+        }
+        items.forEach(function (item) {
+          var ev = item.ev;
+          var kind = String(ev.kind || 'event').toLowerCase();
+          var row = document.createElement('div');
+          row.className = 'feed-item kind-' + kind;
+
+          var top = document.createElement('div');
+          top.className = 'between';
+          var left = document.createElement('div');
+          left.className = 'row';
+          var kBadge = document.createElement('span');
+          kBadge.className = 'badge';
+          kBadge.textContent = kind.toUpperCase();
+          var uname = document.createElement('strong');
+          uname.textContent = ev.uname || (Array.isArray(ev.sample_users) ? ev.sample_users.join('、') : '系统');
+          left.appendChild(kBadge);
+          left.appendChild(uname);
+
+          if (ev.price && Number(ev.price) > 0) {
+            var pBadge = document.createElement('span');
+            pBadge.className = 'badge warn';
+            var yuan = Number(ev.price) / 1000;
+            var yuanStr = yuan % 1 === 0
+              ? yuan.toFixed(0)
+              : yuan.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+            pBadge.textContent = '¥' + yuanStr;
+            left.appendChild(pBadge);
+          }
+          if (ev.guard_level) {
+            var gBadge = document.createElement('span');
+            gBadge.className = 'badge accent';
+            gBadge.textContent = '舰长Lv.' + ev.guard_level;
+            left.appendChild(gBadge);
+          }
+          if (ev.count && Number(ev.count) > 1) {
+            var cBadge = document.createElement('span');
+            cBadge.className = 'badge';
+            cBadge.textContent = '×' + ev.count;
+            left.appendChild(cBadge);
+          }
+
+          var ts = document.createElement('span');
+          ts.className = 'muted';
+          ts.textContent = new Date(item.ts).toLocaleTimeString();
+
+          top.appendChild(left);
+          top.appendChild(ts);
+          row.appendChild(top);
+
+          var bodyText = ev.content || (ev.num ? ('数量 ×' + ev.num) : '');
+          if (bodyText) {
+            var contentEl = document.createElement('div');
+            contentEl.textContent = bodyText;
+            row.appendChild(contentEl);
+          }
+          box.appendChild(row);
+        });
+      }
+
+      function updateConnSummary() {
+        var sseText = state.sseConnected ? 'SSE: 已连接' : 'SSE: 断开';
+        var wsText = state.wsConnected ? 'WS: 已连接' : 'WS: 断开';
+        setBadge($('sse-badge-side'), sseText, state.sseConnected ? 'ok' : 'warn');
+        setBadge($('ws-badge-side'), wsText, state.wsConnected ? 'ok' : 'warn');
+        $('topbar-conn-summary').textContent = sseText + ' · ' + wsText;
+      }
+
+      function connectAdminSse() {
+        if (state.sse) {
+          try { state.sse.close(); } catch (_) {}
+          state.sse = null;
+        }
+        var es = new window.EventSource('/api/v1/events?mode=admin');
+        state.sse = es;
+
+        es.addEventListener('connected', function () {
+          state.sseConnected = true;
+          updateConnSummary();
+        });
+
+        es.addEventListener('acl.changed', function (evt) {
+          try {
+            var payload = JSON.parse(evt.data || '{}');
+            if (payload && payload.status === 'pending') {
+              showToast('收到新权限审批请求: ' + (payload.requester || '') + ' -> ' + (payload.resource || ''), 'warn');
+            } else if (payload && payload.status === 'auto_granted') {
+              showToast('Open 自动放行读/订阅: ' + (payload.requester || '') + ' -> ' + (payload.resource || ''), '');
+            }
+          } catch (_) {}
+          refreshAcl();
+        });
+
+        es.addEventListener('data.changed', function (evt) {
+          try {
+            var payload = JSON.parse(evt.data || '{}');
+            if (payload && payload.owner === state.selectedOwner && payload.store === state.selectedStore) {
+              if (payload.namespace && payload.namespace === state.selectedNamespace) {
+                loadNamespaceEntries(state.selectedNamespace);
+              } else {
+                loadNamespaces();
+              }
+            }
+          } catch (_) {}
+        });
+
+        es.addEventListener('plugins.changed', function () {
+          showToast('插件目录发生热重载更新', 'accent');
+          refreshPlugins();
+          refreshStatus();
+        });
+
+        es.onerror = function () {
+          state.sseConnected = false;
+          updateConnSummary();
+        };
+      }
+
+      function scheduleWsReconnect() {
+        if (state.wsTimer) return;
+        var wait = state.wsRetryMs;
+        state.wsRetryMs = Math.min(10000, Math.round(state.wsRetryMs * 1.6));
+        state.wsTimer = window.setTimeout(function () {
+          state.wsTimer = null;
+          connectLiveWs();
+        }, wait);
+      }
+
+      function connectLiveWs() {
+        if (state.ws) {
+          try { state.ws.close(); } catch (_) {}
+          state.ws = null;
+        }
+        var proto = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        var ws = new window.WebSocket(proto + window.location.host + '/ws/event');
+        state.ws = ws;
+
+        ws.onopen = function () {
+          state.wsConnected = true;
+          state.wsRetryMs = 1500;
+          updateConnSummary();
+          renderFeed();
+        };
+
+        ws.onmessage = function (evt) {
+          var frame = null;
+          try { frame = JSON.parse(evt.data || '{}'); } catch (_) { return; }
+          if (!frame || !frame.type) return;
+          if (frame.type === 'RoomInfo') {
+            refreshStatus();
+            return;
+          }
+          if (frame.type === 'EventBatch' && frame.data && Array.isArray(frame.data.events)) {
+            var ts = frame.data.timestamp || Date.now();
+            frame.data.events.forEach(function (ev) {
+              pushFeedItem(ev, ts);
+            });
+          }
+        };
+
+        ws.onerror = function () {
+          state.wsConnected = false;
+          updateConnSummary();
+        };
+
+        ws.onclose = function () {
+          state.wsConnected = false;
+          updateConnSummary();
+          scheduleWsReconnect();
+        };
+      }
+
+      function refreshStatus() {
+        return apiFetch('/api/v1/system/status').then(function (data) {
+          state.status = data;
+          renderStatus();
+        }).catch(function (err) {
+          showToast('读取系统状态失败: ' + err.message, 'danger');
+        });
+      }
+
+      function refreshLanUrls() {
+        return apiFetch('/api/v1/system/lan-urls?path=' + encodeURIComponent('/admin')).then(function (data) {
+          state.lanInfo = data;
+          renderLanPanel();
+        }).catch(function () {});
+      }
+
+      function refreshPlugins() {
+        return apiFetch('/api/v1/plugins').then(function (data) {
+          state.plugins = Array.isArray(data && data.plugins) ? data.plugins : [];
+          renderPlugins();
+          syncDataOwnerOptions();
+        }).catch(function (err) {
+          showToast('读取插件列表失败: ' + err.message, 'danger');
+        });
+      }
+
+      function refreshAcl() {
+        return apiFetch('/api/v1/acl').then(function (data) {
+          setAuthLocked(false);
+          if (!state.sse) {
+            connectAdminSse();
+          }
+          state.aclRecords = Array.isArray(data && data.records) ? data.records : [];
+          if (data && data.security_mode) {
+            state.securityMode = data.security_mode;
+          }
+          renderAcl();
+          syncDataOwnerOptions();
+        }).catch(function (err) {
+          if (err.status !== 401) {
+            showToast('读取权限列表失败: ' + err.message, 'danger');
+          }
+        });
+      }
+
+      function refreshProtectedData() {
+        return Promise.all([
+          refreshStatus(),
+          refreshLanUrls(),
+          refreshPlugins(),
+          refreshAcl()
+        ]).then(function () {
+          if (state.adminUnlocked && state.selectedOwner) {
+            return loadNamespaces();
+          }
+        });
+      }
+
+      function parseKvFormValue(raw, kind) {
+        if (kind === 'string' || kind === 'enum') return raw;
+        if (kind === 'auto') {
+          if (raw.trim() === '') return '';
+          try {
+            return JSON.parse(raw);
+          } catch (_) {
+            return raw;
+          }
+        }
+        if (kind === 'number') {
+          var num = Number(raw.trim());
+          if (!Number.isFinite(num) || raw.trim() === '') {
+            throw new Error('请输入有效数字');
+          }
+          return num;
+        }
+        if (kind === 'bool') {
+          var t = raw.trim().toLowerCase();
+          if (t === 'true') return true;
+          if (t === 'false') return false;
+          throw new Error('布尔值仅支持 true 或 false');
+        }
+        var parsed = JSON.parse(raw);
+        if (kind === 'list' && !Array.isArray(parsed)) {
+          throw new Error('list 类型必须为 JSON 数组');
+        }
+        if (kind === 'struct' && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) {
+          throw new Error('struct 类型必须为 JSON 对象');
+        }
+        return parsed;
+      }
+
+      function bindUiEvents() {
+        document.querySelectorAll('.nav-btn').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            switchView(btn.getAttribute('data-view'));
+          });
+        });
+
+        $('btn-jump-acl').addEventListener('click', function () {
+          switchView('acl');
+        });
+
+        $('btn-refresh-all').addEventListener('click', function () {
+          refreshProtectedData();
+        });
+
+        $('btn-open-auth').addEventListener('click', openAuthModal);
+        $('btn-close-auth').addEventListener('click', closeAuthModal);
+        $('auth-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var tok = $('auth-token-input').value.trim();
+          if (!tok) {
+            $('auth-error-msg').textContent = '请输入 admin_token';
+            return;
+          }
+          unlockWithToken(tok, false);
+        });
+
+        $('danmaku-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var msg = $('danmaku-input').value.trim();
+          if (!msg) return;
+          $('danmaku-submit').disabled = true;
+          $('danmaku-status').textContent = '发送中…';
+          apiFetch('/api/v1/system/danmaku', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ msg: msg })
+          }).then(function () {
+            $('danmaku-input').value = '';
+            $('danmaku-status').textContent = '弹幕已发送：' + msg;
+            showToast('弹幕发送成功', 'ok');
+          }).catch(function (err) {
+            $('danmaku-status').textContent = '发送失败：' + err.message;
+            showToast('发送失败: ' + err.message, 'danger');
+          }).finally(function () {
+            $('danmaku-submit').disabled = false;
+          });
+        });
+
+        $('feed-filter').addEventListener('change', function () {
+          state.feedFilter = $('feed-filter').value;
+          renderFeed();
+        });
+
+        $('btn-feed-pause').addEventListener('click', function () {
+          state.feedPaused = !state.feedPaused;
+          $('btn-feed-pause').textContent = state.feedPaused ? '恢复滚动' : '暂停滚动';
+          if (!state.feedPaused) renderFeed();
+        });
+
+        $('btn-feed-clear').addEventListener('click', function () {
+          state.feedItems = [];
+          renderFeed();
+        });
+
+        $('btn-copy-lan').addEventListener('click', function () {
+          copyText($('lan-url-text').textContent, '局域网管理链接');
+        });
+
+        $('plugin-search').addEventListener('input', renderPlugins);
+        $('btn-reload-plugins').addEventListener('click', refreshPlugins);
+        $('btn-close-drawer').addEventListener('click', closePluginDrawer);
+        $('plugin-drawer').addEventListener('click', function (e) {
+          if (e.target === $('plugin-drawer')) closePluginDrawer();
+        });
+
+        $('acl-filter').addEventListener('change', renderAcl);
+        $('btn-reload-acl').addEventListener('click', refreshAcl);
+
+        $('data-owner').addEventListener('change', function () {
+          state.selectedOwner = $('data-owner').value;
+          state.selectedNamespace = '';
+          updateTopicSuggestions();
+          loadNamespaces();
+        });
+        $('data-store').addEventListener('change', function () {
+          state.selectedStore = $('data-store').value;
+          state.selectedNamespace = '';
+          loadNamespaces();
+        });
+        $('data-namespace-select').addEventListener('change', function () {
+          loadNamespaceEntries($('data-namespace-select').value);
+        });
+        $('btn-load-ns').addEventListener('click', function () {
+          var custom = $('data-namespace-custom').value.trim();
+          var target = custom || $('data-namespace-select').value;
+          if (!target) {
+            showToast('请选择或输入命名空间名称', 'warn');
+            return;
+          }
+          loadNamespaceEntries(target);
+        });
+        $('btn-reload-data').addEventListener('click', loadNamespaces);
+        $('btn-clear-ns').addEventListener('click', function () {
+          if (!state.selectedOwner || !state.selectedNamespace) return;
+          if (!window.confirm('确认清空 ' + state.selectedOwner + '/' + state.selectedStore + '/' + state.selectedNamespace + ' 下的全部键吗？')) {
+            return;
+          }
+          var path = '/api/v1/admin/data/'
+            + encodeURIComponent(state.selectedStore) + '/'
+            + encodeURIComponent(state.selectedOwner) + '/ns/'
+            + encodeURIComponent(state.selectedNamespace);
+          apiFetch(path, { method: 'DELETE' }).then(function (data) {
+            showToast('已清空命名空间（删除 ' + Number((data && data.deleted) || 0) + ' 项）', 'ok');
+            return loadNamespaces();
+          }).catch(function (err) {
+            showToast('清空失败: ' + err.message, 'danger');
+          });
+        });
+
+        $('kv-edit-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var owner = $('data-owner').value;
+          var store = $('data-store').value || 'persist';
+          var ns = $('kv-ns-input').value.trim() || state.selectedNamespace;
+          var key = $('kv-key-input').value.trim();
+          var type = $('kv-type-select').value;
+          var rawVal = $('kv-value-input').value;
+          var rawMeta = $('kv-meta-input').value.trim();
+          if (!owner || !ns || !key) {
+            $('kv-form-status').textContent = '请填写插件域、命名空间与键名';
+            return;
+          }
+          var value;
+          var meta = null;
+          try {
+            value = parseKvFormValue(rawVal, type);
+            if (rawMeta) {
+              meta = JSON.parse(rawMeta);
+            }
+          } catch (err) {
+            $('kv-form-status').textContent = '格式错误：' + err.message;
+            return;
+          }
+          var path = '/api/v1/admin/data/'
+            + encodeURIComponent(store) + '/'
+            + encodeURIComponent(owner) + '/ns/'
+            + encodeURIComponent(ns) + '/keys/'
+            + encodeURIComponent(key);
+          var reqBody = { value: value };
+          if (type !== 'auto') {
+            reqBody.type = type;
+          }
+          if (meta !== null) {
+            reqBody.meta = meta;
+          }
+          apiFetch(path, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reqBody)
+          }).then(function () {
+            $('kv-form-status').textContent = '保存成功：' + ns + '/' + key;
+            showToast('键值已保存', 'ok');
+            state.selectedOwner = owner;
+            state.selectedStore = store;
+            state.selectedNamespace = ns;
+            return loadNamespaces();
+          }).catch(function (err) {
+            $('kv-form-status').textContent = '保存失败：' + err.message;
+            showToast('保存失败: ' + err.message, 'danger');
+          });
+        });
+
+        $('topic-pub-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var owner = $('data-owner').value;
+          var name = $('topic-name-input').value.trim();
+          var rawPayload = $('topic-payload-input').value;
+          var isPublic = Boolean($('topic-public-check').checked);
+          var desc = $('topic-desc-input').value.trim();
+          if (!owner || !name) {
+            $('topic-form-status').textContent = '请选择插件域并填写 Topic 名称';
+            return;
+          }
+          var payload;
+          try {
+            payload = JSON.parse(rawPayload);
+          } catch (err) {
+            $('topic-form-status').textContent = 'Payload JSON 无效：' + err.message;
+            return;
+          }
+          var path = '/api/v1/admin/topics/' + encodeURIComponent(owner) + '/' + encodeURIComponent(name);
+          apiFetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              payload: payload,
+              public: isPublic,
+              description: desc || null
+            })
+          }).then(function (res) {
+            var delivered = Number((res && res.delivered) || 0);
+            var topicLabel = (res && res.topic && (res.topic.name || res.topic.topic))
+              ? (res.topic.name || res.topic.topic)
+              : name;
+            $('topic-form-status').textContent = '已广播到 ' + topicLabel + '（投递 ' + delivered + ' 个订阅者）';
+            showToast('Topic 测试消息已发送', 'ok');
+          }).catch(function (err) {
+            $('topic-form-status').textContent = '发送失败：' + err.message;
+            showToast('Topic 发布失败: ' + err.message, 'danger');
+          });
+        });
+      }
+
+      bindUiEvents();
+      connectLiveWs();
+      consumeHashTokenIfPresent().then(function (unlockedByHash) {
+        if (!unlockedByHash) {
+          refreshProtectedData();
+        }
+      });
+      window.setInterval(function () {
+        refreshStatus();
+      }, 10000);
+    })();
+  </script>
+</body>
+</html>

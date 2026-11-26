@@ -562,9 +562,10 @@ pub fn authorize_and_maybe_mint_manage_cookie(
     Ok(build_admin_set_cookie_for_mode(&token, cfg.security_mode))
 }
 
-fn check_referer_matches_manage(
+fn validate_referer_authority_and_path(
     headers: &HeaderMap,
-    plugin_name: &str,
+    allow_path: impl FnOnce(&str) -> bool,
+    err_msg: impl FnOnce(&str) -> String,
 ) -> Result<(), PluginApiError> {
     let Some(ref_hdr) = headers.get(header::REFERER) else {
         return Ok(());
@@ -584,14 +585,27 @@ fn check_referer_matches_manage(
             "Referer authority mismatch on management action",
         ));
     }
-    let expected = format!("/{}/m", plugin_name);
-    if ref_path != expected {
-        return Err(PluginApiError::unauthorized(format!(
-            "Management action requires Referer '{}' (got '{}')",
-            expected, ref_path
-        )));
+    if !allow_path(ref_path) {
+        return Err(PluginApiError::unauthorized(err_msg(ref_path)));
     }
     Ok(())
+}
+
+fn check_referer_matches_manage(
+    headers: &HeaderMap,
+    plugin_name: &str,
+) -> Result<(), PluginApiError> {
+    let expected = format!("/{}/m", plugin_name);
+    validate_referer_authority_and_path(
+        headers,
+        |p| p == expected || p == "/admin",
+        |got| {
+            format!(
+                "Management action requires Referer '{}' (got '{}')",
+                expected, got
+            )
+        },
+    )
 }
 
 pub(super) fn require_manage_session(
@@ -616,6 +630,33 @@ pub(super) fn require_manage_session(
     }
 
     check_referer_matches_manage(headers, caller_plugin_name)
+}
+
+pub(super) fn require_admin_session(
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    state: &AppState,
+) -> Result<(), PluginApiError> {
+    let cfg = &state.config.server;
+    check_remote_manage_allowed(cfg, peer_ip)?;
+
+    if cfg.security_mode.is_open() && is_peer_loopback_or_private(peer_ip) {
+        return Ok(());
+    }
+
+    let cookie = extract_admin_cookie(headers)
+        .ok_or_else(|| PluginApiError::unauthorized("Missing dambo_admin admin session"))?;
+    if !state.admin_sessions.is_valid(&cookie) {
+        return Err(PluginApiError::unauthorized(
+            "Invalid or expired dambo_admin admin session",
+        ));
+    }
+
+    validate_referer_authority_and_path(
+        headers,
+        |p| p == "/admin" || (p.starts_with('/') && p.ends_with("/m")),
+        |got| format!("Admin action requires Referer '/admin' (got '{}')", got),
+    )
 }
 
 pub(super) fn optional_caller_plugin(
@@ -678,6 +719,28 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for ManageSession {
             .map(|ci| ci.0.ip());
         require_manage_session(&parts.headers, peer_ip, state, &caller.name)?;
         Ok(Self { caller })
+    }
+}
+
+/// Global admin guard enforcing `dambo_admin` authentication on `/api/v1/admin/*` and `/api/v1/system/danmaku`.
+///
+/// In `Open` mode, loopback and private-network peers bypass cookie/Referer checks;
+/// in `Strict` mode (or for public IPs), valid `dambo_admin` cookie + `/admin` (or `/{plugin}/m`) Referer are required.
+pub struct AdminGuard;
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for AdminGuard {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let peer_ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip());
+        require_admin_session(&parts.headers, peer_ip, state)?;
+        Ok(Self)
     }
 }
 
@@ -763,8 +826,15 @@ pub(super) async fn api_security_middleware(
             .get::<OriginalUri>()
             .map(|u| u.0.path().to_string())
             .unwrap_or_else(|| req.uri().path().to_string());
-        let is_auth_manage = path == "/api/v1/auth/manage" || path == "/auth/manage";
-        if !is_auth_manage {
+        let is_exempt_caller_header = path == "/api/v1/auth/manage"
+            || path == "/auth/manage"
+            || path == "/api/v1/system/danmaku"
+            || path == "/system/danmaku"
+            || path == "/api/v1/admin"
+            || path.starts_with("/api/v1/admin/")
+            || path == "/admin"
+            || path.starts_with("/admin/");
+        if !is_exempt_caller_header {
             let has_caller = req
                 .headers()
                 .get("x-dambo-plugin")
