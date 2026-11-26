@@ -305,137 +305,43 @@ body {
     border-color: var(--accent-blue);
 }
 
-/* LAN access & QR dropdown */
-.lan-menu-group {
-    position: relative;
-    display: flex;
+/* Web Control Panel direct trigger */
+.console-trigger-btn {
+    display: inline-flex;
     align-items: center;
+    gap: 5px;
     flex: 0 0 auto;
-    z-index: 1000;
-    overflow: visible;
 }
 
-.lan-dropdown-menu {
-    position: absolute;
-    top: calc(100% + 12px);
-    right: -112px;
-    width: min(376px, calc(100vw - 24px));
-    max-height: 344px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px;
-    background: rgba(20, 22, 28, 0.97);
-    backdrop-filter: blur(22px);
-    -webkit-backdrop-filter: blur(22px);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
-    z-index: 1200;
-    overflow-y: auto;
-    cursor: default;
-}
-.lan-dropdown-menu.hidden {
-    display: none;
-}
-
-.lan-menu-header {
-    display: flex;
+.console-pending-badge {
+    min-width: 15px;
+    height: 15px;
+    padding: 0 4px;
+    border-radius: 999px;
+    display: inline-flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-}
-
-.lan-menu-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-main);
-}
-
-.lan-mode-badge {
+    justify-content: center;
     font-size: 9px;
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: 4px;
-    border: 1px solid var(--border-color);
-    background: rgba(56, 189, 248, 0.16);
-    color: var(--accent-blue);
+    font-weight: 700;
+    line-height: 1;
+    background: rgba(239, 68, 68, 0.9);
+    color: #ffffff;
 }
-.lan-mode-badge.open {
-    background: rgba(245, 158, 11, 0.18);
-    border-color: rgba(245, 158, 11, 0.45);
-    color: #fcd34d;
-}
-
-.lan-paths-row,
-.lan-ip-tabs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-}
-.lan-ip-tabs.hidden {
+.console-pending-badge.hidden {
     display: none;
 }
 
-.lan-path-btn.active,
-.lan-ip-btn.active {
-    border-color: rgba(56, 189, 248, 0.65);
-    background: rgba(56, 189, 248, 0.18);
-    color: var(--accent-blue);
-    font-weight: 600;
+/* Standalone Always-on-Top pin toggle */
+.pin-toggle-btn {
+    touch-action: manipulation;
 }
-
-.lan-body {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
+.pin-toggle-btn svg {
+    pointer-events: none;
 }
-
-.lan-url-col {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.lan-url-text {
-    font-size: 10px;
-    line-height: 1.4;
-    word-break: break-all;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: var(--text-main);
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
-    padding: 6px 8px;
-}
-
-.lan-local-note {
-    font-size: 10px;
-    color: #fcd34d;
-}
-.lan-local-note.hidden {
-    display: none;
-}
-
-.lan-actions {
-    display: flex;
-    gap: 6px;
-}
-
-.lan-qr-img {
-    width: 96px;
-    height: 96px;
-    border-radius: 6px;
-    background: #ffffff;
-    padding: 4px;
-    border: 1px solid var(--border-color);
-    flex-shrink: 0;
-}
-.lan-qr-img.hidden {
-    display: none;
+.more-btn.pin-toggle-btn.active {
+    background: rgba(56, 189, 248, 0.22);
+    border-color: rgba(56, 189, 248, 0.55);
+    color: #7dd3fc;
 }
 
 /* Plugin dropdown manager */
@@ -468,82 +374,6 @@ body {
 }
 .plugin-dropdown-menu.hidden {
     display: none;
-}
-
-.plugin-tabs-header {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.03);
-}
-
-.plugin-tab-btn {
-    flex: 1 1 0;
-    height: 24px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    border-radius: 5px;
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text-sub);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-}
-.plugin-tab-btn:hover {
-    color: var(--text-main);
-    background: rgba(255, 255, 255, 0.05);
-}
-.plugin-tab-btn.active {
-    color: var(--accent-blue);
-    background: rgba(56, 189, 248, 0.14);
-    border-color: rgba(56, 189, 248, 0.35);
-    font-weight: 600;
-}
-
-.acl-tab-count {
-    font-size: 9px;
-    padding: 0 5px;
-    border-radius: 999px;
-    background: rgba(245, 158, 11, 0.2);
-    color: #fcd34d;
-    border: 1px solid rgba(245, 158, 11, 0.45);
-}
-.acl-tab-count.hidden {
-    display: none;
-}
-
-.plugin-cards-list.hidden,
-.plugin-dropdown-footer.hidden {
-    display: none;
-}
-
-.acl-status-badge {
-    font-size: 9px;
-    font-weight: 600;
-    padding: 1px 5px;
-    border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-}
-.acl-status-badge.ok {
-    background: rgba(34, 197, 94, 0.16);
-    border-color: rgba(34, 197, 94, 0.42);
-    color: #86efac;
-}
-.acl-status-badge.warn {
-    background: rgba(245, 158, 11, 0.18);
-    border-color: rgba(245, 158, 11, 0.45);
-    color: #fcd34d;
-}
-.acl-status-badge.danger {
-    background: rgba(239, 68, 68, 0.16);
-    border-color: rgba(239, 68, 68, 0.42);
-    color: #fca5a5;
 }
 
 .plugin-btn.warn {
@@ -848,6 +678,46 @@ body {
     height: 1px;
     background: rgba(255, 255, 255, 0.1);
     margin: 4px 2px;
+}
+
+.more-menu-section-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-sub);
+    padding: 2px 8px 4px;
+}
+
+.more-lang-group {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    padding: 0 2px 2px;
+}
+
+.more-lang-btn {
+    height: 24px;
+    padding: 0 4px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    color: var(--text-sub);
+    font-size: 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: all 0.15s ease;
+}
+.more-lang-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-hover);
+    color: var(--text-main);
+}
+.more-lang-btn.active {
+    background: rgba(56, 189, 248, 0.18);
+    border-color: rgba(56, 189, 248, 0.55);
+    color: #7dd3fc;
+    font-weight: 600;
 }
 
 .win-controls {

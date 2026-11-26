@@ -185,13 +185,48 @@ mod tests {
         assert_eq!(t(LOCALE_JA, "overlay.unpin_title"), "最前面表示を解除");
         assert_eq!(t(LOCALE_EN, "overlay.unpin_title"), "Unpin from top");
 
-        assert_eq!(t(LOCALE_ZH_CN, "panel.connecting"), "连接中");
-        assert_eq!(t(LOCALE_JA, "panel.connecting"), "接続中");
-        assert_eq!(t(LOCALE_EN, "panel.connecting"), "Connecting");
+        assert_eq!(t(LOCALE_ZH_CN, "panel.connect"), "进入");
+        assert_eq!(t(LOCALE_JA, "panel.connect"), "入室");
+        assert_eq!(t(LOCALE_EN, "panel.connect"), "Enter");
+
+        assert_eq!(t(LOCALE_ZH_CN, "panel.disconnect"), "离开");
+        assert_eq!(t(LOCALE_JA, "panel.disconnect"), "退室");
+        assert_eq!(t(LOCALE_EN, "panel.disconnect"), "Leave");
+
+        assert_eq!(t(LOCALE_ZH_CN, "panel.connecting"), "进房中");
+        assert_eq!(t(LOCALE_JA, "panel.connecting"), "入室中");
+        assert_eq!(t(LOCALE_EN, "panel.connecting"), "Entering");
+
+        assert_eq!(t(LOCALE_ZH_CN, "console.trigger_label"), "控制台");
+        assert_eq!(t(LOCALE_JA, "console.trigger_label"), "コンソール");
+        assert_eq!(t(LOCALE_EN, "console.trigger_label"), "Console");
 
         assert_eq!(t(LOCALE_ZH_CN, "tray.open_admin"), "打开控制面板");
         assert_eq!(t(LOCALE_JA, "tray.open_admin"), "コントロールパネルを開く");
         assert_eq!(t(LOCALE_EN, "tray.open_admin"), "Open Control Panel");
+
+        assert_eq!(t(LOCALE_ZH_CN, "panel.pin_title"), "置顶窗口");
+        assert_eq!(t(LOCALE_JA, "panel.pin_title"), "最前面に固定");
+        assert_eq!(t(LOCALE_EN, "panel.pin_title"), "Pin on top");
+
+        assert_eq!(t(LOCALE_ZH_CN, "panel.unpin_title"), "取消置顶");
+        assert_eq!(t(LOCALE_JA, "panel.unpin_title"), "最前面固定を解除");
+        assert_eq!(t(LOCALE_EN, "panel.unpin_title"), "Unpin window");
+
+        assert_eq!(t(LOCALE_ZH_CN, "more.language"), "🌐 语言");
+        assert_eq!(t(LOCALE_JA, "more.language"), "🌐 言語");
+        assert_eq!(t(LOCALE_EN, "more.language"), "🌐 Language");
+
+        assert!(!dict_zh_cn().contains_key("tray.open_portal"));
+
+        assert_eq!(
+            t_fmt(LOCALE_ZH_CN, "console.pending_alert", &[("count", "2")]),
+            "2 条跨插件权限待审批"
+        );
+        assert_eq!(
+            t_fmt(LOCALE_EN, "console.pending_alert", &[("count", "2")]),
+            "2 cross-plugin permission request(s) pending"
+        );
 
         assert!(!dict_zh_cn().contains_key("plugin.hot_reload"));
         assert_eq!(t(LOCALE_EN, "missing.key"), "missing.key");
