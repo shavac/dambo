@@ -7,7 +7,7 @@
 > - Layer 1 API 与安全守卫：[mod.rs](file:///home/knightmare/soft/dambo/dambo-core/src/plugin_api/mod.rs)、[auth.rs](file:///home/knightmare/soft/dambo/dambo-core/src/plugin_api/auth.rs)、[handlers.rs](file:///home/knightmare/soft/dambo/dambo-core/src/plugin_api/handlers.rs)
 > - 插件注册、保留字与局域网 URL 构造：[plugin.rs](file:///home/knightmare/soft/dambo/dambo-core/src/plugin.rs)、[net.rs](file:///home/knightmare/soft/dambo/dambo-core/src/net.rs)、[dambo-core/src/lib.rs](file:///home/knightmare/soft/dambo/dambo-core/src/lib.rs)
 > - 前端资产与 SDK（独立门户 `assets/index.html` 已移除，控制面板已提升至根路径 `/`）：[admin.html](file:///home/knightmare/soft/dambo/dambo-core/assets/admin.html)、[manage_fallback.html](file:///home/knightmare/soft/dambo/dambo-core/assets/manage_fallback.html)、[dambo.js](file:///home/knightmare/soft/dambo/dambo-core/assets/dambo.js)
-> - 桌面端窗口与登录页：[login.html](file:///home/knightmare/soft/dambo/ui/login.html)、[login.js](file:///home/knightmare/soft/dambo/ui/login.js)、[src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs)、[build.rs](file:///home/knightmare/soft/dambo/src-tauri/build.rs)、[tauri.conf.json](file:///home/knightmare/soft/dambo/src-tauri/tauri.conf.json) 及 `src-tauri/capabilities/*.json`
+> - 桌面端控制舱与登录页：[ui/index.html](file:///home/knightmare/soft/dambo/ui/index.html)、[ui/style.css](file:///home/knightmare/soft/dambo/ui/style.css)、[ui/app.js](file:///home/knightmare/soft/dambo/ui/app.js)、[login.html](file:///home/knightmare/soft/dambo/ui/login.html)、[login.js](file:///home/knightmare/soft/dambo/ui/login.js)、[src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs)、[build.rs](file:///home/knightmare/soft/dambo/src-tauri/build.rs)、[tauri.conf.json](file:///home/knightmare/soft/dambo/src-tauri/tauri.conf.json) 及 `src-tauri/capabilities/*.json`
 > - 内置插件与 CLI：[static/html/](file:///home/knightmare/soft/dambo/static/html)、[cli/src/main.rs](file:///home/knightmare/soft/dambo/cli/src/main.rs)、[cli/src/format.rs](file:///home/knightmare/soft/dambo/cli/src/format.rs)、[cli/src/tui.rs](file:///home/knightmare/soft/dambo/cli/src/tui.rs)
 
 ---
@@ -15,8 +15,8 @@
 ## 图一：页面导航与容器嵌套图（严格单向三层结构）
 
 系统收敛为严格的**单向三层结构**（`/` -> `/{plugin}/m` -> `/{plugin}/`）：
-- **第一层 `GET /`**：桌面端与浏览器共用的唯一总控主界面（`admin.html`，默认进入极简普通主播模式，可通过右上角「🛠️ 开发者视图」开关展开完整运维控制台；`GET /admin` 与 `GET /admin/` `301` 重定向至 `/`）。
-- **第二层 `GET /{plugin}/m`**：纯净的单插件控制面，可被 `/` 右侧抽屉 `<iframe src="/{plugin}/m?embed=1">` 无缝内嵌，或单独在手机/浏览器收藏打开；页面内不包含任何跳往 `/`、`/admin` 或展示页的 `<a href>` 链接（直接访问 `/{plugin}/manage.html` 会 `301` 重定向至 `/{plugin}/m`）。
+- **第一层 `GET /`**：浏览器与手机共用的唯一 Web 总控主界面（`admin.html`，默认进入极简普通主播模式，可通过右上角「🛠️ 开发者视图」开关展开完整运维控制台；`GET /admin` 与 `GET /admin/` `301` 重定向至 `/`）。桌面端 `main` 主窗口则采用本地无边框透明条状控制舱（`ui/index.html` + `default.json`），点击控制舱「控制台」按钮或系统托盘「打开控制面板」时在系统默认浏览器中打开 `GET /`。
+- **第二层 `GET /{plugin}/m`**：纯净的单插件控制面，可被 `/` 右侧抽屉 `<iframe src="/{plugin}/m?embed=1">` 无缝内嵌，或从控制舱插件菜单 / 托盘在系统浏览器中打开；页面内不包含任何跳往 `/`、`/admin` 或展示页的 `<a href>` 链接（直接访问 `/{plugin}/manage.html` 会 `301` 重定向至 `/{plugin}/m`）。
 - **第三层 `GET /{plugin}/`**：纯粹的只读透明画面，仅供 OBS Browser Source 与 Tauri 桌面悬浮窗加载。
 
 ```mermaid
@@ -25,12 +25,12 @@ flowchart LR
         Browser["桌面浏览器 / 手机局域网扫码"]
         CLI["CLI 启动日志 / /lan 终端二维码"]
         OBS["OBS Studio Browser Source"]
-        WinMain["Tauri 主窗口 main (admin-window.json)"]
+        WinMain["Tauri 条状控制舱 main (ui/index.html + default.json)"]
         Tray["Tauri 系统托盘 main-tray (单入口 打开控制面板)"]
         WinLogin["Tauri 登录弹窗 bili-qr-login (ui/login.html)"]
     end
 
-    subgraph Layer1["第一层: 唯一总控主界面 GET / (assets/admin.html)"]
+    subgraph Layer1["第一层: 唯一 Web 总控主界面 GET / (assets/admin.html)"]
         ControlPanel["GET / - serve_root (Strict 含 #t=token 引导)"]
         StreamerHome["默认: 普通主播模式 (ACL简报 / 直播间 / 插件卡片)"]
         DevWorkspace["可选: 开发者视图 (#btn-dev-mode, 概览 / 控制台 / ACL / KV检视)"]
@@ -49,8 +49,12 @@ flowchart LR
 
     CLI -->|"默认路径 / (Strict 模式附带 #t=token)"| ControlPanel
     Browser -->|"访问 / (或 /admin、/admin/ 301 跳转至 /)"| ControlPanel
-    WinMain -->|"WebviewUrl::External(runtime.admin_url(None)) -> /"| ControlPanel
-    Tray -->|"打开控制面板 / 浏览器打开 /"| ControlPanel
+    WinMain -->|"点击 控制台 (#console-open-btn) -> 系统浏览器打开 /"| ControlPanel
+    WinMain -->|"插件(N) 点击 设置 -> 系统浏览器打开 /{plugin}/m"| PluginManage
+    WinMain -.->|"插件(N) 开关桌面打开"| WinOverlay
+    WinMain -->|"点击账号徽标 (open_qr_login)"| WinLogin
+    Tray -->|"左键或菜单 显示/隐藏面板"| WinMain
+    Tray -->|"打开控制面板 (系统浏览器)"| ControlPanel
     Tray -->|"触发打开 B 站登录窗"| WinLogin
     Tray -->|"插件子菜单: 浏览器打开 /{plugin}/m"| PluginManage
     Tray -->|"插件子菜单: 开关桌面悬浮窗"| WinOverlay
@@ -60,12 +64,12 @@ flowchart LR
     ControlPanel -->|"扫码登录 / 局域网二维码 (?path=%2F)"| QRModal
     StreamerHome -->|"点击 设置 / 玩法"| Drawer
     DevWorkspace -->|"点击插件管理按钮"| Drawer
-    Drawer -->|"iframe 内嵌 src=/{plugin}/m?embed=1 (无 Tauri IPC)"| PluginManage
+    Drawer -->|"iframe 内嵌 src=/{plugin}/m?embed=1"| PluginManage
 
     Browser -->|"直接访问或从 /{plugin}/manage.html 301 重定向"| PluginManage
+    WinMain -.->|"复制 OBS URL http://host:port/{plugin}/"| OBS
     StreamerHome -.->|"复制 OBS 链接 http://host:port/{plugin}/"| OBS
     PluginManage -.->|"复制 OBS 链接 http://host:port/{plugin}/ (无超链接跳转)"| OBS
-    ControlPanel -.->|"window.__TAURI_INTERNALS__ 调用 open_plugin_desktop"| WinOverlay
 
     OBS -->|"Browser Source 加载 http://host:port/{plugin}/"| PluginView
     WinOverlay -->|"WebviewUrl::External(desktop_overlay_url)"| PluginView
@@ -82,6 +86,7 @@ flowchart LR
 flowchart TB
     subgraph Clients["前端页面与桌面容器"]
         direction TB
+        P_Capsule["ui/index.html (Tauri main 条状控制舱 + ui/app.js)"]
         P_Control["GET / (assets/admin.html: 普通主播模式 + 开发者视图)"]
         P_Manage["GET /{plugin}/m (manage_fallback.html / 自定义 manage.html + dambo.js)"]
         P_View["GET /{plugin}/ (static/html/*/plugin.html + dambo.js)"]
@@ -110,10 +115,12 @@ flowchart TB
     end
 
     subgraph TauriIPC["Tauri 桌面宿主 IPC (src-tauri/src/lib.rs)"]
-        IPC_Admin["main 窗口 IPC (仅限主文档 / 触发, iframe 隔离): get_plugins, open/close_plugin_desktop, open_plugins_dir, open_folder, open_in_browser, set_always_on_top, plugin:window is_always_on_top"]
+        IPC_Capsule["main 控制舱 IPC (default.json, local: true): get_initial_state, get_plugins, open/close_plugin_desktop, open_plugin_manage, open_plugins_dir, open_admin_console, get_pending_acl_count, get_i18n/set_locale, switch/disconnect_room, fetch_room_options, remove_history_room, set_record_raw, send_danmaku, set_panel_height/width/move, open_config_file/open_folder, set_always_on_top, open_qr_login, minimize_window, close_window"]
         IPC_Login["bili-qr-login IPC: get_i18n, refresh_qr_code (events: qr_code_updated, qr_login_success)"]
         IPC_Overlay["plugin-overlay-* IPC: plugin:window 命令 (start_dragging, outer_position, scale_factor, set_position, is_always_on_top, set_always_on_top, close, destroy)"]
     end
+
+    P_Capsule -->|"Tauri invoke 与原生事件监听 (无 /ws 直连)"| IPC_Capsule
 
     P_Control -->|"REST 轮询与切换"| API_SysPub
     P_Control -->|"REST (AdminGuard / Cookie)"| API_SysAdmin
@@ -123,7 +130,6 @@ flowchart TB
     P_Control -->|"REST 审计全量 ACL"| API_AclSelf
     P_Control -->|"SSE ?mode=admin"| API_SSE
     P_Control -->|"WebSocket 实时弹幕观察"| WS_B
-    P_Control -->|"Tauri invoke (window.__TAURI_INTERNALS__)"| IPC_Admin
 
     P_Manage -->|"Dambo.plugin.unlockManage"| API_Auth
     P_Manage -->|"Dambo.plugin.meta / config.get"| API_PlugPub
@@ -159,7 +165,7 @@ flowchart TB
 
 | 方法与路径 | Handler / 资产来源 | 源文件位置 | 鉴权与安全头 | 主要调用方 |
 | :--- | :--- | :--- | :--- | :--- |
-| `GET /` | `serve_root` → 内嵌唯一总控面板 [admin.html](file:///home/knightmare/soft/dambo/dambo-core/assets/admin.html) | [server.rs](file:///home/knightmare/soft/dambo/dambo-core/src/server.rs) (`serve_root`, `build_router`) | `authorize_and_maybe_mint_manage_cookie`；`Strict` 模式附加 `X-Frame-Options: DENY` + `CSP: frame-ancestors 'none'` | Tauri `main` 主窗口、托盘「打开控制面板」、CLI 启动日志与 `/lan` 默认目标、桌面浏览器与手机扫码 |
+| `GET /` | `serve_root` → 内嵌唯一总控面板 [admin.html](file:///home/knightmare/soft/dambo/dambo-core/assets/admin.html) | [server.rs](file:///home/knightmare/soft/dambo/dambo-core/src/server.rs) (`serve_root`, `build_router`) | `authorize_and_maybe_mint_manage_cookie`；`Strict` 模式附加 `X-Frame-Options: DENY` + `CSP: frame-ancestors 'none'` | 桌面浏览器、手机局域网扫码、`CLI /lan` 默认目标、控制舱「控制台」、托盘「打开控制面板」 |
 | `GET /admin` | `redirect_admin_to_root` → `301` 重定向到 `/`（保留 Query） | [server.rs](file:///home/knightmare/soft/dambo/dambo-core/src/server.rs) (`redirect_admin_to_root`, `build_router`) | 跳转至 `/` 执行统一会话校验 | 旧书签 / 历史链接兼容性重定向 |
 | `GET /admin/` | `redirect_admin_to_root` → `301` 重定向到 `/`（保留 Query） | [server.rs](file:///home/knightmare/soft/dambo/dambo-core/src/server.rs) (`redirect_admin_to_root`, `build_router`) | 同上跳转至 `/` | 手工输入 `/admin/` 的兼容性访问 |
 | `GET /sdk/dambo.js` | `serve_sdk_js` → 内嵌 [dambo.js](file:///home/knightmare/soft/dambo/dambo-core/assets/dambo.js) | [server.rs](file:///home/knightmare/soft/dambo/dambo-core/src/server.rs) (`serve_sdk_js`, `build_router`) | 公开 | `manage_fallback.html`、`static/html/{default,game24,list,sc-ticker}/plugin.html`、第三方插件页面 |
@@ -231,7 +237,7 @@ flowchart TB
 
 | 窗口 / 托盘 | 页面 URL | Capability 文件 | 实际调用的 IPC (`invoke`) | 监听 / 接收的事件 (`listen`) | 源文件位置 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `main` | `WebviewUrl::External(runtime.admin_url(None))`（指向 `/`） | [admin-window.json](file:///home/knightmare/soft/dambo/src-tauri/capabilities/admin-window.json)（限定回环根目录 `http://localhost:*` / `127.0.0.1:*` / `[::1]:*`；Tauri v2 初始化脚本 `for_main_frame_only: true` 保证内嵌 `<iframe>` 无 Tauri IPC 权限） | `get_plugins`、`open_plugin_desktop`、`close_plugin_desktop`、`open_plugins_dir`、`open_folder`、`open_in_browser`、`set_always_on_top`、`plugin:window\|is_always_on_top` | `plugins-updated`、`room_state_changed`、`auth_state_changed`、`app_state_changed`、`acl-updated` | [src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs)、[admin.html](file:///home/knightmare/soft/dambo/dambo-core/assets/admin.html) |
+| `main`（条状控制舱） | `WebviewUrl::App("index.html")` | [default.json](file:///home/knightmare/soft/dambo/src-tauri/capabilities/default.json)（`local: true`） | `get_initial_state`、`get_plugins`、`open_plugin_desktop`、`close_plugin_desktop`、`open_plugin_manage`、`open_plugins_dir`、`open_admin_console`、`get_pending_acl_count`、`get_i18n`、`set_locale`、`switch_room`、`disconnect_room`、`fetch_room_options`、`remove_history_room`、`set_record_raw`、`send_danmaku`、`set_panel_height`、`sync_panel_min_width`、`set_panel_width`、`begin_panel_move`、`move_panel_by`、`end_panel_move`、`open_config_file`、`open_folder`、`set_always_on_top`、`open_qr_login`、`minimize_window`、`close_window`、`plugin:window\|start_dragging`、`start_resize_dragging`、`outer_position`、`scale_factor`、`inner_size` | `plugins-updated`、`room_state_changed`、`auth_state_changed`、`app_state_changed`、`acl-updated`、`i18n-updated` | [src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs)、[ui/index.html](file:///home/knightmare/soft/dambo/ui/index.html)、[ui/app.js](file:///home/knightmare/soft/dambo/ui/app.js) |
 | `bili-qr-login` | `WebviewUrl::App("login.html")` | [default.json](file:///home/knightmare/soft/dambo/src-tauri/capabilities/default.json)（`local: true`） | `get_i18n`、`refresh_qr_code` | `i18n-updated`、`qr_code_updated`、`qr_login_success` | [src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs)、[login.js](file:///home/knightmare/soft/dambo/ui/login.js) |
 | `plugin-overlay-{plugin}` | `WebviewUrl::External(desktop_overlay_url(plugin))`（指向 `/{plugin}/`） | [plugin-overlay.json](file:///home/knightmare/soft/dambo/src-tauri/capabilities/plugin-overlay.json)（限定回环 `http://localhost:*` / `127.0.0.1:*` / `[::1]:*`） | `plugin:window\|start_dragging`、`outer_position`、`scale_factor`、`set_position`、`is_always_on_top`、`set_always_on_top`、`close`、`destroy` | 无 | [src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs) |
 | `main-tray`（系统托盘） | 原生托盘菜单 | 宿主 Rust 进程直接调用 runtime | 无前端 IPC；支持左键显隐 `main`、打开控制面板（`/`）、外部浏览器打开 `/{plugin}/m`、开关 `plugin-overlay-*`、切换历史房间 / 语言 / `record_raw`、复制 `/{plugin}/`、打开目录与触发 `bili-qr-login` | 随 `room_rx`、`state_rx`、`plugins_rx` 刷新提示文案与菜单 | [src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs) |
@@ -256,7 +262,7 @@ flowchart TB
 - **唯一总控入口合并至 `GET /`**：已移除原独立门户页面 `assets/index.html` 与 `PORTAL_INDEX_HTML`，将 [admin.html](file:///home/knightmare/soft/dambo/dambo-core/assets/admin.html) 提升至根路径 `GET /`；新增右上角「🛠️ 开发者视图」开关（默认 `off` 并持久化到 `localStorage`），普通主播模式默认展示极简两段式页面（直播间连接/弹幕互动 + 插件「复制 OBS 链接」/「设置 / 玩法」卡片 + 简洁 ACL 确认条）。
 - **单向三层页面拓扑收口**：移除 [admin.html](file:///home/knightmare/soft/dambo/dambo-core/assets/admin.html) 中的外部门户返回链接、插件卡片「预览挂件」外链及抽屉预览外链；移除 [manage_fallback.html](file:///home/knightmare/soft/dambo/dambo-core/assets/manage_fallback.html) 中全部 `<a>` 导航链接，并将剪贴板按钮统一为大白话「复制 OBS 链接」（提示“已复制，请粘贴到 OBS 浏览器源”）。
 - **自定义 `manage.html` 绕过安全头已封堵**：`serve_plugin_asset` 对规范化后匹配 `manage.html` 的请求返回 `301 Moved Permanently` 重定向至 `/{plugin}/m`（保留 Query），确保所有自定义管理页访问均统一经过 `serve_plugin_manage` 的会话 Cookie 签发与 `X-Frame-Options` / `frame-ancestors` 安全头保护。
-- **桌面端托盘、权限与 CLI 文案同步收敛**：
-  - [src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs) 与多语言文件移除重复的 `open_service_portal` / `tray.open_portal` 项，托盘统一保留「打开控制面板」指向 `/`。
-  - [src-tauri/capabilities/admin-window.json](file:///home/knightmare/soft/dambo/src-tauri/capabilities/admin-window.json) 移除未使用的 `core:window:allow-set-always-on-top`、`allow-show`、`allow-hide` 与 `allow-set-focus`，并将 `remote.urls` 收敛为回环根路径模式。
+- **桌面端条状控制舱回归、`default` 权限与 CLI 文案收敛**：
+  - 恢复无边框半透明条状控制舱 `main`（[ui/index.html](file:///home/knightmare/soft/dambo/ui/index.html) / [ui/style.css](file:///home/knightmare/soft/dambo/ui/style.css) / [ui/app.js](file:///home/knightmare/soft/dambo/ui/app.js)），主栏保留账号登录、房间选择与快捷发弹幕、「控制台」直达浏览器 `GET /`（附 ACL 待审批角标）、「插件 (N)」管理、独立「置顶」按钮与「更多」（原始包录制、打开配置/录制/日志目录、中文/English/日本語语言切换），彻底避免桌面与 Web 出现两套大管理后台。
+  - [src-tauri/src/lib.rs](file:///home/knightmare/soft/dambo/src-tauri/src/lib.rs) 与多语言文件移除重复的 `open_service_portal` / `tray.open_portal` 项，托盘统一保留「打开控制面板」指向 `/`；[default.json](file:///home/knightmare/soft/dambo/src-tauri/capabilities/default.json) 严格锁定 `local: true` 仅向本地 `main` 与 `bili-qr-login` 开放窗口 IPC。
   - [cli/src/main.rs](file:///home/knightmare/soft/dambo/cli/src/main.rs) 与 [cli/src/format.rs](file:///home/knightmare/soft/dambo/cli/src/format.rs) 统一指向 `http://{host}:{port}/` 控制面板与 `http://{host}:{port}/default/` 默认 OBS 源；[dambo-core/assets/dambo.js](file:///home/knightmare/soft/dambo/dambo-core/assets/dambo.js) 的 `parsePluginContext()` 已移除 `pathname === "/"` 时回退 `pluginName = 'default'` 的旧兼容分支。

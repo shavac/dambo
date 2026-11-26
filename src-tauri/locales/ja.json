@@ -1,5 +1,5 @@
 {
-  "tray.toggle_panel": "メインウィンドウを表示 / 非表示",
+  "tray.toggle_panel": "パネルを表示 / 非表示",
   "tray.open_admin": "コントロールパネルを開く",
   "tray.recent_rooms": "履歴ルーム",
   "tray.recent_empty": "履歴ルームがありません",
@@ -41,6 +41,8 @@
   "panel.recent_rooms": "🕒 最近のルーム",
   "panel.history_empty": "履歴がありません",
   "panel.history_remove": "削除",
+  "panel.pin_title": "最前面に固定",
+  "panel.unpin_title": "最前面固定を解除",
 
   "plugin.trigger_label": "プラグイン ({count})",
   "plugin.trigger_title": "プラグインとデスクトップ表示",
@@ -61,6 +63,7 @@
   "more.open_config": "📄 設定ファイルを開く",
   "more.open_records": "📼 録画フォルダを開く",
   "more.open_logs": "📝 ログフォルダを開く",
+  "more.language": "🌐 言語",
   "more.relogin": "🔄 再ログイン",
   "more.logout": "🚪 ログアウト",
   "more.minimize_title": "トレイに最小化",
@@ -83,7 +86,7 @@
   "toast.opened_desktop": "デスクトップで開きました: {name}",
   "toast.closed_desktop": "デスクトップを閉じました: {name}",
   "toast.opened_manage": "ブラウザで管理ページを開きました: {name}",
-  "toast.opened_admin": "ブラウザで管理コンソールを開きました",
+  "toast.opened_admin": "ブラウザでコントロールパネルを開きました",
   "toast.opened_portal": "ブラウザでプラグインポータルを開きました",
   "toast.locale_updated": "言語を切り替えました: {locale}",
   "toast.record_raw_on": "生パケット録画を有効にしました",
@@ -115,7 +118,7 @@
   "startup.server_failed": "ローカルサーバーの起動に失敗しました: {error}",
 
   "console.trigger_label": "コンソール",
-  "console.trigger_title": "管理コンソール・ポータル・LAN QR を開く",
+  "console.trigger_title": "ブラウザでコントロールパネルを開く",
   "console.title": "Web コンソール",
   "console.open_admin": "管理コンソールを開く",
   "console.open_portal": "ポータルを開く",

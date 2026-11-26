@@ -1,5 +1,5 @@
 {
-  "tray.toggle_panel": "Show / Hide Main Window",
+  "tray.toggle_panel": "Show / Hide Panel",
   "tray.open_admin": "Open Control Panel",
   "tray.recent_rooms": "Recent Rooms",
   "tray.recent_empty": "No Recent Rooms",
@@ -41,6 +41,8 @@
   "panel.recent_rooms": "🕒 Recent Rooms",
   "panel.history_empty": "No history",
   "panel.history_remove": "Remove",
+  "panel.pin_title": "Pin on top",
+  "panel.unpin_title": "Unpin window",
 
   "plugin.trigger_label": "Plugins ({count})",
   "plugin.trigger_title": "Manage plugins & desktop overlays",
@@ -61,6 +63,7 @@
   "more.open_config": "📄 Open Config File",
   "more.open_records": "📼 Open Recordings Folder",
   "more.open_logs": "📝 Open Logs Folder",
+  "more.language": "🌐 Language",
   "more.relogin": "🔄 Re-login",
   "more.logout": "🚪 Sign Out",
   "more.minimize_title": "Minimize to tray",
@@ -83,7 +86,7 @@
   "toast.opened_desktop": "Opened desktop overlay: {name}",
   "toast.closed_desktop": "Closed desktop overlay: {name}",
   "toast.opened_manage": "Opened manage page in browser: {name}",
-  "toast.opened_admin": "Opened Admin Console in browser",
+  "toast.opened_admin": "Opened Control Panel in browser",
   "toast.opened_portal": "Opened Plugin Portal in browser",
   "toast.locale_updated": "Language changed: {locale}",
   "toast.record_raw_on": "Raw packet capture enabled",
@@ -115,7 +118,7 @@
   "startup.server_failed": "Failed to start local server: {error}",
 
   "console.trigger_label": "Console",
-  "console.trigger_title": "Open Admin Console, Portal & LAN QR",
+  "console.trigger_title": "Open Control Panel in browser",
   "console.title": "Web Console",
   "console.open_admin": "Open Admin Console",
   "console.open_portal": "Open Plugin Portal",

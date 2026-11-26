@@ -205,6 +205,18 @@ mod tests {
         assert_eq!(t(LOCALE_JA, "tray.open_admin"), "コントロールパネルを開く");
         assert_eq!(t(LOCALE_EN, "tray.open_admin"), "Open Control Panel");
 
+        assert_eq!(t(LOCALE_ZH_CN, "panel.pin_title"), "置顶窗口");
+        assert_eq!(t(LOCALE_JA, "panel.pin_title"), "最前面に固定");
+        assert_eq!(t(LOCALE_EN, "panel.pin_title"), "Pin on top");
+
+        assert_eq!(t(LOCALE_ZH_CN, "panel.unpin_title"), "取消置顶");
+        assert_eq!(t(LOCALE_JA, "panel.unpin_title"), "最前面固定を解除");
+        assert_eq!(t(LOCALE_EN, "panel.unpin_title"), "Unpin window");
+
+        assert_eq!(t(LOCALE_ZH_CN, "more.language"), "🌐 语言");
+        assert_eq!(t(LOCALE_JA, "more.language"), "🌐 言語");
+        assert_eq!(t(LOCALE_EN, "more.language"), "🌐 Language");
+
         assert!(!dict_zh_cn().contains_key("tray.open_portal"));
 
         assert_eq!(

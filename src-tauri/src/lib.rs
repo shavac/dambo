@@ -1,10 +1,11 @@
 mod i18n;
 
 use dambo_core::DamboRuntime;
-use dambo_core::auth::QrPollStatus;
+use dambo_core::auth::{QrPollStatus, SendDanmakuError};
 use dambo_core::config::parse_log_level;
-use dambo_core::model::{AuthState, RoomStateSnapshot};
+use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
 use dambo_core::plugin::PluginInfo;
+use dambo_core::plugin_store::AclStatus;
 #[cfg(test)]
 use dambo_core::server::format_url_host;
 use dambo_core::state::{AppPersistedState, RoomHistoryEntry, normalize_locale};
@@ -17,13 +18,137 @@ use tauri::menu::{
     CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
 };
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, Size, State, WebviewUrl, WebviewWindowBuilder,
+};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 use tokio_util::sync::CancellationToken;
+
+const PANEL_DEFAULT_WIDTH: f64 = 580.0;
+const PANEL_BASE_MIN_WIDTH: f64 = 520.0;
+const PANEL_MAX_WIDTH: f64 = 860.0;
+const PANEL_COLLAPSED_HEIGHT: f64 = 56.0;
+const PANEL_EXPANDED_HEIGHT: f64 = 420.0;
 
 struct AppContext {
     runtime: Arc<DamboRuntime>,
     qr_poll_cancel: Arc<tokio::sync::Mutex<Option<CancellationToken>>>,
+    panel_min_width: Arc<std::sync::Mutex<f64>>,
+    panel_base_height: Arc<std::sync::Mutex<f64>>,
+    panel_target_height: Arc<std::sync::Mutex<f64>>,
+    panel_drag_origin: Arc<std::sync::Mutex<Option<tauri::PhysicalPosition<i32>>>>,
+}
+
+fn compute_panel_width_bounds(requested_min_width: f64) -> (f64, f64) {
+    let min_w = if requested_min_width.is_finite() {
+        requested_min_width.max(PANEL_BASE_MIN_WIDTH).ceil()
+    } else {
+        PANEL_BASE_MIN_WIDTH
+    };
+    let max_w = PANEL_MAX_WIDTH.max(min_w);
+    (min_w, max_w)
+}
+
+fn clamp_panel_width(requested_width: f64, requested_min_width: f64) -> f64 {
+    let (min_w, max_w) = compute_panel_width_bounds(requested_min_width);
+    if requested_width.is_finite() {
+        requested_width.round().clamp(min_w, max_w)
+    } else {
+        min_w
+    }
+}
+
+fn current_logical_width(window: &tauri::WebviewWindow) -> f64 {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    match window.inner_size() {
+        Ok(size) if scale > 0.0 => f64::from(size.width) / scale,
+        _ => PANEL_DEFAULT_WIDTH,
+    }
+}
+
+fn compute_panel_height_bounds_for_base(base_height: f64) -> (f64, f64) {
+    let min_h = if base_height.is_finite() {
+        base_height.max(PANEL_COLLAPSED_HEIGHT).ceil()
+    } else {
+        PANEL_COLLAPSED_HEIGHT
+    };
+    let max_h = PANEL_EXPANDED_HEIGHT.max(min_h);
+    (min_h, max_h)
+}
+
+fn clamp_panel_height(requested_height: f64, base_height: f64) -> f64 {
+    let (min_h, max_h) = compute_panel_height_bounds_for_base(base_height);
+    if requested_height.is_finite() {
+        requested_height.ceil().clamp(min_h, max_h)
+    } else {
+        min_h
+    }
+}
+
+fn apply_panel_window_bounds_sync(
+    window: &tauri::WebviewWindow,
+    requested_min_width: f64,
+    requested_base_height: f64,
+    requested_height: f64,
+    explicit_width: Option<f64>,
+) -> Result<(), String> {
+    let (min_w, max_w) = compute_panel_width_bounds(requested_min_width);
+    let (min_h, max_h) = compute_panel_height_bounds_for_base(requested_base_height);
+    let target_h = clamp_panel_height(requested_height, requested_base_height);
+    #[cfg(target_os = "macos")]
+    let top_left = window.outer_position().ok();
+    let target_w = match explicit_width {
+        Some(width) => clamp_panel_width(width, requested_min_width),
+        None => current_logical_width(window).clamp(min_w, max_w),
+    };
+
+    window
+        .set_min_size(Some(Size::Logical(LogicalSize::new(min_w, min_h))))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_max_size(Some(Size::Logical(LogicalSize::new(max_w, max_h))))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_size(Size::Logical(LogicalSize::new(target_w, target_h)))
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(pos) = top_left {
+        let _ = window.set_position(tauri::Position::Physical(pos));
+    }
+
+    Ok(())
+}
+
+async fn apply_panel_window_bounds_on_main(
+    window: tauri::WebviewWindow,
+    ctx: &AppContext,
+    explicit_width: Option<f64>,
+) -> Result<(), String> {
+    let win = window.clone();
+    let panel_min_width = ctx.panel_min_width.clone();
+    let panel_base_height = ctx.panel_base_height.clone();
+    let panel_target_height = ctx.panel_target_height.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+    window
+        .run_on_main_thread(move || {
+            let min_w = panel_min_width
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(PANEL_BASE_MIN_WIDTH);
+            let base_h = panel_base_height
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(PANEL_COLLAPSED_HEIGHT);
+            let target_h = panel_target_height.lock().map(|g| *g).unwrap_or(base_h);
+            let res = apply_panel_window_bounds_sync(&win, min_w, base_h, target_h, explicit_width);
+            let _ = tx.send(res);
+        })
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Panel resize task dropped before completing on main thread".to_string())?
 }
 
 #[derive(Clone, Serialize)]
@@ -747,43 +872,16 @@ fn format_tray_tooltip(locale: &str, state: &RoomStateSnapshot) -> String {
     }
 }
 
-fn ensure_main_admin_window(app: &AppHandle, runtime: &DamboRuntime) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-        return Ok(());
-    }
-
-    let raw_url = runtime.admin_url(None);
-    let parsed_url: tauri::Url = raw_url
-        .parse()
-        .map_err(|e| format!("Invalid admin URL '{}': {}", raw_url, e))?;
-
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed_url))
-        .title("Dambo")
-        .inner_size(1200.0, 780.0)
-        .min_inner_size(820.0, 560.0)
-        .resizable(true)
-        .decorations(true)
-        .transparent(false)
-        .always_on_top(false)
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-fn toggle_main_window(app: &AppHandle, runtime: &DamboRuntime) {
+fn toggle_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let visible = win.is_visible().unwrap_or(true);
         if visible {
             let _ = win.hide();
         } else {
-            let _ = ensure_main_admin_window(app, runtime);
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
         }
-    } else {
-        let _ = ensure_main_admin_window(app, runtime);
     }
 }
 
@@ -1101,15 +1199,9 @@ async fn start_qr_poll_flow(
     Ok(())
 }
 
-fn resolve_local_browser_url(origin: &str, path: &str) -> Result<String, String> {
-    let trimmed = path.trim();
-    if !trimmed.starts_with('/')
-        || trimmed.starts_with("//")
-        || trimmed.chars().any(|c| c.is_control())
-    {
-        return Err(format!("Invalid local path '{}'", path));
-    }
-    Ok(format!("{}{}", origin.trim_end_matches('/'), trimmed))
+#[tauri::command]
+async fn get_initial_state(ctx: State<'_, AppContext>) -> Result<InitialUiState, String> {
+    Ok(ctx.runtime.initial_ui_state())
 }
 
 #[tauri::command]
@@ -1137,15 +1229,254 @@ async fn close_plugin_desktop(
 }
 
 #[tauri::command]
+async fn open_plugin_manage(
+    plugin_name: String,
+    ctx: State<'_, AppContext>,
+) -> Result<String, String> {
+    open_plugin_manage_page(&ctx.runtime, &plugin_name)
+}
+
+#[tauri::command]
 async fn open_plugins_dir(ctx: State<'_, AppContext>) -> Result<(), String> {
     open_plugins_directory(&ctx.runtime);
     Ok(())
 }
 
 #[tauri::command]
+async fn open_admin_console(
+    view: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<String, String> {
+    Ok(open_admin_console_page(&ctx.runtime, view.as_deref()))
+}
+
+#[tauri::command]
+async fn get_pending_acl_count(ctx: State<'_, AppContext>) -> Result<usize, String> {
+    let records = ctx
+        .runtime
+        .plugin_store
+        .list_all_acl()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(records
+        .into_iter()
+        .filter(|r| r.status == AclStatus::Pending)
+        .count())
+}
+
+#[tauri::command]
 async fn get_i18n(ctx: State<'_, AppContext>) -> Result<i18n::I18nPayload, String> {
     let locale = active_locale(&ctx.runtime);
     Ok(i18n::build_payload(locale))
+}
+
+#[tauri::command]
+async fn set_locale(
+    app: AppHandle,
+    locale: String,
+    ctx: State<'_, AppContext>,
+) -> Result<i18n::I18nPayload, String> {
+    apply_locale_change(&app, &ctx.runtime, &locale)
+}
+
+#[tauri::command]
+async fn switch_room(target: String, ctx: State<'_, AppContext>) -> Result<u64, String> {
+    ctx.runtime
+        .switch_room(&target)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn disconnect_room(ctx: State<'_, AppContext>) -> Result<(), String> {
+    ctx.runtime
+        .disconnect_room()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn fetch_room_options(ctx: State<'_, AppContext>) -> Result<RoomOptionsPayload, String> {
+    Ok(ctx.runtime.fetch_room_options().await)
+}
+
+#[tauri::command]
+async fn remove_history_room(
+    room_id: u64,
+    ctx: State<'_, AppContext>,
+) -> Result<Vec<RoomHistoryEntry>, String> {
+    ctx.runtime
+        .remove_history_room(room_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_record_raw(enabled: bool, ctx: State<'_, AppContext>) -> Result<bool, String> {
+    ctx.runtime
+        .set_record_raw(enabled)
+        .map_err(|e| e.to_string())?;
+    Ok(ctx.runtime.is_record_raw_enabled())
+}
+
+#[tauri::command]
+async fn set_panel_height(
+    window: tauri::WebviewWindow,
+    height: f64,
+    width: Option<f64>,
+    base_height: Option<f64>,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    if let Some(bh) = base_height.filter(|v| v.is_finite()) {
+        let clamped_base = bh.max(PANEL_COLLAPSED_HEIGHT).ceil();
+        if let Ok(mut guard) = ctx.panel_base_height.lock() {
+            *guard = (*guard).max(clamped_base);
+        }
+    }
+    let resolved_base = ctx
+        .panel_base_height
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(PANEL_COLLAPSED_HEIGHT);
+    let clamped = clamp_panel_height(height, resolved_base);
+    if let Ok(mut guard) = ctx.panel_target_height.lock() {
+        *guard = clamped;
+    }
+    let explicit_width = width.filter(|w| w.is_finite());
+    apply_panel_window_bounds_on_main(window, &ctx, explicit_width).await
+}
+
+fn format_send_danmaku_error(locale: &str, err: SendDanmakuError) -> String {
+    match err {
+        SendDanmakuError::NotLoggedIn => i18n::t(locale, "danmaku.err_not_logged_in"),
+        SendDanmakuError::NotConnected => i18n::t(locale, "danmaku.err_not_connected"),
+        SendDanmakuError::EmptyMessage => i18n::t(locale, "danmaku.err_empty"),
+        SendDanmakuError::MessageTooLong { max } => {
+            let max_str = max.to_string();
+            i18n::t_fmt(locale, "danmaku.err_too_long", &[("max", &max_str)])
+        }
+        SendDanmakuError::RateLimited(_) => i18n::t(locale, "danmaku.err_rate_limited"),
+        SendDanmakuError::AuthExpired(_) => i18n::t(locale, "danmaku.err_auth_expired"),
+        SendDanmakuError::Rejected(reason) | SendDanmakuError::Network(reason) => {
+            i18n::t_fmt(locale, "danmaku.err_rejected", &[("reason", &reason)])
+        }
+    }
+}
+
+#[tauri::command]
+async fn send_danmaku(msg: String, ctx: State<'_, AppContext>) -> Result<(), String> {
+    let locale = active_locale(&ctx.runtime);
+    ctx.runtime
+        .send_danmaku(&msg)
+        .await
+        .map_err(|e| format_send_danmaku_error(locale, e))
+}
+
+#[tauri::command]
+async fn sync_panel_min_width(
+    window: tauri::WebviewWindow,
+    min_width: f64,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    if let Ok(mut guard) = ctx.panel_min_width.lock() {
+        *guard = min_width;
+    }
+    apply_panel_window_bounds_on_main(window, &ctx, None).await
+}
+
+#[tauri::command]
+async fn set_panel_width(
+    window: tauri::WebviewWindow,
+    width: f64,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    apply_panel_window_bounds_on_main(window, &ctx, Some(width)).await
+}
+
+#[tauri::command]
+async fn begin_panel_move(
+    window: tauri::WebviewWindow,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    let win = window.clone();
+    let origin_store = ctx.panel_drag_origin.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+    window
+        .run_on_main_thread(move || {
+            let res = match win.outer_position() {
+                Ok(pos) => {
+                    if let Ok(mut guard) = origin_store.lock() {
+                        *guard = Some(pos);
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(res);
+        })
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Panel move init dropped before completing on main thread".to_string())?
+}
+
+#[tauri::command]
+async fn move_panel_by(
+    window: tauri::WebviewWindow,
+    dx: f64,
+    dy: f64,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    if !dx.is_finite() || !dy.is_finite() {
+        return Ok(());
+    }
+    let win = window.clone();
+    let origin_store = ctx.panel_drag_origin.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+    window
+        .run_on_main_thread(move || {
+            let origin = match origin_store.lock().ok().and_then(|g| *g) {
+                Some(pos) => Some(pos),
+                None => {
+                    let pos = win.outer_position().ok();
+                    if let (Some(p), Ok(mut guard)) = (pos, origin_store.lock()) {
+                        *guard = Some(p);
+                    }
+                    pos
+                }
+            };
+            let res = if let Some(origin) = origin {
+                let scale = win.scale_factor().unwrap_or(1.0);
+                let target = tauri::PhysicalPosition::new(
+                    origin.x.saturating_add((dx * scale).round() as i32),
+                    origin.y.saturating_add((dy * scale).round() as i32),
+                );
+                win.set_position(tauri::Position::Physical(target))
+                    .map_err(|e| e.to_string())
+            } else {
+                Ok(())
+            };
+            let _ = tx.send(res);
+        })
+        .map_err(|e| e.to_string())?;
+
+    rx.await
+        .map_err(|_| "Panel move dropped before completing on main thread".to_string())?
+}
+
+#[tauri::command]
+async fn end_panel_move(ctx: State<'_, AppContext>) -> Result<(), String> {
+    if let Ok(mut guard) = ctx.panel_drag_origin.lock() {
+        *guard = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_config_file(ctx: State<'_, AppContext>) -> Result<(), String> {
+    open_config_file_in_os(&ctx.runtime);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1160,13 +1491,6 @@ async fn open_folder(kind: String, ctx: State<'_, AppContext>) -> Result<(), Str
 }
 
 #[tauri::command]
-async fn open_in_browser(path: String, ctx: State<'_, AppContext>) -> Result<String, String> {
-    let url = resolve_local_browser_url(&ctx.runtime.local_http_origin(), &path)?;
-    open_in_os(&url);
-    Ok(url)
-}
-
-#[tauri::command]
 async fn set_always_on_top(
     window: tauri::WebviewWindow,
     always_on_top: bool,
@@ -1178,8 +1502,36 @@ async fn set_always_on_top(
 }
 
 #[tauri::command]
+async fn open_qr_login(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(), String> {
+    if ctx.runtime.auth.current_state().is_login {
+        let _ = ctx.runtime.auth.logout();
+    }
+    let locale = active_locale(&ctx.runtime);
+    let created_new = ensure_qr_window(&app, locale)?;
+    if !created_new {
+        start_qr_poll_flow(app, ctx.runtime.clone(), ctx.qr_poll_cancel.clone()).await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn refresh_qr_code(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(), String> {
     start_qr_poll_flow(app, ctx.runtime.clone(), ctx.qr_poll_cancel.clone()).await
+}
+
+#[tauri::command]
+async fn minimize_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.hide().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn close_window(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(), String> {
+    if let Some(cancel) = ctx.qr_poll_cancel.lock().await.take() {
+        cancel.cancel();
+    }
+    ctx.runtime.shutdown();
+    app.exit(0);
+    Ok(())
 }
 
 fn build_log_plugin(
@@ -1437,6 +1789,10 @@ pub fn run(config_path: &str) {
         .manage(AppContext {
             runtime: runtime.clone(),
             qr_poll_cancel: qr_poll_cancel.clone(),
+            panel_min_width: Arc::new(std::sync::Mutex::new(PANEL_BASE_MIN_WIDTH)),
+            panel_base_height: Arc::new(std::sync::Mutex::new(PANEL_COLLAPSED_HEIGHT)),
+            panel_target_height: Arc::new(std::sync::Mutex::new(PANEL_COLLAPSED_HEIGHT)),
+            panel_drag_origin: Arc::new(std::sync::Mutex::new(None)),
         })
         .on_window_event(move |window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
@@ -1454,15 +1810,35 @@ pub fn run(config_path: &str) {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            get_initial_state,
             get_plugins,
             open_plugin_desktop,
             close_plugin_desktop,
+            open_plugin_manage,
             open_plugins_dir,
-            open_folder,
-            open_in_browser,
-            set_always_on_top,
+            open_admin_console,
+            get_pending_acl_count,
             get_i18n,
+            set_locale,
+            switch_room,
+            disconnect_room,
+            fetch_room_options,
+            remove_history_room,
+            set_record_raw,
+            send_danmaku,
+            set_panel_height,
+            sync_panel_min_width,
+            set_panel_width,
+            begin_panel_move,
+            move_panel_by,
+            end_panel_move,
+            open_config_file,
+            open_folder,
+            set_always_on_top,
+            open_qr_login,
             refresh_qr_code,
+            minimize_window,
+            close_window,
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -1496,10 +1872,6 @@ pub fn run(config_path: &str) {
                     rt_start.shutdown();
                     app_start.exit(1);
                     return;
-                }
-
-                if let Err(e) = ensure_main_admin_window(&app_start, &rt_start) {
-                    log::warn!("Failed to open desktop admin window on startup: {}", e);
                 }
 
                 // 2. Startup silent Bilibili cookie check with retries; pop up QR window if missing or expired
@@ -1575,19 +1947,18 @@ pub fn run(config_path: &str) {
 
             let rt_menu = runtime.clone();
             let qr_menu = qr_poll_cancel.clone();
-            let rt_tray_click = runtime.clone();
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip(i18n::t(init_locale, "tray.tooltip_disconnected"))
-                .on_tray_icon_event(move |tray, event| {
+                .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
                     } = event
                     {
-                        toggle_main_window(tray.app_handle(), &rt_tray_click);
+                        toggle_main_window(tray.app_handle());
                     }
                 })
                 .on_menu_event(move |app, event| {
@@ -1639,7 +2010,7 @@ pub fn run(config_path: &str) {
                         return;
                     }
                     match menu_id {
-                        "toggle_panel" => toggle_main_window(app, &rt_menu),
+                        "toggle_panel" => toggle_main_window(app),
                         "open_admin_console" => {
                             open_admin_console_page(&rt_menu, None);
                         }
@@ -1759,23 +2130,35 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_local_browser_url_validates_relative_paths() {
-        assert_eq!(
-            resolve_local_browser_url("http://localhost:3838", "/default/").unwrap(),
-            "http://localhost:3838/default/"
-        );
-        assert_eq!(
-            resolve_local_browser_url("http://127.0.0.1:3838/", "/default/m?tab=acl").unwrap(),
-            "http://127.0.0.1:3838/default/m?tab=acl"
-        );
-        assert_eq!(
-            resolve_local_browser_url("http://localhost:3838", "/#view=plugins").unwrap(),
-            "http://localhost:3838/#view=plugins"
-        );
-        assert!(resolve_local_browser_url("http://localhost:3838", "https://evil.com").is_err());
-        assert!(resolve_local_browser_url("http://localhost:3838", "//evil.com/path").is_err());
-        assert!(resolve_local_browser_url("http://localhost:3838", "javascript:alert(1)").is_err());
-        assert!(resolve_local_browser_url("http://localhost:3838", "/bad\npath").is_err());
+    fn test_compute_panel_width_bounds() {
+        assert_eq!(compute_panel_width_bounds(400.0), (520.0, 860.0));
+        assert_eq!(compute_panel_width_bounds(600.2), (601.0, 860.0));
+        assert_eq!(compute_panel_width_bounds(920.0), (920.0, 920.0));
+        assert_eq!(compute_panel_width_bounds(f64::NAN), (520.0, 860.0));
+        let (min_h, max_h) = compute_panel_height_bounds_for_base(PANEL_COLLAPSED_HEIGHT);
+        assert_eq!((min_h, max_h), (56.0, 420.0));
+        assert!(min_h < max_h);
+    }
+
+    #[test]
+    fn test_clamp_panel_width() {
+        assert_eq!(clamp_panel_width(480.0, 520.0), 520.0);
+        assert_eq!(clamp_panel_width(640.4, 520.0), 640.0);
+        assert_eq!(clamp_panel_width(640.6, 520.0), 641.0);
+        assert_eq!(clamp_panel_width(999.0, 520.0), 860.0);
+        assert_eq!(clamp_panel_width(600.0, 620.0), 620.0);
+        assert_eq!(clamp_panel_width(f64::NAN, 540.0), 540.0);
+    }
+
+    #[test]
+    fn test_clamp_panel_height() {
+        assert_eq!(clamp_panel_height(32.0, 56.0), 56.0);
+        assert_eq!(clamp_panel_height(108.2, 56.0), 109.0);
+        assert_eq!(clamp_panel_height(500.0, 56.0), 420.0);
+        assert_eq!(clamp_panel_height(f64::NAN, 56.0), 56.0);
+        assert_eq!(clamp_panel_height(32.0, 62.0), 62.0);
+        assert_eq!(compute_panel_height_bounds_for_base(40.0), (56.0, 420.0));
+        assert_eq!(compute_panel_height_bounds_for_base(61.2), (62.0, 420.0));
     }
 
     #[test]

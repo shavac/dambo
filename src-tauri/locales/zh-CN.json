@@ -1,5 +1,5 @@
 {
-  "tray.toggle_panel": "显示 / 隐藏主窗口",
+  "tray.toggle_panel": "显示 / 隐藏面板",
   "tray.open_admin": "打开控制面板",
   "tray.recent_rooms": "历史房间",
   "tray.recent_empty": "暂无历史房间",
@@ -41,6 +41,8 @@
   "panel.recent_rooms": "🕒 历史房间",
   "panel.history_empty": "暂无历史记录",
   "panel.history_remove": "移除",
+  "panel.pin_title": "置顶窗口",
+  "panel.unpin_title": "取消置顶",
 
   "plugin.trigger_label": "插件 ({count})",
   "plugin.trigger_title": "展开插件与桌面浮窗管理",
@@ -61,6 +63,7 @@
   "more.open_config": "📄 打开配置文件",
   "more.open_records": "📼 打开录制目录",
   "more.open_logs": "📝 打开日志目录",
+  "more.language": "🌐 语言",
   "more.relogin": "🔄 重新扫码登录",
   "more.logout": "🚪 退出登录",
   "more.minimize_title": "最小化到托盘",
@@ -83,7 +86,7 @@
   "toast.opened_desktop": "已在桌面打开插件：{name}",
   "toast.closed_desktop": "已关闭桌面插件：{name}",
   "toast.opened_manage": "已在浏览器打开管理页：{name}",
-  "toast.opened_admin": "已在浏览器打开管理后台",
+  "toast.opened_admin": "已在浏览器打开控制面板",
   "toast.opened_portal": "已在浏览器打开插件门户",
   "toast.locale_updated": "语言已切换：{locale}",
   "toast.record_raw_on": "已开启原始包录制",
@@ -115,7 +118,7 @@
   "startup.server_failed": "本地服务启动失败：{error}",
 
   "console.trigger_label": "控制台",
-  "console.trigger_title": "打开管理后台、插件门户与局域网扫码",
+  "console.trigger_title": "在浏览器中打开控制面板",
   "console.title": "Web 控制台",
   "console.open_admin": "打开管理后台",
   "console.open_portal": "打开插件门户",

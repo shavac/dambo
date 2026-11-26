@@ -1,15 +1,24 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for local Bilibili QR sign-in popup window",
+  "description": "Capability for dambo capsule and QR sign-in windows",
   "local": true,
-  "windows": ["bili-qr-login"],
+  "windows": ["main", "bili-qr-login"],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-inner-size",
+    "core:window:allow-outer-position",
+    "core:window:allow-scale-factor",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-set-min-size",
+    "core:window:allow-set-max-size",
+    "core:window:allow-create",
+    "core:window:allow-destroy",
     "core:window:allow-close",
     "core:window:allow-show",
-    "core:window:allow-hide",
-    "allow-get-i18n",
-    "allow-refresh-qr-code"
+    "core:window:allow-hide"
   ]
 }
