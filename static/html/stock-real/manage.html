@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <base href="/stock-real/" />
+  <title>美股实时行情模拟盘 · 控制面板</title>
+  <link rel="stylesheet" href="./manage.css" />
+</head>
+<body>
+  <main id="dambo-manage-root">
+    <!-- 顶部信息卡片 -->
+    <section class="card" id="sec-info">
+      <div class="between">
+        <div class="row">
+          <h1 class="intro-title" id="plugin-title">美股实时行情模拟盘</h1>
+          <div class="row" id="plugin-badges"></div>
+        </div>
+        <div class="row">
+          <button type="button" class="small" id="reload-all-btn">刷新</button>
+        </div>
+      </div>
+
+      <p class="intro-desc" id="plugin-desc">接入 Finnhub 美股实时行情的直播间模拟交易互动插件：支持中英文双语弹幕开户、买卖、全仓与清仓，实时计算持仓收益率排名。</p>
+
+      <div class="obs-bar">
+        <div class="obs-url-wrap">
+          <span class="muted">OBS 浏览器源</span>
+          <code class="obs-url-code" id="obs-url-code">-</code>
+        </div>
+        <div class="row">
+          <button type="button" class="small" id="copy-view-btn">复制 OBS 链接</button>
+          <button type="button" class="small" id="copy-obs-nosafe-btn" title="隐藏桌面悬浮窗顶部 48px 安全留白">复制纯净 OBS 链接 (?safe_top=0)</button>
+        </div>
+      </div>
+
+      <div class="tech-line" id="plugin-tech-meta">-</div>
+    </section>
+
+    <!-- 功能分区选项卡 -->
+    <nav class="main-tabs" role="tablist" aria-label="控制面板分区">
+      <button type="button" class="main-tab-btn active" role="tab" data-main-tab="settings">
+        <span>API 与赛季参数</span>
+        <span class="badge" id="tab-api-badge">未配置</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="accounts">
+        <span>观众持仓与收益</span>
+        <span class="tab-badge" id="tab-count-accounts">0</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="feed">
+        <span>交易播报与行情</span>
+        <span class="tab-badge" id="tab-count-quotes">0</span>
+      </button>
+    </nav>
+
+    <!-- 1. Finnhub API Key、新手教程与参数配置 -->
+    <section class="card" id="sec-settings">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">Finnhub 美股行情源配置</h2>
+          <div class="muted">纯前端浏览器直连 Finnhub 报价接口，内置 60 次/分钟队列节流与本地缓存</div>
+        </div>
+        <div class="row" id="engine-status-bar">
+          <span class="badge warn" id="runtime-state-badge">等待连接展示页</span>
+        </div>
+      </div>
+
+      <div class="item-box" style="margin-bottom: 14px;">
+        <div class="item-top">
+          <strong>Finnhub API Key</strong>
+          <span class="muted">保存后立即同步到 OBS 展示端并开启真实报价</span>
+        </div>
+        <div class="row">
+          <input type="password" id="api-key-input" placeholder="粘贴 Finnhub 免费 API Key" autocomplete="off" style="flex: 1 1 260px;" />
+          <button type="button" class="small" id="toggle-key-vis-btn">显示</button>
+          <button type="button" class="primary small" id="save-key-btn">保存 Key</button>
+          <button type="button" class="ok small" id="test-conn-btn">测试连通性 (AAPL)</button>
+        </div>
+        <div class="test-result muted" id="conn-test-result">尚未执行连通性测试</div>
+      </div>
+
+      <!-- 内嵌新手教程卡片（纯 DOM 文本说明） -->
+      <div class="tutorial-card" aria-label="Finnhub API Key 获取教程">
+        <div class="item-top">
+          <strong>新手获取免费 Finnhub API Key（3 步上手）</strong>
+          <button type="button" class="small" id="copy-finnhub-url-btn">复制注册网址</button>
+        </div>
+        <ol class="tutorial-steps">
+          <li>访问 Finnhub 官网（<code>https://finnhub.io/register</code>）使用邮箱免费注册账号；</li>
+          <li>登录后在 Dashboard 首页顶部直接复制自动生成的免费 <code>API Key</code>（无需绑定信用卡，免费额度 60 次请求/分钟）；</li>
+          <li>将 Key 粘贴至上方输入框并点击保存即可开启美股真实报价。</li>
+        </ol>
+      </div>
+
+      <div class="card-header" style="margin-top: 18px;">
+        <div>
+          <h2 class="card-title">赛季与交易参数</h2>
+          <div class="muted">修改即时持久化并下发至在线展示端</div>
+        </div>
+        <div class="row">
+          <button type="button" class="primary small" id="save-params-btn">保存参数</button>
+          <button type="button" class="danger small" id="reset-params-btn">恢复全部默认</button>
+        </div>
+      </div>
+
+      <div class="field-grid">
+        <label>初始模拟积分（initial_balance）<br />
+          <input type="number" id="cfg-initial-balance" min="1000" max="100000000" step="1000" />
+        </label>
+        <label>行情轮询间隔秒（poll_interval_sec）<br />
+          <input type="number" id="cfg-poll-sec" min="2" max="120" step="1" />
+        </label>
+        <label>默认关注标的（watchlist_default）<br />
+          <input type="text" id="cfg-watchlist" maxlength="160" placeholder="NVDA,AAPL,TSLA,MSFT,SPY" />
+        </label>
+        <label>榜单人数上限（top_n）<br />
+          <input type="number" id="cfg-top-n" min="3" max="20" step="1" />
+        </label>
+        <label>单观众下单冷却毫秒（trade_cooldown_ms）<br />
+          <input type="number" id="cfg-cooldown-ms" min="0" max="10000" step="100" />
+        </label>
+      </div>
+    </section>
+
+    <!-- 2. 观众持仓与赛季管理 -->
+    <section class="card hidden" id="sec-accounts">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">观众持仓明细与赛季控制</h2>
+          <div class="muted" id="accounts-summary-text">共 0 位已开户交易员</div>
+        </div>
+        <div class="row">
+          <button type="button" class="danger small" id="reset-season-btn">重置新赛季（清空全员账本）</button>
+        </div>
+      </div>
+
+      <form class="item-box" id="adjust-balance-form" style="margin-bottom: 14px;">
+        <div class="item-top">
+          <strong>手动调整指定观众模拟积分</strong>
+          <span class="muted">可发放活动奖励、惩罚或直接为观众手动开户</span>
+        </div>
+        <div class="field-grid">
+          <label>观众 UID (选填)<br /><input type="number" id="adj-uid" min="0" step="1" placeholder="例如 42 或留空" /></label>
+          <label>观众昵称 *<br /><input type="text" id="adj-name" maxlength="64" placeholder="输入观众昵称" required /></label>
+          <label>调整方式<br />
+            <select id="adj-op">
+              <option value="add">累加可用模拟积分 (+Δ)</option>
+              <option value="set">设为目标可用模拟积分 (=)</option>
+            </select>
+          </label>
+          <label>模拟积分数额 *<br /><input type="number" id="adj-val" step="0.01" value="10000" required /></label>
+        </div>
+        <div class="row">
+          <button type="submit" class="primary small">应用积分调整</button>
+        </div>
+      </form>
+
+      <div class="kv-list" id="accounts-list"></div>
+    </section>
+
+    <!-- 3. 实时成交播报与行情快照 -->
+    <section class="card hidden" id="sec-feed">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">实时成交与查账播报（<code>trade_feed</code>）</h2>
+          <div class="muted">订阅本插件公开 Topic，实时呈现观众开户、下单与平仓结果</div>
+        </div>
+      </div>
+      <div class="kv-list" id="manage-feed-list" style="margin-bottom: 16px;"></div>
+
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">内存缓存行情快照（<code>Dambo.memory/quotes</code>）</h2>
+          <div class="muted">由 OBS 展示端统一轮询刷新并写入内存命名空间</div>
+        </div>
+      </div>
+      <div class="quote-snapshot-grid" id="manage-quotes-grid"></div>
+    </section>
+  </main>
+
+  <!-- 远程管理员解锁弹窗 -->
+  <div class="modal-backdrop" id="auth-modal">
+    <form class="modal" id="auth-form">
+      <h2 class="card-title">需要远程管理口令</h2>
+      <div class="muted">当前主机开启了 <code>[server].admin_token</code>，请输入管理员口令以解锁管理操作。</div>
+      <input type="password" id="auth-token-input" placeholder="输入 admin_token" autocomplete="current-password" required />
+      <div class="muted hidden" id="auth-error-text" style="color: #fca5a5;"></div>
+      <div class="row" style="justify-content: flex-end;">
+        <button type="submit" class="primary">验证并解锁</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/sdk/dambo.js"></script>
+  <script src="./manage.js"></script>
+</body>
+</html>

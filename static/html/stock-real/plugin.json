@@ -1,0 +1,78 @@
+{
+  "plugin_id": "stock-real",
+  "version": "0.1.0",
+  "name": "美股实时行情模拟盘",
+  "description": "接入 Finnhub 美股真实行情的直播间模拟交易互动插件：支持中英文双语弹幕开户、买入、全仓、卖出与清仓，实时计算持仓收益率排行榜并配备自定义控制面板。",
+  "obs": {
+    "width": 480,
+    "height": 680
+  },
+  "defaults": {
+    "finnhub_api_key": {
+      "type": "string",
+      "value": "",
+      "meta": {
+        "max_length": 128,
+        "placeholder": "粘贴 Finnhub 免费 API Key",
+        "label": "Finnhub API Key",
+        "description": "从 finnhub.io 免费注册获取（免费额度 60 次请求/分钟）"
+      }
+    },
+    "initial_balance": {
+      "type": "number",
+      "value": 100000,
+      "meta": {
+        "min": 1000,
+        "max": 100000000,
+        "step": 1000,
+        "format": "integer",
+        "label": "初始模拟积分",
+        "description": "观众首次开户或重置新赛季时默认发放的模拟积分"
+      }
+    },
+    "poll_interval_sec": {
+      "type": "number",
+      "value": 5,
+      "meta": {
+        "min": 2,
+        "max": 120,
+        "step": 1,
+        "format": "integer",
+        "label": "行情轮询间隔（秒）",
+        "description": "活跃美股代码的基准轮询间隔（内置 60 次/分钟队列节流保护）"
+      }
+    },
+    "watchlist_default": {
+      "type": "string",
+      "value": "NVDA,AAPL,TSLA,MSFT,SPY",
+      "meta": {
+        "max_length": 160,
+        "placeholder": "NVDA,AAPL,TSLA,MSFT,SPY",
+        "label": "默认关注标的（逗号分隔）",
+        "description": "无观众持仓或行情卡片空位补齐时自动轮询的美股代码"
+      }
+    },
+    "top_n": {
+      "type": "number",
+      "value": 6,
+      "meta": {
+        "min": 3,
+        "max": 20,
+        "step": 1,
+        "format": "integer",
+        "label": "榜单展示人数上限"
+      }
+    },
+    "trade_cooldown_ms": {
+      "type": "number",
+      "value": 1500,
+      "meta": {
+        "min": 0,
+        "max": 10000,
+        "step": 100,
+        "format": "integer",
+        "label": "单观众指令冷却（毫秒）"
+      }
+    }
+  }
+}

@@ -622,7 +622,14 @@ fn test_builtin_plugin_manifests_and_defaults_are_valid() {
     let html_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html");
     let plugins = crate::plugin::scan_plugins(&html_dir);
     let names: BTreeSet<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
-    for required in ["default", "list", "sc-ticker", "game24", "scoreboard"] {
+    for required in [
+        "default",
+        "list",
+        "sc-ticker",
+        "game24",
+        "scoreboard",
+        "stock-real",
+    ] {
         assert!(
             names.contains(required),
             "Expected built-in plugin '{}' in {:?}, got {:?}",
@@ -635,7 +642,7 @@ fn test_builtin_plugin_manifests_and_defaults_are_valid() {
     for p in &plugins {
         assert!(matches!(
             p.name.as_str(),
-            "default" | "list" | "sc-ticker" | "game24" | "scoreboard"
+            "default" | "list" | "sc-ticker" | "game24" | "scoreboard" | "stock-real"
         ));
         assert!(
             !p.plugin_id.is_empty(),
@@ -736,6 +743,93 @@ fn test_scoreboard_plugin_assets_and_security_contract() {
         assert!(
             !content.contains("fetch("),
             "{} must use Dambo SDK rather than raw fetch()",
+            name
+        );
+        assert!(
+            !content.contains("localhost") && !content.contains("127.0.0.1"),
+            "{} must not hardcode hostnames",
+            name
+        );
+    }
+}
+
+#[test]
+fn test_stock_real_plugin_assets_and_security_contract() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html/stock-real");
+    for file in [
+        "plugin.json",
+        "plugin.html",
+        "plugin.css",
+        "plugin.js",
+        "manage.html",
+        "manage.css",
+        "manage.js",
+    ] {
+        assert!(
+            dir.join(file).is_file(),
+            "Missing stock-real asset file '{}'",
+            file
+        );
+    }
+
+    let html_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html");
+    let plugins = crate::plugin::scan_plugins(&html_dir);
+    let sr = plugins
+        .iter()
+        .find(|p| p.name == "stock-real")
+        .expect("stock-real plugin should be discovered by scan_plugins");
+    assert_eq!(sr.plugin_id, "stock-real");
+    assert_eq!(sr.version, "0.1");
+    assert_eq!(sr.namedomain, "stock-real@0");
+    assert!(sr.has_custom_manage);
+    assert_eq!(
+        sr.parsed_defaults.get("initial_balance").map(|e| &e.value),
+        Some(&json!(100000))
+    );
+    assert_eq!(
+        sr.parsed_defaults
+            .get("poll_interval_sec")
+            .map(|e| &e.value),
+        Some(&json!(5))
+    );
+    assert!(sr.parsed_defaults.contains_key("finnhub_api_key"));
+
+    let plugin_html = fs::read_to_string(dir.join("plugin.html")).unwrap();
+    let plugin_js = fs::read_to_string(dir.join("plugin.js")).unwrap();
+    let manage_html = fs::read_to_string(dir.join("manage.html")).unwrap();
+    let manage_js = fs::read_to_string(dir.join("manage.js")).unwrap();
+
+    assert!(plugin_html.contains("no-referrer"));
+    assert!(plugin_html.contains("<base href=\"/stock-real/\""));
+    assert!(plugin_html.contains("<script src=\"/sdk/dambo.js\"></script>"));
+    assert!(plugin_html.contains("./plugin.js"));
+    assert!(plugin_html.contains("不构成任何投资建议"));
+
+    assert!(!manage_html.contains("no-referrer"));
+    assert!(!manage_html.contains("<a "));
+    assert!(manage_html.contains("<base href=\"/stock-real/\""));
+    assert!(manage_html.contains("<script src=\"/sdk/dambo.js\"></script>"));
+    assert!(manage_html.contains("./manage.js"));
+    assert!(manage_html.contains("https://finnhub.io/register"));
+
+    assert!(plugin_js.contains("https://finnhub.io/api/v1/quote"));
+    assert!(manage_js.contains("https://finnhub.io/api/v1/quote"));
+    assert!(manage_js.contains("Dambo.plugin.unlockManage"));
+
+    for (name, content) in [
+        ("plugin.html", &plugin_html),
+        ("plugin.js", &plugin_js),
+        ("manage.html", &manage_html),
+        ("manage.js", &manage_js),
+    ] {
+        assert!(
+            !content.contains("innerHTML"),
+            "{} must never use innerHTML",
+            name
+        );
+        assert!(
+            !content.contains("fetch('/api/") && !content.contains("fetch(\"/api/"),
+            "{} must use Dambo SDK for platform APIs",
             name
         );
         assert!(

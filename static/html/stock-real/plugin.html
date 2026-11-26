@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
+  <base href="/stock-real/" />
+  <title>美股实时行情模拟盘</title>
+  <link rel="stylesheet" href="./plugin.css" />
+</head>
+<body>
+  <main id="app-shell" class="app-shell">
+    <section class="terminal-card" aria-label="美股实时行情模拟盘终端">
+      <!-- 顶部标题与行情/弹幕状态栏 -->
+      <header class="topbar">
+        <div class="title-group">
+          <span class="badge-tag">US STOCK</span>
+          <h1 class="board-title">美股实时行情模拟盘</h1>
+        </div>
+        <div class="status-group">
+          <span id="market-status-pill" class="status-pill warn">等待 Key</span>
+          <span id="ws-badge" class="ws-pill connecting">连接中</span>
+        </div>
+      </header>
+
+      <!-- 常驻高对比度双语弹幕指令提示条 -->
+      <div id="cmd-hint-bar" class="cmd-hint-bar" aria-label="弹幕指令提示">
+        <div class="cmd-line">
+          <span class="cmd-prefix">弹幕指令</span>
+          <span class="cmd-chip">开户 / open</span>
+          <span class="cmd-sep">｜</span>
+          <span class="cmd-chip">买入 NVDA 10 / buy NVDA 10</span>
+          <span class="cmd-sep">｜</span>
+          <span class="cmd-chip">全仓 AAPL / allin AAPL</span>
+        </div>
+        <div class="cmd-line">
+          <span class="cmd-chip">卖出 NVDA 10 / sell NVDA 10</span>
+          <span class="cmd-sep">｜</span>
+          <span class="cmd-chip">清仓 NVDA / close NVDA</span>
+          <span class="cmd-sep">｜</span>
+          <span class="cmd-chip">1股起买 · 支持大小写</span>
+        </div>
+      </div>
+
+      <!-- API 状态 / 限流告警条 -->
+      <div id="alert-banner" class="alert-banner" role="status" aria-live="polite">
+        <span id="alert-text">未配置 Finnhub API Key，请在管理端 /stock-real/m 填入免费 Key</span>
+      </div>
+
+      <!-- 美股实时报价网格 -->
+      <section class="panel-block" aria-label="实时行情">
+        <div class="section-head">
+          <span class="section-title">实时报价（USD）</span>
+          <span id="quote-meta-text" class="section-meta">60 req/min 队列节流</span>
+        </div>
+        <div id="quote-grid" class="quote-grid"></div>
+      </section>
+
+      <!-- 实时成交与查账播报流 -->
+      <section class="panel-block" aria-label="实时成交播报">
+        <div class="section-head">
+          <span class="section-title">交易与查账播报</span>
+          <span id="feed-meta-text" class="section-meta">等待弹幕下单…</span>
+        </div>
+        <ul id="trade-feed-list" class="trade-feed-list" aria-live="polite"></ul>
+      </section>
+
+      <!-- 模拟积分与收益率排行榜 -->
+      <section class="panel-block grow" aria-label="模拟积分排行榜">
+        <div class="section-head">
+          <span class="section-title">总权益与收益率榜（单位：模拟积分）</span>
+          <span id="rank-meta-text" class="section-meta">按现金+持仓市值</span>
+        </div>
+        <ol id="leaderboard-list" class="leaderboard-list"></ol>
+      </section>
+
+      <!-- 底部合规免责水印 -->
+      <footer class="disclaimer-bar">
+        <span class="disclaimer-text">基于真实行情的模拟互动，数据存在延迟，不构成任何投资建议</span>
+        <span id="stats-pill" class="stats-pill">0 户 · 0 标的</span>
+      </footer>
+    </section>
+  </main>
+
+  <script src="/sdk/dambo.js"></script>
+  <script src="./plugin.js"></script>
+</body>
+</html>
