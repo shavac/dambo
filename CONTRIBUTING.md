@@ -31,7 +31,7 @@ All built-in and community plugins under `static/html/<plugin-id>/` must remain 
 - **Standard 4-File Layout** (plus optional `assets/`):
   ```text
   static/html/<plugin-id>/
-  ├── index.html      # [REQUIRED] Entry HTML with <meta name="referrer" content="no-referrer"> and <base href="/<plugin-id>/">
+  ├── plugin.html     # [REQUIRED] Entry HTML with <meta name="referrer" content="no-referrer"> and <base href="/<plugin-id>/">
   ├── plugin.json     # [RECOMMENDED] Metadata & OBS/Desktop overlay dimensions
   ├── plugin.css      # [OPTIONAL] Stylesheet (referenced as ./plugin.css)
   ├── plugin.js       # [OPTIONAL] Logic (referenced as ./plugin.js, loaded after synchronous /sdk/dambo.js)

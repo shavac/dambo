@@ -5,6 +5,7 @@ pub mod db;
 pub mod event_engine;
 pub mod hub;
 pub mod model;
+pub mod net;
 pub mod plugin;
 pub mod plugin_api;
 pub mod plugin_hub;
@@ -137,7 +138,10 @@ impl DamboRuntime {
             state_store.current_room_id().is_some_and(|id| id > 0) || cfg.bilibili.room_id > 0,
         ));
         let effective_record_raw = state_store.record_raw().unwrap_or(cfg.record.record_raw);
-        let plugin_store = Arc::new(PluginStore::from_database(db.clone())?);
+        let plugin_store = Arc::new(PluginStore::from_database_with_mode(
+            db.clone(),
+            cfg.server.security_mode,
+        )?);
         let plugins = Arc::new(PluginRegistry::new(html_dir.clone()));
         let plugin_hub = Arc::new(PluginEventHub::new());
         let admin_sessions = Arc::new(AdminSessionStore::new());
@@ -519,6 +523,11 @@ impl DamboRuntime {
         }
     }
 
+    /// Build LAN discovery URLs & SVG/terminal QR codes for the configured server and requested path.
+    pub fn lan_urls(&self, path: Option<&str>) -> crate::net::LanUrlsPayload {
+        crate::net::build_lan_urls(&self.config.server, path, true)
+    }
+
     pub fn initial_ui_state(&self) -> InitialUiState {
         let persisted = self.state_store.snapshot();
         let room_state = self.hub.room_state();
@@ -529,6 +538,7 @@ impl DamboRuntime {
             auth_state: self.auth.current_state(),
             server_host: self.config.server.host.clone(),
             server_port: self.config.server.port,
+            security_mode: self.config.server.security_mode,
             history_rooms: persisted.room_history,
             record_raw: self.is_record_raw_enabled(),
             connecting,

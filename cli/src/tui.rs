@@ -3,8 +3,8 @@ use crate::command::{
 };
 use crate::format::{
     DisplayFilter, FeedEntry, FilterMode, display_listen_host, format_cli_log, format_history,
-    format_plugins, format_room_info_lines, format_room_options, format_send_danmaku_error,
-    format_snapshot_item, format_user_info_lines, is_ephemeral_kind,
+    format_lan_info, format_plugins, format_room_info_lines, format_room_options,
+    format_send_danmaku_error, format_snapshot_item, format_user_info_lines, is_ephemeral_kind,
 };
 use crate::logger::{CliLogEntry, CliLoggerHandle};
 use anyhow::Result;
@@ -352,6 +352,8 @@ struct TuiApp {
     seen_snapshot_ids: HashSet<u64>,
     announced_room_id: Option<u64>,
     last_announced_auth: Option<(u64, String)>,
+    lan_path: Option<String>,
+    lan_selected_idx: usize,
     input: InputState,
     status_notice: Option<(String, bool, Instant)>,
     pending_login: bool,
@@ -378,6 +380,8 @@ impl TuiApp {
             seen_snapshot_ids: HashSet::new(),
             announced_room_id: None,
             last_announced_auth: None,
+            lan_path: None,
+            lan_selected_idx: 0,
             input: InputState::default(),
             status_notice: None,
             pending_login: false,
@@ -732,6 +736,33 @@ impl TuiApp {
                 let cfg = self.runtime.config_snapshot();
                 let plugins = self.runtime.list_plugins();
                 self.push_entries(format_plugins(&plugins, &cfg.server.host, cfg.server.port));
+            }
+            CliCommand::Lan { selector } => {
+                let mut err_msg: Option<String> = None;
+                if let Some(raw) = selector {
+                    let trimmed = raw.trim();
+                    if let Ok(num) = trimmed.parse::<usize>() {
+                        let payload = self.runtime.lan_urls(self.lan_path.as_deref());
+                        if !payload.urls.is_empty() && (num == 0 || num > payload.urls.len()) {
+                            err_msg = Some(format!(
+                                "序号 {} 超出范围（可用范围: 1..={}）",
+                                num,
+                                payload.urls.len()
+                            ));
+                        } else if !payload.urls.is_empty() {
+                            self.lan_selected_idx = num - 1;
+                        }
+                    } else if !trimmed.is_empty() {
+                        self.lan_path = Some(trimmed.to_string());
+                        self.lan_selected_idx = 0;
+                    }
+                }
+                if let Some(msg) = err_msg {
+                    self.push_entry(FeedEntry::error(msg));
+                } else {
+                    let payload = self.runtime.lan_urls(self.lan_path.as_deref());
+                    self.push_entries(format_lan_info(&payload, self.lan_selected_idx));
+                }
             }
             CliCommand::RawStatus => {
                 let enabled = self.runtime.is_record_raw_enabled();
@@ -1191,8 +1222,9 @@ where
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<CliLogEntry>();
     let mut app = TuiApp::new(runtime.clone());
 
-    // Seed initial user info, startup help hint, and any pre-existing room snapshot.
+    // Seed initial user info, startup LAN discovery card, help hint, and any pre-existing room snapshot.
     app.announce_user_info(&action_tx, false);
+    app.push_entries(format_lan_info(&runtime.lan_urls(None), 0));
     app.push_entry(FeedEntry::system(
         "提示: 直接输入文本回车发送弹幕，输入 /help 查看命令，Ctrl+C 退出",
     ));

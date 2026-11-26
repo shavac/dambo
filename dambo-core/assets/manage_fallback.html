@@ -197,6 +197,63 @@
       gap: 12px;
     }
     .hidden { display: none !important; }
+    .info-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    .info-main {
+      flex: 1 1 320px;
+      min-width: 0;
+    }
+    .info-right {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+      max-width: 100%;
+    }
+    .lan-box {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      max-width: 100%;
+    }
+    .lan-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+      max-width: 340px;
+    }
+    .lan-url-code {
+      display: inline-block;
+      word-break: break-all;
+      max-width: 100%;
+    }
+    .lan-ip-btn.active {
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.16);
+      color: #7dd3fc;
+      font-weight: 600;
+    }
+    .lan-qr-img {
+      width: 92px;
+      height: 92px;
+      border-radius: 6px;
+      background: #ffffff;
+      padding: 4px;
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+      display: block;
+    }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
@@ -210,18 +267,36 @@
   <main id="dambo-manage-root">
     <!-- 1. Plugin Info Header -->
     <section class="card" id="sec-info">
-      <div class="card-header">
-        <div>
+      <div class="info-header">
+        <div class="info-main">
           <h1 class="card-title" id="plugin-title">正在加载插件信息…</h1>
           <div class="muted" id="plugin-desc"></div>
+          <div class="meta-badges" id="plugin-badges"></div>
         </div>
-        <div class="row">
-          <a class="btn-link primary" id="open-view-link" href="./" target="_blank" rel="noopener">打开展示页</a>
-          <button type="button" id="copy-view-btn">复制展示页地址</button>
-          <button type="button" id="reload-all-btn">刷新面板</button>
+        <div class="info-right">
+          <div class="row">
+            <a class="btn-link primary" id="open-view-link" href="./" target="_blank" rel="noopener">打开展示页</a>
+            <button type="button" id="copy-view-btn">复制展示页地址</button>
+            <button type="button" id="toggle-lan-btn">局域网链接 / 二维码</button>
+            <button type="button" id="reload-all-btn">刷新面板</button>
+          </div>
+          <div class="lan-box" id="lan-box">
+            <div class="lan-meta">
+              <div class="row">
+                <strong style="font-size: 12px;">局域网管理入口</strong>
+                <span class="badge" id="lan-mode-badge">检测中</span>
+              </div>
+              <div class="row hidden" id="lan-ip-tabs"></div>
+              <div class="row">
+                <code class="lan-url-code" id="lan-url-code">正在扫描本机局域网地址…</code>
+                <button type="button" class="small" id="lan-copy-btn">复制</button>
+              </div>
+              <div class="muted hidden" id="lan-local-note"></div>
+            </div>
+            <img class="lan-qr-img hidden" id="lan-qr-img" alt="局域网访问二维码" />
+          </div>
         </div>
       </div>
-      <div class="meta-badges" id="plugin-badges"></div>
     </section>
 
     <!-- 2. Typed Default Config Form -->
@@ -341,7 +416,15 @@
       const pluginBadgesEl = document.getElementById('plugin-badges');
       const openViewLinkEl = document.getElementById('open-view-link');
       const copyViewBtnEl = document.getElementById('copy-view-btn');
+      const toggleLanBtnEl = document.getElementById('toggle-lan-btn');
       const reloadAllBtnEl = document.getElementById('reload-all-btn');
+      const lanBoxEl = document.getElementById('lan-box');
+      const lanModeBadgeEl = document.getElementById('lan-mode-badge');
+      const lanIpTabsEl = document.getElementById('lan-ip-tabs');
+      const lanUrlCodeEl = document.getElementById('lan-url-code');
+      const lanCopyBtnEl = document.getElementById('lan-copy-btn');
+      const lanLocalNoteEl = document.getElementById('lan-local-note');
+      const lanQrImgEl = document.getElementById('lan-qr-img');
 
       const secConfigEl = document.getElementById('sec-config');
       const configListEl = document.getElementById('config-list');
@@ -375,6 +458,9 @@
       const toastEl = document.getElementById('toast');
 
       let currentMeta = null;
+      let lanPayload = null;
+      let lanSelectedIdx = 0;
+      let lanExpanded = true;
       let activeStore = 'persist';
       let activeNs = '';
       let toastTimer = null;
@@ -553,6 +639,7 @@
       }
 
       function renderMetaHeader(meta) {
+        if (!meta) return;
         currentMeta = meta;
         pluginTitleEl.textContent = `${meta.name || meta.plugin_name} 管理控制台`;
         pluginDescEl.textContent = meta.description || '无描述信息';
@@ -563,8 +650,87 @@
         pluginBadgesEl.appendChild(makeBadge(`plugin_id: ${meta.plugin_id}`));
         pluginBadgesEl.appendChild(makeBadge(`version: ${meta.version}`));
         pluginBadgesEl.appendChild(makeBadge(`namedomain: ${meta.namedomain}`, 'ok'));
+        if (lanPayload && lanPayload.security_mode) {
+          const isOpen = lanPayload.security_mode === 'open';
+          pluginBadgesEl.appendChild(
+            makeBadge(
+              isOpen ? '安全模式: Open (局域网便利)' : '安全模式: Strict (零信任)',
+              isOpen ? 'warn' : 'accent'
+            )
+          );
+        }
         if (meta.obs && (meta.obs.width || meta.obs.height)) {
           pluginBadgesEl.appendChild(makeBadge(`OBS: ${meta.obs.width || '?'}×${meta.obs.height || '?'}`));
+        }
+      }
+
+      function renderLanBox() {
+        lanBoxEl.classList.toggle('hidden', !lanExpanded);
+        if (!lanPayload) {
+          lanModeBadgeEl.textContent = '检测中';
+          lanModeBadgeEl.className = 'badge';
+          lanUrlCodeEl.textContent = '正在获取局域网地址…';
+          lanIpTabsEl.classList.add('hidden');
+          lanLocalNoteEl.classList.add('hidden');
+          lanQrImgEl.classList.add('hidden');
+          return;
+        }
+
+        const isOpen = lanPayload.security_mode === 'open';
+        lanModeBadgeEl.textContent = isOpen ? 'Open 模式' : 'Strict 模式';
+        lanModeBadgeEl.className = isOpen ? 'badge warn' : 'badge accent';
+
+        const urls = Array.isArray(lanPayload.urls) ? lanPayload.urls : [];
+        if (lanPayload.local_only || urls.length === 0) {
+          clearChildren(lanIpTabsEl);
+          lanIpTabsEl.classList.add('hidden');
+          lanUrlCodeEl.textContent = lanPayload.local_url || window.location.href;
+          lanLocalNoteEl.textContent = '仅限本机访问（当前监听回环地址或未检测到局域网私网 IPv4）';
+          lanLocalNoteEl.classList.remove('hidden');
+          lanQrImgEl.classList.add('hidden');
+          return;
+        }
+
+        if (lanSelectedIdx >= urls.length) {
+          lanSelectedIdx = 0;
+        }
+        const activeEntry = urls[lanSelectedIdx];
+        lanLocalNoteEl.classList.add('hidden');
+        lanUrlCodeEl.textContent = activeEntry.url;
+
+        if (activeEntry.qr_svg) {
+          lanQrImgEl.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(activeEntry.qr_svg);
+          lanQrImgEl.classList.remove('hidden');
+        } else {
+          lanQrImgEl.classList.add('hidden');
+        }
+
+        clearChildren(lanIpTabsEl);
+        if (urls.length > 1) {
+          lanIpTabsEl.classList.remove('hidden');
+          urls.forEach((entry, idx) => {
+            const btn = makeBtn(entry.ip, idx === lanSelectedIdx ? 'small lan-ip-btn active' : 'small lan-ip-btn', () => {
+              lanSelectedIdx = idx;
+              renderLanBox();
+            });
+            lanIpTabsEl.appendChild(btn);
+          });
+        } else {
+          lanIpTabsEl.classList.add('hidden');
+        }
+      }
+
+      async function loadLanPanel() {
+        try {
+          const payload = await Dambo.system.lanUrls(window.location.pathname);
+          lanPayload = payload;
+          renderLanBox();
+          if (currentMeta) {
+            renderMetaHeader(currentMeta);
+          }
+        } catch (err) {
+          lanLocalNoteEl.textContent = (err && err.message) ? err.message : '获取局域网地址失败';
+          lanLocalNoteEl.classList.remove('hidden');
         }
       }
 
@@ -738,7 +904,7 @@
           }
 
           if (resolved.length === 0) {
-            renderEmpty(aclGrantedEl, '暂无已授权或已拒绝规则');
+            renderEmpty(aclGrantedEl, '暂无已授权、自动放行或已拒绝规则');
           } else {
             clearChildren(aclGrantedEl);
             for (const rec of resolved) {
@@ -747,19 +913,59 @@
               const top = document.createElement('div');
               top.className = 'item-top';
 
+              const isAuto = rec.status === 'auto_granted';
+              const isDenied = rec.status === 'denied' || rec.level === 'none';
+
               const info = document.createElement('div');
               info.className = 'row';
               const reqTitle = document.createElement('strong');
               reqTitle.textContent = formatRequesterText(rec);
               info.appendChild(reqTitle);
               info.appendChild(makeBadge(rec.resource, 'accent'));
-              info.appendChild(
-                makeBadge(`${rec.status} (${rec.level})`, rec.level === 'none' ? 'danger' : 'ok')
-              );
+              if (isAuto) {
+                info.appendChild(makeBadge(`自动放行 (${rec.level})`, 'warn'));
+              } else if (isDenied) {
+                info.appendChild(makeBadge(`已拒绝 (${rec.level})`, 'danger'));
+              } else {
+                info.appendChild(makeBadge(`已明确授权 (${rec.level})`, 'ok'));
+              }
               top.appendChild(info);
 
               const controls = document.createElement('div');
               controls.className = 'row';
+              if (isAuto) {
+                controls.appendChild(
+                  makeBtn('转为明确授权', 'primary small', async () => {
+                    try {
+                      await Dambo.acl.set(rec.requester, {
+                        resource: rec.resource,
+                        level: rec.level,
+                        note: '管理员确认明确授权',
+                      });
+                      showToast(`已将 ${rec.requester} -> ${rec.resource} 转为明确授权`);
+                      await loadAclPanel();
+                    } catch (err) {
+                      handleApiError(err, '明确授权失败');
+                    }
+                  })
+                );
+                controls.appendChild(
+                  makeBtn('撤销并拦截', 'danger small', async () => {
+                    try {
+                      await Dambo.acl.set(rec.requester, {
+                        resource: rec.resource,
+                        level: 'none',
+                        note: '管理员撤销自动放行',
+                      });
+                      showToast(`已撤销并拦截 ${rec.requester} -> ${rec.resource}`);
+                      await loadAclPanel();
+                    } catch (err) {
+                      handleApiError(err, '撤销并拦截失败');
+                    }
+                  })
+                );
+              }
+
               const sel = makeLevelSelect(
                 allowedGrantLevels(rec.resource).concat(['none']),
                 rec.level
@@ -773,13 +979,13 @@
                   handleApiError(err, '更新失败');
                 }
               });
-              const delBtn = makeBtn('撤销删除', 'danger small', async () => {
+              const delBtn = makeBtn('删除规则', 'danger small', async () => {
                 try {
                   await Dambo.acl.remove(rec.requester, rec.resource);
-                  showToast(`已撤销 ${rec.requester} -> ${rec.resource}`);
+                  showToast(`已删除 ${rec.requester} -> ${rec.resource}`);
                   await loadAclPanel();
                 } catch (err) {
-                  handleApiError(err, '撤销失败');
+                  handleApiError(err, '删除失败');
                 }
               });
 
@@ -788,6 +994,13 @@
               controls.appendChild(delBtn);
               top.appendChild(controls);
               box.appendChild(top);
+
+              if (isAuto) {
+                const hint = document.createElement('div');
+                hint.className = 'muted';
+                hint.textContent = 'Open 模式下自动放行，可随时撤销并拦截；切换为 Strict 模式后自动放行将失效，如需长期保留请转为明确授权。';
+                box.appendChild(hint);
+              }
               aclGrantedEl.appendChild(box);
             }
           }
@@ -805,11 +1018,17 @@
               ownerEl.textContent = `目标: ${rec.owner}`;
               top.appendChild(ownerEl);
               top.appendChild(makeBadge(rec.resource, 'accent'));
+              const outStatusLabel = rec.status === 'auto_granted'
+                ? '自动放行'
+                : (rec.status === 'granted' ? '已明确授权' : (rec.status === 'pending' ? '待审批' : '已拒绝'));
+              const outBadgeCls = rec.status === 'granted'
+                ? 'ok'
+                : (rec.status === 'auto_granted' || rec.status === 'pending' ? 'warn' : 'danger');
               top.appendChild(
                 makeBadge(
-                  `${rec.status} / 当前: ${rec.level}` +
+                  `${outStatusLabel} / 当前: ${rec.level}` +
                     (rec.requested_level ? ` (申请 ${rec.requested_level})` : ''),
-                  rec.status === 'granted' ? 'ok' : (rec.status === 'pending' ? 'warn' : 'danger')
+                  outBadgeCls
                 )
               );
               box.appendChild(top);
@@ -1036,6 +1255,22 @@
         }
       });
 
+      toggleLanBtnEl.addEventListener('click', () => {
+        lanExpanded = !lanExpanded;
+        renderLanBox();
+      });
+
+      lanCopyBtnEl.addEventListener('click', async () => {
+        const text = lanUrlCodeEl.textContent ? lanUrlCodeEl.textContent.trim() : '';
+        if (!text) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          showToast('已复制局域网访问地址: ' + text);
+        } catch (_) {
+          showToast('局域网访问地址: ' + text);
+        }
+      });
+
       reloadAllBtnEl.addEventListener('click', () => {
         initManagePage();
       });
@@ -1137,6 +1372,30 @@
         }
       });
 
+      async function tryHashTokenUnlock() {
+        const rawHash = window.location.hash || '';
+        if (!rawHash) return;
+        const trimmed = rawHash.startsWith('#') ? rawHash.slice(1) : rawHash;
+        const params = new URLSearchParams(trimmed);
+        const token = params.get('t');
+        if (!token) return;
+        params.delete('t');
+        const restHash = params.toString();
+        const cleanUrl = window.location.pathname + window.location.search + (restHash ? ('#' + restHash) : '');
+        try {
+          window.history.replaceState(null, '', cleanUrl);
+        } catch (_) {}
+        try {
+          await Dambo.plugin.unlockManage(token);
+          showToast('已通过二维码口令自动解锁');
+        } catch (err) {
+          authErrorEl.textContent = (err && err.message) ? err.message : '二维码携带的口令无效，请手动输入';
+          authErrorEl.classList.remove('hidden');
+          authModalEl.classList.add('open');
+          throw err;
+        }
+      }
+
       async function initManagePage() {
         if (!offCfgWatch) {
           offCfgWatch = Dambo.config.watch(() => loadConfigPanel(true));
@@ -1145,10 +1404,22 @@
           offAclWatch = Dambo.acl.onChange(() => loadAclPanel());
         }
         await loadConfigPanel(true);
-        await Promise.all([loadAclPanel(), loadTopicsPanel(), loadNamespacesAndEntries()]);
+        await Promise.all([
+          loadLanPanel(),
+          loadAclPanel(),
+          loadTopicsPanel(),
+          loadNamespacesAndEntries(),
+        ]);
       }
 
-      initManagePage();
+      (async function bootManagePage() {
+        try {
+          await tryHashTokenUnlock();
+        } catch (_) {
+          return;
+        }
+        await initManagePage();
+      })();
     })();
   </script>
 </body>

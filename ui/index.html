@@ -70,6 +70,36 @@
 
             <span class="divider"></span>
 
+            <!-- LAN access & QR dropdown -->
+            <div class="lan-menu-group">
+                <button id="lan-dropdown-btn" class="pill-btn lan-trigger-btn" data-i18n-title="lan.trigger_title" title="View LAN access URLs & QR code" aria-haspopup="true" aria-expanded="false">
+                    <span id="lan-trigger-label" data-i18n="lan.trigger_label">LAN</span> ▾
+                </button>
+
+                <div id="lan-dropdown-menu" class="lan-dropdown-menu hidden">
+                    <div class="lan-menu-header">
+                        <span class="lan-menu-title" data-i18n="lan.title">LAN Access</span>
+                        <span id="lan-mode-badge" class="lan-mode-badge">Open</span>
+                    </div>
+                    <div class="lan-paths-row" id="lan-paths-row">
+                        <button type="button" class="plugin-btn lan-path-btn active" data-lan-path="/" data-i18n="lan.path_home">Home</button>
+                        <button type="button" class="plugin-btn lan-path-btn" data-lan-path="/list/" data-i18n="lan.path_list">Feed List</button>
+                        <button type="button" class="plugin-btn lan-path-btn" data-lan-path="/default/m" data-i18n="lan.path_manage">Manage</button>
+                    </div>
+                    <div id="lan-ip-tabs" class="lan-ip-tabs hidden"></div>
+                    <div class="lan-body">
+                        <div class="lan-url-col">
+                            <div id="lan-url-text" class="lan-url-text"></div>
+                            <div id="lan-local-note" class="lan-local-note hidden"></div>
+                            <div class="lan-actions">
+                                <button type="button" id="lan-copy-btn" class="plugin-btn primary" data-i18n="lan.copy_url">Copy URL</button>
+                            </div>
+                        </div>
+                        <img id="lan-qr-img" class="lan-qr-img hidden" alt="QR" />
+                    </div>
+                </div>
+            </div>
+
             <!-- Plugin manager dropdown -->
             <div class="plugin-menu-group">
                 <button id="plugin-dropdown-btn" class="pill-btn" data-i18n-title="plugin.trigger_title" title="Manage plugins & desktop overlays" aria-haspopup="true" aria-expanded="false">
@@ -77,8 +107,16 @@
                 </button>
 
                 <div id="plugin-dropdown-menu" class="plugin-dropdown-menu hidden">
+                    <div class="plugin-tabs-header">
+                        <button type="button" id="tab-plugins-btn" class="plugin-tab-btn active" data-i18n="acl.tab_plugins">Plugins</button>
+                        <button type="button" id="tab-acl-btn" class="plugin-tab-btn">
+                            <span data-i18n="acl.tab_acl">ACL</span>
+                            <span id="acl-count-badge" class="acl-tab-count hidden">0</span>
+                        </button>
+                    </div>
                     <div id="plugin-cards-list" class="plugin-cards-list"></div>
-                    <div class="plugin-dropdown-footer">
+                    <div id="acl-cards-list" class="plugin-cards-list hidden"></div>
+                    <div class="plugin-dropdown-footer" id="plugin-dropdown-footer">
                         <button id="plugin-open-dir-btn" class="plugin-dir-btn">
                             📂 <span data-i18n="plugin.open_dir">Open Plugins Folder</span>
                         </button>

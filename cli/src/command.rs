@@ -19,6 +19,7 @@ pub enum CliCommand {
     History,
     HistoryRemove(u64),
     Plugins,
+    Lan { selector: Option<String> },
     RawStatus,
     RawSet(bool),
     Filter(FilterCommand),
@@ -40,7 +41,7 @@ pub enum FilterCommand {
 }
 
 const CANONICAL_COMMANDS: &[&str] = &[
-    "/help", "/room ", "/leave", "/info", "/me", "/rooms", "/history", "/plugins", "/raw ",
+    "/help", "/room ", "/leave", "/info", "/me", "/rooms", "/history", "/plugins", "/lan", "/raw ",
     "/filter ", "/login", "/logout", "/clear", "/say ", "/quit",
 ];
 
@@ -100,6 +101,7 @@ pub fn parse_input(raw: &str) -> ParsedInput {
         "/rooms" | "/ls" | "/list" => ParsedInput::Command(CliCommand::Rooms),
         "/history" => parse_history_args(rest_raw),
         "/plugins" => ParsedInput::Command(CliCommand::Plugins),
+        "/lan" => parse_lan_args(rest_raw),
         "/raw" => parse_raw_args(rest_raw),
         "/filter" => parse_filter_args(rest_raw),
         "/login" => ParsedInput::Command(CliCommand::Login),
@@ -110,6 +112,17 @@ pub fn parse_input(raw: &str) -> ParsedInput {
             "未知命令 '{}'，输入 /help 查看可用命令，或使用 // 发送以 / 开头的弹幕",
             cmd_raw
         )),
+    }
+}
+
+fn parse_lan_args(rest: &str) -> ParsedInput {
+    let trimmed = rest.trim();
+    if trimmed.is_empty() {
+        ParsedInput::Command(CliCommand::Lan { selector: None })
+    } else {
+        ParsedInput::Command(CliCommand::Lan {
+            selector: Some(trimmed.to_string()),
+        })
     }
 }
 
@@ -226,6 +239,7 @@ pub fn help_lines() -> Vec<&'static str> {
         "  /rooms                查看我的房间 / 关注开播中 / 最近房间",
         "  /history [rm <房间>]  查看或删除历史房间记录",
         "  /plugins              查看已加载的 Web / OBS 插件列表",
+        "  /lan [序号|路径]      显示或切换局域网访问链接与终端二维码",
         "  /raw [on|off]         查看或开关原始数据包录制 (*_raw.jsonl)",
         "  /filter [模式]        消息过滤: all | chat | paid | enter on/off | like on/off",
         "  /login / /logout      扫码登录或退出当前 B 站账号",
@@ -364,9 +378,30 @@ mod tests {
     fn test_complete_command() {
         assert_eq!(complete_command("/he"), Some("/help".to_string()));
         assert_eq!(complete_command("/pl"), Some("/plugins".to_string()));
+        assert_eq!(complete_command("/la"), Some("/lan".to_string()));
         assert_eq!(complete_command("/ro"), Some("/room".to_string()));
         assert_eq!(complete_command("/room "), None);
         assert_eq!(complete_command("hello"), None);
         assert_eq!(complete_command("/xyz"), None);
+    }
+
+    #[test]
+    fn test_parse_lan_command() {
+        assert_eq!(
+            parse_input("/lan"),
+            ParsedInput::Command(CliCommand::Lan { selector: None })
+        );
+        assert_eq!(
+            parse_input("/lan 2"),
+            ParsedInput::Command(CliCommand::Lan {
+                selector: Some("2".to_string())
+            })
+        );
+        assert_eq!(
+            parse_input("/lan /game24/m"),
+            ParsedInput::Command(CliCommand::Lan {
+                selector: Some("/game24/m".to_string())
+            })
+        );
     }
 }

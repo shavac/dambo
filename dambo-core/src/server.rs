@@ -254,7 +254,11 @@ async fn serve_plugin_manage(
     if let Some(cookie_hdr) = set_cookie {
         res.headers_mut().append(header::SET_COOKIE, cookie_hdr);
     }
-    attach_manage_security_headers(res)
+    if state.config.server.security_mode.is_strict() {
+        attach_manage_security_headers(res)
+    } else {
+        res
+    }
 }
 
 async fn redirect_plugin_manage_slash(
@@ -652,9 +656,14 @@ mod tests {
         .unwrap();
 
         let mut cfg = Config::default();
+        cfg.server.host = "127.0.0.1".to_string();
+        cfg.server.security_mode = crate::config::SecurityMode::Strict;
         cfg.server.html_dir = temp_dir.to_string_lossy().to_string();
         let plugins = Arc::new(PluginRegistry::new(temp_dir.clone()));
-        let plugin_store = Arc::new(PluginStore::open(temp_dir.join("plugins.redb")).unwrap());
+        let plugin_store = Arc::new(
+            PluginStore::open_with_mode(temp_dir.join("plugins.redb"), cfg.server.security_mode)
+                .unwrap(),
+        );
         let plugin_hub = Arc::new(PluginEventHub::new());
         let admin_sessions = Arc::new(AdminSessionStore::new());
 
@@ -878,6 +887,7 @@ mod tests {
         assert!(DAMBO_SDK_JS.contains("memory: memoryApi"));
         assert!(DAMBO_SDK_JS.contains("topics: topicsApi"));
         assert!(DAMBO_SDK_JS.contains("acl: aclApi"));
+        assert!(DAMBO_SDK_JS.contains("system: systemApi"));
         assert!(DAMBO_SDK_JS.contains("formatGuard: formatGuard"));
         assert!(DAMBO_SDK_JS.contains("formatInteract: formatInteract"));
         assert!(DAMBO_SDK_JS.contains("formatGift: formatGift"));

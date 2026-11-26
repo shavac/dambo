@@ -178,6 +178,11 @@ async fn run_headless(
     log::info!("   • Channel A       : {}/ws", base_ws);
     log::info!("   • Channel B       : {}/ws/event", base_ws);
 
+    let lan_payload = runtime.lan_urls(None);
+    for line in crate::format::format_lan_info_plain(&lan_payload, 0) {
+        log::info!("{}", line);
+    }
+
     let mut announced_room_id: Option<u64> = None;
     let initial_state = room_rx.borrow().clone();
     if initial_state.room_id > 0 && initial_state.connected {

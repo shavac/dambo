@@ -123,6 +123,32 @@ impl Default for EventConfig {
     }
 }
 
+/// Security mode governing CORS, Host/Origin validation, management auth, and Read/Subscribe ACL auto-granting.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SecurityMode {
+    #[default]
+    Open,
+    Strict,
+}
+
+impl SecurityMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Strict => "strict",
+        }
+    }
+
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    pub fn is_strict(self) -> bool {
+        matches!(self, Self::Strict)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
@@ -137,6 +163,8 @@ pub struct ServerConfig {
     /// Unified embedded redb database file (session, runtime state, plugin storage, ACLs, and topics).
     #[serde(default = "default_db_file", alias = "plugin_db_file")]
     pub db_file: String,
+    #[serde(default)]
+    pub security_mode: SecurityMode,
     #[serde(default)]
     pub allow_remote_manage: bool,
     #[serde(default)]
@@ -153,10 +181,21 @@ impl Default for ServerConfig {
             html_dir: default_html_dir(),
             state_file: default_state_file(),
             db_file: default_db_file(),
+            security_mode: SecurityMode::Open,
             allow_remote_manage: false,
             admin_token: None,
             allowed_hosts: Vec::new(),
         }
+    }
+}
+
+impl ServerConfig {
+    /// Returns the trimmed non-empty `admin_token` if configured.
+    pub fn trimmed_admin_token(&self) -> Option<&str> {
+        self.admin_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -245,7 +284,7 @@ fn default_max_combo_wait_secs() -> u64 {
     8
 }
 fn default_host() -> String {
-    "localhost".to_string()
+    "0.0.0.0".to_string()
 }
 fn default_port() -> u16 {
     3838
@@ -305,6 +344,8 @@ mod tests {
         assert_eq!(def.event.min_passthrough_chars, 4);
         assert_eq!(def.event.max_combo_wait_secs, 8);
         assert_eq!(def.bilibili.session_file, "var/session.json");
+        assert_eq!(def.server.host, "0.0.0.0");
+        assert_eq!(def.server.security_mode, SecurityMode::Open);
         assert_eq!(def.server.html_dir, "static/html");
         assert_eq!(def.server.state_file, "var/state.json");
         assert_eq!(def.server.db_file, "var/dambo.redb");
@@ -315,7 +356,7 @@ mod tests {
         assert_eq!(def.record.dir, "var/records");
         assert!(!def.record.record_raw);
 
-        // Explicit [event] + [server].db_file + [record].record_raw = true
+        // Explicit [event] + [server].db_file + security_mode = "strict" + [record].record_raw = true
         let parsed: Config = toml::from_str(
             r#"
 [event]
@@ -326,6 +367,7 @@ max_combo_wait_secs = 12
 [server]
 state_file = "/tmp/custom_state.json"
 db_file = "/tmp/custom_dambo.redb"
+security_mode = "strict"
 allow_remote_manage = true
 admin_token = "secret123"
 allowed_hosts = ["dambo.local", "box.ts.net"]
@@ -341,6 +383,7 @@ record_raw = true
         assert_eq!(parsed.event.max_combo_wait_secs, 12);
         assert_eq!(parsed.server.state_file, "/tmp/custom_state.json");
         assert_eq!(parsed.server.db_file, "/tmp/custom_dambo.redb");
+        assert_eq!(parsed.server.security_mode, SecurityMode::Strict);
         assert!(parsed.server.allow_remote_manage);
         assert_eq!(parsed.server.admin_token.as_deref(), Some("secret123"));
         assert_eq!(
@@ -349,6 +392,16 @@ record_raw = true
         );
         assert!(!parsed.record.enabled);
         assert!(parsed.record.record_raw);
+
+        // Explicit security_mode = "open"
+        let parsed_open: Config = toml::from_str(
+            r#"
+[server]
+security_mode = "open"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed_open.server.security_mode, SecurityMode::Open);
 
         // Legacy aliases [dam], dump_raw, and plugin_db_file remain readable
         let legacy: Config = toml::from_str(

@@ -5,6 +5,8 @@ use dambo_core::auth::{QrPollStatus, SendDanmakuError};
 use dambo_core::config::parse_log_level;
 use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
 use dambo_core::plugin::PluginInfo;
+use dambo_core::plugin_hub::{RequesterDisplay, resolve_requester_display};
+use dambo_core::plugin_store::{AclLevel, AclRecord, AclStatus};
 #[cfg(test)]
 use dambo_core::server::format_url_host;
 use dambo_core::state::{AppPersistedState, RoomHistoryEntry, normalize_locale};
@@ -170,6 +172,31 @@ struct PluginDto {
     description: Option<String>,
     obs_width: Option<u32>,
     obs_height: Option<u32>,
+}
+
+#[derive(Clone, Serialize)]
+struct CapsuleAclItem {
+    #[serde(flatten)]
+    record: AclRecord,
+    owner_display: RequesterDisplay,
+    requester_display: RequesterDisplay,
+}
+
+fn parse_acl_level(raw: &str) -> Result<AclLevel, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(AclLevel::None),
+        "read" => Ok(AclLevel::Read),
+        "write" => Ok(AclLevel::Write),
+        "subscribe" => Ok(AclLevel::Subscribe),
+        other => Err(format!("Invalid ACL level '{}'", other)),
+    }
+}
+
+fn now_epoch_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 const PLUGIN_OVERLAY_PREFIX: &str = "plugin-overlay-";
@@ -1203,6 +1230,106 @@ async fn get_plugins(app: AppHandle, ctx: State<'_, AppContext>) -> Result<Vec<P
 }
 
 #[tauri::command]
+async fn get_lan_urls(
+    path: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<dambo_core::net::LanUrlsPayload, String> {
+    Ok(ctx.runtime.lan_urls(path.as_deref()))
+}
+
+#[tauri::command]
+async fn get_all_acls(ctx: State<'_, AppContext>) -> Result<Vec<CapsuleAclItem>, String> {
+    let records = ctx
+        .runtime
+        .plugin_store
+        .list_all_acl()
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = records
+        .into_iter()
+        .map(|record| {
+            let owner_display = resolve_requester_display(&ctx.runtime.plugins, &record.owner);
+            let requester_display =
+                resolve_requester_display(&ctx.runtime.plugins, &record.requester);
+            CapsuleAclItem {
+                record,
+                owner_display,
+                requester_display,
+            }
+        })
+        .collect();
+    Ok(items)
+}
+
+#[tauri::command]
+async fn set_capsule_acl(
+    owner: String,
+    requester: String,
+    resource: String,
+    level: String,
+    note: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<AclRecord, String> {
+    let lvl = parse_acl_level(&level)?;
+    let record = ctx
+        .runtime
+        .plugin_store
+        .set_acl_grant(&owner, &requester, &resource, lvl, note)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    ctx.runtime
+        .plugin_hub
+        .prune_unauthorized_for_owner(&ctx.runtime.plugin_store, &owner)
+        .await;
+
+    let action = if record.level == AclLevel::None {
+        "denied"
+    } else {
+        "granted"
+    };
+    let display = resolve_requester_display(&ctx.runtime.plugins, &record.requester);
+    ctx.runtime
+        .plugin_hub
+        .publish_acl_changed(action, &record, Some(&display));
+    Ok(record)
+}
+
+#[tauri::command]
+async fn delete_capsule_acl(
+    owner: String,
+    requester: String,
+    resource: String,
+    ctx: State<'_, AppContext>,
+) -> Result<bool, String> {
+    let removed = ctx
+        .runtime
+        .plugin_store
+        .delete_acl_record(&owner, &requester, &resource)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    ctx.runtime
+        .plugin_hub
+        .prune_unauthorized_for_owner(&ctx.runtime.plugin_store, &owner)
+        .await;
+
+    if let Some(mut rec) = removed {
+        rec.level = AclLevel::None;
+        rec.status = AclStatus::Denied;
+        rec.requested_level = None;
+        rec.updated_at = now_epoch_millis();
+        let display = resolve_requester_display(&ctx.runtime.plugins, &rec.requester);
+        ctx.runtime
+            .plugin_hub
+            .publish_acl_changed("revoked", &rec, Some(&display));
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
 async fn open_plugin_desktop(
     app: AppHandle,
     plugin_name: String,
@@ -1805,6 +1932,10 @@ pub fn run(config_path: &str) {
         .invoke_handler(tauri::generate_handler![
             get_initial_state,
             get_plugins,
+            get_lan_urls,
+            get_all_acls,
+            set_capsule_acl,
+            delete_capsule_acl,
             open_plugin_desktop,
             close_plugin_desktop,
             open_plugin_manage,
@@ -2064,6 +2195,17 @@ pub fn run(config_path: &str) {
             tauri::async_runtime::spawn(async move {
                 while plugins_rx.changed().await.is_ok() {
                     sync_plugin_ui_state(&app_plugins_sync, &rt_plugins_sync, None);
+                }
+            });
+
+            // 8. Notify main capsule UI whenever ACL records change
+            let mut acl_rx = runtime.plugin_hub.subscribe_acl_changes();
+            let app_acl_sync = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
+                    acl_rx.recv().await
+                {
+                    let _ = app_acl_sync.emit_to("main", "acl-updated", ());
                 }
             });
 

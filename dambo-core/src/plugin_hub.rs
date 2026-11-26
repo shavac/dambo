@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 /// Outbound SSE frame sent from `PluginEventHub` to a connected client task.
@@ -134,6 +134,7 @@ struct AclChangedPayload<'a> {
 pub struct PluginEventHub {
     clients: RwLock<HashMap<String, SseClientRecord>>,
     next_id: AtomicU64,
+    acl_notify_tx: broadcast::Sender<()>,
 }
 
 impl Default for PluginEventHub {
@@ -144,10 +145,17 @@ impl Default for PluginEventHub {
 
 impl PluginEventHub {
     pub fn new() -> Self {
+        let (acl_notify_tx, _) = broadcast::channel(64);
         Self {
             clients: RwLock::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            acl_notify_tx,
         }
+    }
+
+    /// Subscribe to notifications whenever any ACL record is requested, granted, auto-granted, denied, or revoked.
+    pub fn subscribe_acl_changes(&self) -> broadcast::Receiver<()> {
+        self.acl_notify_tx.subscribe()
     }
 
     /// Number of currently connected SSE clients (useful for diagnostics & tests).
@@ -350,13 +358,15 @@ impl PluginEventHub {
         delivered
     }
 
-    /// Broadcast an `acl.changed` notification to connected SSE clients of both `owner` and `requester`.
+    /// Broadcast an `acl.changed` notification to connected SSE clients of both `owner` and `requester`,
+    /// and notify internal listeners (e.g. Tauri control capsule).
     pub fn publish_acl_changed(
         &self,
         action: &str,
         record: &AclRecord,
         requester_display: Option<&RequesterDisplay>,
     ) {
+        let _ = self.acl_notify_tx.send(());
         let payload = AclChangedPayload {
             action,
             owner: &record.owner,
@@ -605,6 +615,29 @@ pub async fn evaluate_subscriptions(
     raw_watches: Vec<WatchSubInput>,
     raw_topics: Vec<TopicSubInput>,
 ) -> SubscriptionSyncResult {
+    evaluate_subscriptions_with_hub(
+        plugins,
+        store,
+        None,
+        caller_plugin_name,
+        caller_namedomain,
+        raw_watches,
+        raw_topics,
+    )
+    .await
+}
+
+/// Evaluate ACL permissions for watch & topic inputs, emitting `acl.changed` via `hub`
+/// if `Open` mode creates any `AutoGranted` entries.
+pub async fn evaluate_subscriptions_with_hub(
+    plugins: &PluginRegistry,
+    store: &PluginStore,
+    hub: Option<&PluginEventHub>,
+    caller_plugin_name: &str,
+    caller_namedomain: &str,
+    raw_watches: Vec<WatchSubInput>,
+    raw_topics: Vec<TopicSubInput>,
+) -> SubscriptionSyncResult {
     let mut result = SubscriptionSyncResult::default();
     let mut seen_watches: HashMap<(StoreKind, String, String, Option<String>), ()> = HashMap::new();
     let mut seen_topics: HashMap<(String, String), ()> = HashMap::new();
@@ -743,8 +776,17 @@ pub async fn evaluate_subscriptions(
         ));
     }
 
-    match store.check_effective_acl_batch(acl_queries).await {
-        Ok(levels) => {
+    match store
+        .check_effective_acl_batch_for_subscriptions(acl_queries)
+        .await
+    {
+        Ok((levels, auto_granted)) => {
+            if let Some(hub_ref) = hub {
+                for rec in &auto_granted {
+                    let display = resolve_requester_display(plugins, &rec.requester);
+                    hub_ref.publish_acl_changed("auto_granted", rec, Some(&display));
+                }
+            }
             let (watch_levels, topic_levels) = levels.split_at(staged_watches.len());
             for (sw, &eff_level) in staged_watches.into_iter().zip(watch_levels) {
                 if !eff_level.satisfies(AclLevel::Read, &sw.parsed.kind) {

@@ -2539,6 +2539,17 @@
         },
     };
 
+    const systemApi = {
+        lanUrls: function (path) {
+            const qs = (path !== undefined && path !== null && String(path).trim() !== '')
+                ? ('?path=' + encodeURIComponent(String(path)))
+                : '';
+            return apiFetch('GET', '/api/v1/system/lan-urls' + qs, undefined, {
+                skipPluginHeader: true,
+            });
+        },
+    };
+
     return {
         VERSION: '2.0.0',
         DamboClient: DamboClient,
@@ -2551,6 +2562,7 @@
         memory: memoryApi,
         topics: topicsApi,
         acl: aclApi,
+        system: systemApi,
         utils: {
             DEFAULT_AVATAR_SVG: DEFAULT_AVATAR_SVG,
             normalizeUrl: normalizeUrl,

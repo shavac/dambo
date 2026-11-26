@@ -1,9 +1,11 @@
 use crate::logger::CliLogEntry;
 use chrono::{DateTime, Local, TimeZone};
 use dambo_core::auth::SendDanmakuError;
+use dambo_core::config::SecurityMode;
 use dambo_core::model::{
     AuthState, RoomInfoSnapshot, RoomOptionsPayload, RoomQuickItem, RoomStateSnapshot, SnapshotItem,
 };
+use dambo_core::net::LanUrlsPayload;
 use dambo_core::plugin::PluginInfo;
 use dambo_core::state::RoomHistoryEntry;
 use ratatui::style::{Color, Modifier, Style};
@@ -898,6 +900,122 @@ pub fn format_plugins(plugins: &[PluginInfo], host: &str, port: u16) -> Vec<Feed
     out
 }
 
+enum LanDisplayLine {
+    Header(String),
+    Info(String),
+    LocalOnly(String),
+    SelectedUrl(String),
+    AltUrl(String),
+    Qr(String),
+}
+
+fn build_lan_display_lines(payload: &LanUrlsPayload, selected_idx: usize) -> Vec<LanDisplayLine> {
+    let mode_label = match payload.security_mode {
+        SecurityMode::Open => "open (局域网便利模式)",
+        SecurityMode::Strict => "strict (零信任模式)",
+    };
+    let mut lines = vec![
+        LanDisplayLine::Header(format!(
+            "── 局域网访问 & 二维码 [安全模式: {} | 路径: {}] ──",
+            mode_label, payload.path
+        )),
+        LanDisplayLine::Info(format!("  [本机访问] {}", payload.local_url)),
+    ];
+
+    if payload.local_only || payload.urls.is_empty() {
+        lines.push(LanDisplayLine::LocalOnly(format!(
+            "  [仅限本机访问] 当前监听 '{}' 或未检测到可用的 RFC 1918 私网 IPv4",
+            payload.host
+        )));
+        return lines;
+    }
+
+    let idx = selected_idx.min(payload.urls.len().saturating_sub(1));
+    for (i, entry) in payload.urls.iter().enumerate() {
+        if i == idx {
+            lines.push(LanDisplayLine::SelectedUrl(format!(
+                "  ★ [已选 #{}] {}",
+                i + 1,
+                entry.url
+            )));
+        } else {
+            lines.push(LanDisplayLine::AltUrl(format!(
+                "  • [备选 #{}] {}",
+                i + 1,
+                entry.url
+            )));
+        }
+    }
+
+    if payload.urls.len() > 1 {
+        lines.push(LanDisplayLine::Info(format!(
+            "  提示: 检测到 {} 个私网地址，输入 /lan <序号> 切换二维码，或 /lan <路径> 更改入口",
+            payload.urls.len()
+        )));
+    }
+
+    let selected = &payload.urls[idx];
+    if !selected.terminal_qr.trim().is_empty() {
+        for qr_line in selected.terminal_qr.lines() {
+            lines.push(LanDisplayLine::Qr(format!("  {}", qr_line)));
+        }
+    }
+
+    lines
+}
+
+/// Format LAN access links and terminal QR code as plain lines for headless startup logs.
+pub fn format_lan_info_plain(payload: &LanUrlsPayload, selected_idx: usize) -> Vec<String> {
+    build_lan_display_lines(payload, selected_idx)
+        .into_iter()
+        .map(|line| match line {
+            LanDisplayLine::Header(s)
+            | LanDisplayLine::Info(s)
+            | LanDisplayLine::LocalOnly(s)
+            | LanDisplayLine::SelectedUrl(s)
+            | LanDisplayLine::AltUrl(s)
+            | LanDisplayLine::Qr(s) => s,
+        })
+        .collect()
+}
+
+/// Format LAN access links and terminal QR code for the TUI feed (`/lan`).
+pub fn format_lan_info(payload: &LanUrlsPayload, selected_idx: usize) -> Vec<FeedEntry> {
+    build_lan_display_lines(payload, selected_idx)
+        .into_iter()
+        .map(|line| match line {
+            LanDisplayLine::Header(s) => FeedEntry::always(Line::from(Span::styled(
+                s,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            LanDisplayLine::Info(s) => FeedEntry::always(Line::from(Span::styled(
+                s,
+                Style::default().fg(Color::Gray),
+            ))),
+            LanDisplayLine::LocalOnly(s) => FeedEntry::always(Line::from(Span::styled(
+                s,
+                Style::default().fg(Color::Yellow),
+            ))),
+            LanDisplayLine::SelectedUrl(s) => FeedEntry::always(Line::from(Span::styled(
+                s,
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            LanDisplayLine::AltUrl(s) => FeedEntry::always(Line::from(Span::styled(
+                s,
+                Style::default().fg(Color::White),
+            ))),
+            LanDisplayLine::Qr(s) => FeedEntry::always(Line::from(Span::styled(
+                s,
+                Style::default().fg(Color::White),
+            ))),
+        })
+        .collect()
+}
+
 /// Format a routed `CliLogEntry` for display inside the TUI viewport.
 pub fn format_cli_log(entry: &CliLogEntry) -> FeedEntry {
     let (tag, color) = match entry.level {
@@ -1119,5 +1237,46 @@ mod tests {
         assert_eq!(format_timestamp_hms(us), expected);
         assert_eq!(format_timestamp_hms(ns), expected);
         assert_eq!(format_timestamp_hms(0).len(), 8);
+    }
+
+    #[test]
+    fn test_format_lan_info_multi_ip_selection_and_local_only() {
+        let mut cfg = dambo_core::config::ServerConfig {
+            host: "0.0.0.0".to_string(),
+            port: 3838,
+            security_mode: SecurityMode::Open,
+            ..Default::default()
+        };
+        let multi = dambo_core::net::build_lan_urls_with_hosts(
+            &cfg,
+            Some("/game24/m"),
+            true,
+            vec!["192.168.1.20".to_string(), "10.0.0.5".to_string()],
+            false,
+        );
+
+        let lines_idx0 = format_lan_info_plain(&multi, 0);
+        let joined0 = lines_idx0.join("\n");
+        assert!(joined0.contains("open (局域网便利模式)"));
+        assert!(joined0.contains("★ [已选 #1] http://192.168.1.20:3838/game24/m"));
+        assert!(joined0.contains("• [备选 #2] http://10.0.0.5:3838/game24/m"));
+        assert!(joined0.contains("/lan <序号>"));
+        assert!(lines_idx0.len() > 8);
+
+        let lines_idx1 = format_lan_info(&multi, 1);
+        let joined1: String = lines_idx1
+            .iter()
+            .map(entry_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined1.contains("• [备选 #1] http://192.168.1.20:3838/game24/m"));
+        assert!(joined1.contains("★ [已选 #2] http://10.0.0.5:3838/game24/m"));
+
+        cfg.host = "127.0.0.1".to_string();
+        cfg.security_mode = SecurityMode::Strict;
+        let local = dambo_core::net::build_lan_urls(&cfg, None, true);
+        let local_joined = format_lan_info_plain(&local, 0).join("\n");
+        assert!(local_joined.contains("strict (零信任模式)"));
+        assert!(local_joined.contains("仅限本机访问"));
     }
 }

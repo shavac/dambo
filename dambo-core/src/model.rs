@@ -1,3 +1,4 @@
+use crate::config::SecurityMode;
 use crate::state::RoomHistoryEntry;
 pub use blive_proto::models::{
     AuthState, RawBiliEvent, RoomInfoSnapshot, RoomQuickItem, SessionSummary, now_unix_ms,
@@ -137,6 +138,8 @@ pub struct InitialUiState {
     pub auth_state: AuthState,
     pub server_host: String,
     pub server_port: u16,
+    #[serde(default)]
+    pub security_mode: SecurityMode,
     pub history_rooms: Vec<RoomHistoryEntry>,
     pub record_raw: bool,
     #[serde(default)]

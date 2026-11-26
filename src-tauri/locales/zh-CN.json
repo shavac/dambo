@@ -109,5 +109,34 @@
 
   "startup.error_title": "Dambo 启动失败",
   "startup.port_in_use": "端口 {addr} 已被占用（可能后台仍在运行其他 Dambo / dambo-cli 进程）。\n\n请先彻底退出已有实例，或在配置 [server].port 中更换端口后再启动。",
-  "startup.server_failed": "本地服务启动失败：{error}"
+  "startup.server_failed": "本地服务启动失败：{error}",
+
+  "lan.trigger_label": "局域网",
+  "lan.trigger_title": "查看局域网访问链接与二维码",
+  "lan.title": "局域网访问",
+  "lan.mode_open": "Open 模式",
+  "lan.mode_strict": "Strict 模式",
+  "lan.local_only": "仅限本机访问（监听回环地址或未检测到私网 IP）",
+  "lan.copy_url": "复制链接",
+  "lan.copied": "✓ 已复制",
+  "lan.path_home": "默认首页",
+  "lan.path_list": "弹幕列表",
+  "lan.path_manage": "管理台",
+  "lan.qr_alt": "局域网访问二维码",
+
+  "acl.tab_plugins": "插件",
+  "acl.tab_acl": "权限 (ACL)",
+  "acl.empty": "暂无跨插件 ACL 权限记录",
+  "acl.status_pending": "待审批",
+  "acl.status_auto_granted": "自动放行",
+  "acl.status_granted": "已明确授权",
+  "acl.status_denied": "已拒绝",
+  "acl.auto_hint": "Open 模式下自动放行，可一键撤销或转为明确授权；Strict 模式下不生效。",
+  "acl.approve": "批准",
+  "acl.deny": "拒绝",
+  "acl.promote": "转为明确授权",
+  "acl.revoke_deny": "撤销并拦截",
+  "acl.delete": "删除规则",
+  "toast.acl_updated": "已更新 ACL：{resource}",
+  "toast.acl_deleted": "已删除 ACL：{resource}"
 }

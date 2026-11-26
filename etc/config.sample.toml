@@ -20,13 +20,14 @@ min_passthrough_chars = 4      # Effective char count threshold for 0ms quality-
 max_combo_wait_secs = 8        # Max wait cap in seconds for dynamic gift combo aggregation
 
 [server]
-host = "localhost"                 # Use "0.0.0.0" to allow LAN access (e.g., tablet/phone /list/)
-port = 3838                        # HTTP & WebSocket server port
+host = "0.0.0.0"                   # Default "0.0.0.0" exposes LAN access; set "127.0.0.1" for local-only access
+port = 3838                        # HTTP & WebSocket server port (configurable)
 html_dir = "static/html"           # Plugin root directory watched for hot reload
 db_file = "var/dambo.redb"         # Unified embedded redb database for login session, runtime state, plugin storage, ACLs, and topics
-allow_remote_manage = false        # Allow non-loopback LAN clients to access /{plugin}/m management pages
-# admin_token = ""                 # Optional remote management password when allow_remote_manage = true or binding 0.0.0.0
-# allowed_hosts = []               # Optional extra allowed Host headers (e.g., Tailscale/LAN hostnames)
+security_mode = "open"             # "open" (permissive CORS/iframe/LAN manage/auto Read+Subscribe ACL) | "strict" (zero-trust)
+allow_remote_manage = false        # Strict mode: allow non-loopback LAN clients to access /{plugin}/m management pages
+# admin_token = ""                 # Strict mode: optional remote management password when allow_remote_manage = true or binding 0.0.0.0
+# allowed_hosts = []               # Strict mode: optional extra allowed Host headers (e.g., Tailscale/LAN hostnames)
 
 [log]
 level = "warn"                 # off | error | warn | info | debug | trace

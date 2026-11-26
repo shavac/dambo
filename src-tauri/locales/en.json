@@ -109,5 +109,34 @@
 
   "startup.error_title": "Dambo Failed to Start",
   "startup.port_in_use": "Port {addr} is already in use (another Dambo or dambo-cli instance may still be running).\n\nClose the existing instance or change [server].port in config before restarting.",
-  "startup.server_failed": "Failed to start local server: {error}"
+  "startup.server_failed": "Failed to start local server: {error}",
+
+  "lan.trigger_label": "LAN",
+  "lan.trigger_title": "View LAN access URLs & QR code",
+  "lan.title": "LAN Access",
+  "lan.mode_open": "Open Mode",
+  "lan.mode_strict": "Strict Mode",
+  "lan.local_only": "Local access only (loopback bind or no private LAN IPv4 detected)",
+  "lan.copy_url": "Copy URL",
+  "lan.copied": "✓ Copied",
+  "lan.path_home": "Home",
+  "lan.path_list": "Feed List",
+  "lan.path_manage": "Manage",
+  "lan.qr_alt": "LAN Access QR Code",
+
+  "acl.tab_plugins": "Plugins",
+  "acl.tab_acl": "ACL",
+  "acl.empty": "No cross-plugin ACL rules yet",
+  "acl.status_pending": "Pending",
+  "acl.status_auto_granted": "Auto-Granted",
+  "acl.status_granted": "Granted",
+  "acl.status_denied": "Denied",
+  "acl.auto_hint": "Auto-granted in Open mode; revocable anytime and inactive in Strict mode.",
+  "acl.approve": "Approve",
+  "acl.deny": "Deny",
+  "acl.promote": "Confirm Grant",
+  "acl.revoke_deny": "Revoke & Deny",
+  "acl.delete": "Delete",
+  "toast.acl_updated": "Updated ACL: {resource}",
+  "toast.acl_deleted": "Deleted ACL: {resource}"
 }

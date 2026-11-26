@@ -109,5 +109,34 @@
 
   "startup.error_title": "Dambo の起動に失敗しました",
   "startup.port_in_use": "ポート {addr} は既に使用中です（別の Dambo または dambo-cli が起動中の可能性があります）。\n\n既存プロセスを終了するか、設定の [server].port を変更してから再起動してください。",
-  "startup.server_failed": "ローカルサーバーの起動に失敗しました: {error}"
+  "startup.server_failed": "ローカルサーバーの起動に失敗しました: {error}",
+
+  "lan.trigger_label": "LAN",
+  "lan.trigger_title": "LANアクセスURL・QRコードを表示",
+  "lan.title": "LAN アクセス",
+  "lan.mode_open": "Open モード",
+  "lan.mode_strict": "Strict モード",
+  "lan.local_only": "ローカル限定（ループバックまたはプライベートLAN IPv4未検出）",
+  "lan.copy_url": "URLコピー",
+  "lan.copied": "✓ コピー済",
+  "lan.path_home": "ホーム",
+  "lan.path_list": "弾幕リスト",
+  "lan.path_manage": "管理画面",
+  "lan.qr_alt": "LAN アクセス QR コード",
+
+  "acl.tab_plugins": "プラグイン",
+  "acl.tab_acl": "権限 (ACL)",
+  "acl.empty": "プラグイン間 ACL ルールはありません",
+  "acl.status_pending": "承認待ち",
+  "acl.status_auto_granted": "自動許可",
+  "acl.status_granted": "明示許可済",
+  "acl.status_denied": "拒否済",
+  "acl.auto_hint": "Open モードで自動許可されました。いつでも拒否でき、Strict モードでは無効です。",
+  "acl.approve": "承認",
+  "acl.deny": "拒否",
+  "acl.promote": "明示許可にする",
+  "acl.revoke_deny": "取消して拒否",
+  "acl.delete": "削除",
+  "toast.acl_updated": "ACL を更新しました: {resource}",
+  "toast.acl_deleted": "ACL を削除しました: {resource}"
 }
