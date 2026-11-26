@@ -5,7 +5,8 @@ use dambo_core::auth::{QrPollStatus, SendDanmakuError};
 use dambo_core::config::parse_log_level;
 use dambo_core::model::{AuthState, InitialUiState, RoomOptionsPayload, RoomStateSnapshot};
 use dambo_core::plugin::PluginInfo;
-use dambo_core::plugin_store::AclStatus;
+use dambo_core::plugin_hub::{RequesterDisplay, resolve_requester_display};
+use dambo_core::plugin_store::{AclLevel, AclRecord, AclStatus};
 #[cfg(test)]
 use dambo_core::server::format_url_host;
 use dambo_core::state::{AppPersistedState, RoomHistoryEntry, normalize_locale};
@@ -171,6 +172,31 @@ struct PluginDto {
     description: Option<String>,
     obs_width: Option<u32>,
     obs_height: Option<u32>,
+}
+
+#[derive(Clone, Serialize)]
+struct CapsuleAclItem {
+    #[serde(flatten)]
+    record: AclRecord,
+    owner_display: RequesterDisplay,
+    requester_display: RequesterDisplay,
+}
+
+fn parse_acl_level(raw: &str) -> Result<AclLevel, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(AclLevel::None),
+        "read" => Ok(AclLevel::Read),
+        "write" => Ok(AclLevel::Write),
+        "subscribe" => Ok(AclLevel::Subscribe),
+        other => Err(format!("Invalid ACL level '{}'", other)),
+    }
+}
+
+fn now_epoch_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 const PLUGIN_OVERLAY_PREFIX: &str = "plugin-overlay-";
@@ -1211,6 +1237,106 @@ async fn get_plugins(app: AppHandle, ctx: State<'_, AppContext>) -> Result<Vec<P
 }
 
 #[tauri::command]
+async fn get_lan_urls(
+    path: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<dambo_core::net::LanUrlsPayload, String> {
+    Ok(ctx.runtime.lan_urls(path.as_deref()))
+}
+
+#[tauri::command]
+async fn get_all_acls(ctx: State<'_, AppContext>) -> Result<Vec<CapsuleAclItem>, String> {
+    let records = ctx
+        .runtime
+        .plugin_store
+        .list_all_acl()
+        .await
+        .map_err(|e| e.to_string())?;
+    let items = records
+        .into_iter()
+        .map(|record| {
+            let owner_display = resolve_requester_display(&ctx.runtime.plugins, &record.owner);
+            let requester_display =
+                resolve_requester_display(&ctx.runtime.plugins, &record.requester);
+            CapsuleAclItem {
+                record,
+                owner_display,
+                requester_display,
+            }
+        })
+        .collect();
+    Ok(items)
+}
+
+#[tauri::command]
+async fn set_capsule_acl(
+    owner: String,
+    requester: String,
+    resource: String,
+    level: String,
+    note: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<AclRecord, String> {
+    let lvl = parse_acl_level(&level)?;
+    let record = ctx
+        .runtime
+        .plugin_store
+        .set_acl_grant(&owner, &requester, &resource, lvl, note)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    ctx.runtime
+        .plugin_hub
+        .prune_unauthorized_for_owner(&ctx.runtime.plugin_store, &owner)
+        .await;
+
+    let action = if record.level == AclLevel::None {
+        "denied"
+    } else {
+        "granted"
+    };
+    let display = resolve_requester_display(&ctx.runtime.plugins, &record.requester);
+    ctx.runtime
+        .plugin_hub
+        .publish_acl_changed(action, &record, Some(&display));
+    Ok(record)
+}
+
+#[tauri::command]
+async fn delete_capsule_acl(
+    owner: String,
+    requester: String,
+    resource: String,
+    ctx: State<'_, AppContext>,
+) -> Result<bool, String> {
+    let removed = ctx
+        .runtime
+        .plugin_store
+        .delete_acl_record(&owner, &requester, &resource)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    ctx.runtime
+        .plugin_hub
+        .prune_unauthorized_for_owner(&ctx.runtime.plugin_store, &owner)
+        .await;
+
+    if let Some(mut rec) = removed {
+        rec.level = AclLevel::None;
+        rec.status = AclStatus::Denied;
+        rec.requested_level = None;
+        rec.updated_at = now_epoch_millis();
+        let display = resolve_requester_display(&ctx.runtime.plugins, &rec.requester);
+        ctx.runtime
+            .plugin_hub
+            .publish_acl_changed("revoked", &rec, Some(&display));
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
 async fn open_plugin_desktop(
     app: AppHandle,
     plugin_name: String,
@@ -1240,28 +1366,6 @@ async fn open_plugin_manage(
 async fn open_plugins_dir(ctx: State<'_, AppContext>) -> Result<(), String> {
     open_plugins_directory(&ctx.runtime);
     Ok(())
-}
-
-#[tauri::command]
-async fn open_admin_console(
-    view: Option<String>,
-    ctx: State<'_, AppContext>,
-) -> Result<String, String> {
-    Ok(open_admin_console_page(&ctx.runtime, view.as_deref()))
-}
-
-#[tauri::command]
-async fn get_pending_acl_count(ctx: State<'_, AppContext>) -> Result<usize, String> {
-    let records = ctx
-        .runtime
-        .plugin_store
-        .list_all_acl()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(records
-        .into_iter()
-        .filter(|r| r.status == AclStatus::Pending)
-        .count())
 }
 
 #[tauri::command]
@@ -1316,6 +1420,28 @@ async fn set_record_raw(enabled: bool, ctx: State<'_, AppContext>) -> Result<boo
         .set_record_raw(enabled)
         .map_err(|e| e.to_string())?;
     Ok(ctx.runtime.is_record_raw_enabled())
+}
+
+#[tauri::command]
+async fn set_dropdown_expanded(
+    window: tauri::WebviewWindow,
+    expanded: bool,
+    ctx: State<'_, AppContext>,
+) -> Result<(), String> {
+    let base_h = ctx
+        .panel_base_height
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(PANEL_COLLAPSED_HEIGHT);
+    let target_h = if expanded {
+        PANEL_EXPANDED_HEIGHT.max(base_h)
+    } else {
+        base_h
+    };
+    if let Ok(mut guard) = ctx.panel_target_height.lock() {
+        *guard = target_h;
+    }
+    apply_panel_window_bounds_on_main(window, &ctx, None).await
 }
 
 #[tauri::command]
@@ -1517,6 +1643,11 @@ async fn open_qr_login(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(),
 #[tauri::command]
 async fn refresh_qr_code(app: AppHandle, ctx: State<'_, AppContext>) -> Result<(), String> {
     start_qr_poll_flow(app, ctx.runtime.clone(), ctx.qr_poll_cancel.clone()).await
+}
+
+#[tauri::command]
+async fn logout(ctx: State<'_, AppContext>) -> Result<(), String> {
+    ctx.runtime.auth.logout().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1794,12 +1925,10 @@ pub fn run(config_path: &str) {
             panel_target_height: Arc::new(std::sync::Mutex::new(PANEL_COLLAPSED_HEIGHT)),
             panel_drag_origin: Arc::new(std::sync::Mutex::new(None)),
         })
-        .on_window_event(move |window, event| match event {
-            tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
-                api.prevent_close();
-                let _ = window.hide();
-            }
-            tauri::WindowEvent::Destroyed if window.label().starts_with(PLUGIN_OVERLAY_PREFIX) => {
+        .on_window_event(move |window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed)
+                && window.label().starts_with(PLUGIN_OVERLAY_PREFIX)
+            {
                 let destroyed_label = window.label().to_string();
                 let app_c = window.app_handle().clone();
                 let rt_c = rt_win_event.clone();
@@ -1807,17 +1936,18 @@ pub fn run(config_path: &str) {
                     sync_plugin_ui_state(&app_c, &rt_c, Some(&destroyed_label));
                 });
             }
-            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_initial_state,
             get_plugins,
+            get_lan_urls,
+            get_all_acls,
+            set_capsule_acl,
+            delete_capsule_acl,
             open_plugin_desktop,
             close_plugin_desktop,
             open_plugin_manage,
             open_plugins_dir,
-            open_admin_console,
-            get_pending_acl_count,
             get_i18n,
             set_locale,
             switch_room,
@@ -1826,6 +1956,7 @@ pub fn run(config_path: &str) {
             remove_history_room,
             set_record_raw,
             send_danmaku,
+            set_dropdown_expanded,
             set_panel_height,
             sync_panel_min_width,
             set_panel_width,
@@ -1837,6 +1968,7 @@ pub fn run(config_path: &str) {
             set_always_on_top,
             open_qr_login,
             refresh_qr_code,
+            logout,
             minimize_window,
             close_window,
         ])

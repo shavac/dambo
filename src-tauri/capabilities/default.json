@@ -1,8 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for dambo capsule and QR sign-in windows",
-  "local": true,
+  "description": "Capability for dambo windows",
   "windows": ["main", "bili-qr-login"],
   "permissions": [
     "core:default",
