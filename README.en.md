@@ -63,7 +63,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for testing and contribution conventions.
 
 1. **QR Sign In**: Click the account button on the left of the capsule and scan the QR code with the Bilibili mobile app (your session is persisted locally in `var/dambo.redb`).
 2. **Connect to a Live Room**:
-   - Enter a **room ID**, **short ID**, or `https://live.bilibili.com/...` URL and press `Enter` (or click **Connect**);
+   - Enter a **room ID**, **short ID**, or `https://live.bilibili.com/...` URL and press `Enter` (or click **Enter**);
    - Or open the dropdown menu to pick directly from **My Room**, **Following Live**, or **Recent Rooms**.
 
 ### 3. Send Danmaku with the Chat Input Box
@@ -103,7 +103,7 @@ Dambo includes four ready-to-use web plugins out of the box:
 
 | Plugin | Route | Use Case |
 | --- | --- | --- |
-| **`default`** | `/default/plugin.html` | **Primary OBS Transparent Overlay**: pinned SuperChat/Guard bar, ephemeral enter dock, 4s sliding gift combo merging with pulse feedback, and auto-follow bottom scroll (OBS Browser Source example: `http://localhost:3838/default/plugin.html`) |
+| **`default`** | `/default/` | **Primary OBS Transparent Overlay**: pinned SuperChat/Guard bar, ephemeral enter dock, 4s sliding gift combo merging with pulse feedback, and auto-follow bottom scroll (OBS Browser Source example: `http://localhost:3838/default/`) |
 | **`list`** | `/list/` | **Streamer / Moderator Monitor**: category filters (All / Chat / Gift & SC / Medal), manual scroll-up pause with unread counter, and sticky SC header |
 | **`sc-ticker`** | `/sc-ticker/` | **SC & Guard Countdown Cards**: compact corner widget focused purely on SuperChats and Guard subscriptions |
 | **`game24`** | `/game24/` | **24-Point Poker Chat Game**: deals 4 cards (A–K) each round for viewers to solve via danmaku math expressions (e.g. `(3+3)*(8-4)`), with live scoring & leaderboard; defaults to `300s` per round and supports `?timeout=300&solvable_only=false&settle_time=3.5&skip_time=2.5` |
@@ -143,9 +143,9 @@ No coding required—turn an idea into a working plugin in two simple steps with
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /` | Open the unified service portal (LAN URLs/QR codes, `/admin` shortcut, and plugin catalog with one-click OBS URL copy such as `http://localhost:3838/default/plugin.html`) |
+| `GET /` | Open the unified service portal (LAN URLs/QR codes, `/admin` shortcut, and plugin catalog with one-click OBS URL copy such as `http://localhost:3838/default/`) |
 | `GET /admin` | Open the unified Admin Console (live overview, chat input, embedded plugin drawer, ACL approvals, and KV/Topic data inspector) |
-| `GET /{plugin}/plugin.html` | Open any built-in or custom plugin view page in a browser / OBS Browser Source (e.g. `http://localhost:3838/default/plugin.html`) |
+| `GET /{plugin}/` | Open any built-in or custom plugin view page in a browser / OBS Browser Source (e.g. `http://localhost:3838/default/`) |
 | `GET /{plugin}/m` | Open the plugin configuration, storage & ACL management page in a browser or inside `/admin` |
 | `GET /sdk/dambo.js` | Embedded zero-dependency Pure-Web Plugin SDK |
 | `GET /api/v1/*` | Layer 1 Plugin Platform HTTP REST + SSE APIs |

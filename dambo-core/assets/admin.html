@@ -678,7 +678,7 @@
           <div class="card between">
             <div>
               <h3>已发现插件控制台</h3>
-              <div class="muted">点击“打开控制面板”将在本页右侧抽屉加载插件 `/{id}/m`，也可复制 OBS 源地址 `/{id}/plugin.html`。</div>
+              <div class="muted">点击“打开控制面板”将在本页右侧抽屉加载插件 `/{id}/m`，也可复制 OBS 源地址 `/{id}/`。</div>
             </div>
             <div class="row">
               <input id="plugin-search" type="search" placeholder="搜索插件 ID、名称或描述…" />
@@ -1005,14 +1005,34 @@
         $('auth-modal').classList.remove('open');
       }
 
+      function applyHashViewIfPresent() {
+        var hash = window.location.hash || '';
+        if (!hash.startsWith('#')) return;
+        var params = new URLSearchParams(hash.slice(1));
+        var view = params.get('view');
+        if (view && ['overview', 'plugins', 'acl', 'data'].indexOf(view) !== -1) {
+          switchView(view);
+        }
+      }
+
       function consumeHashTokenIfPresent() {
         var hash = window.location.hash || '';
         if (!hash.startsWith('#')) return Promise.resolve(false);
         var params = new URLSearchParams(hash.slice(1));
+        var view = params.get('view');
+        if (view && ['overview', 'plugins', 'acl', 'data'].indexOf(view) !== -1) {
+          switchView(view);
+        }
         var token = params.get('t');
         if (!token) return Promise.resolve(false);
+        params.delete('t');
+        var nextHash = params.toString();
         try {
-          window.history.replaceState(null, '', window.location.pathname + window.location.search);
+          window.history.replaceState(
+            null,
+            '',
+            window.location.pathname + window.location.search + (nextHash ? '#' + nextHash : '')
+          );
         } catch (_) {}
         return unlockWithToken(token, true);
       }
@@ -1187,7 +1207,7 @@
 
       function buildObsPluginUrl(plugin) {
         var routeName = plugin.plugin_name || plugin.plugin_id || '';
-        return new URL('/' + encodeURIComponent(routeName) + '/plugin.html', window.location.origin).href;
+        return new URL('/' + encodeURIComponent(routeName) + '/', window.location.origin).href;
       }
 
       function copyText(text, label) {
@@ -1295,7 +1315,7 @@
           metaRow.className = 'row muted';
           var obsText = plugin.obs && plugin.obs.width && plugin.obs.height
             ? ('建议 OBS: ' + plugin.obs.width + '×' + plugin.obs.height)
-            : 'OBS 源: ' + plugin.plugin_id + '/plugin.html';
+            : 'OBS 源: /' + (plugin.plugin_name || plugin.plugin_id) + '/';
           var topicCount = Array.isArray(plugin.topics) ? plugin.topics.length : 0;
           metaRow.textContent = obsText + ' · Topics: ' + topicCount;
           card.appendChild(metaRow);
@@ -1322,7 +1342,7 @@
 
           var linkPreview = document.createElement('a');
           linkPreview.className = 'btn-link sm';
-          linkPreview.href = '/' + encodeURIComponent(plugin.plugin_name || plugin.plugin_id) + '/plugin.html';
+          linkPreview.href = '/' + encodeURIComponent(plugin.plugin_name || plugin.plugin_id) + '/';
           linkPreview.target = '_blank';
           linkPreview.rel = 'noopener';
           linkPreview.textContent = '预览挂件';
@@ -2341,6 +2361,7 @@
       }
 
       bindUiEvents();
+      window.addEventListener('hashchange', applyHashViewIfPresent);
       connectLiveWs();
       consumeHashTokenIfPresent().then(function (unlockedByHash) {
         if (!unlockedByHash) {

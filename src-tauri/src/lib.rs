@@ -840,6 +840,18 @@ fn open_plugin_manage_page(runtime: &DamboRuntime, plugin_name: &str) -> Result<
     Ok(url)
 }
 
+fn open_admin_console_page(runtime: &DamboRuntime, view: Option<&str>) -> String {
+    let url = runtime.admin_url(view);
+    open_in_os(&url);
+    url
+}
+
+fn open_service_portal_page(runtime: &DamboRuntime) -> String {
+    let url = runtime.portal_url();
+    open_in_os(&url);
+    url
+}
+
 fn open_plugins_directory(runtime: &DamboRuntime) {
     open_dir_in_os(&runtime.html_dir);
 }
@@ -1362,6 +1374,19 @@ async fn open_plugins_dir(ctx: State<'_, AppContext>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_admin_console(
+    view: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<String, String> {
+    Ok(open_admin_console_page(&ctx.runtime, view.as_deref()))
+}
+
+#[tauri::command]
+async fn open_service_portal(ctx: State<'_, AppContext>) -> Result<String, String> {
+    Ok(open_service_portal_page(&ctx.runtime))
+}
+
+#[tauri::command]
 async fn get_i18n(ctx: State<'_, AppContext>) -> Result<i18n::I18nPayload, String> {
     let locale = active_locale(&ctx.runtime);
     Ok(i18n::build_payload(locale))
@@ -1820,6 +1845,8 @@ fn build_tray_menu_excluding(
 
     MenuBuilder::new(app)
         .text("toggle_panel", i18n::t(locale, "tray.toggle_panel"))
+        .text("open_admin_console", i18n::t(locale, "tray.open_admin"))
+        .text("open_service_portal", i18n::t(locale, "tray.open_portal"))
         .item(&PredefinedMenuItem::separator(app)?)
         .item(&recent_menu)
         .item(&plugin_menu)
@@ -1940,6 +1967,8 @@ pub fn run(config_path: &str) {
             close_plugin_desktop,
             open_plugin_manage,
             open_plugins_dir,
+            open_admin_console,
+            open_service_portal,
             get_i18n,
             set_locale,
             switch_room,
@@ -2135,6 +2164,12 @@ pub fn run(config_path: &str) {
                     }
                     match menu_id {
                         "toggle_panel" => toggle_main_window(app),
+                        "open_admin_console" => {
+                            open_admin_console_page(&rt_menu, None);
+                        }
+                        "open_service_portal" => {
+                            open_service_portal_page(&rt_menu);
+                        }
                         "plugin:open_dir" => open_plugins_directory(&rt_menu),
                         "toggle_record_raw" => {
                             let next = !rt_menu.is_record_raw_enabled();

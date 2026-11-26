@@ -227,16 +227,36 @@ impl DamboRuntime {
         format!("http://{}:{}/{}/", host, self.config.server.port, name)
     }
 
-    /// Build the canonical management URL (`http://{host}:{port}/{plugin}/m`) for a plugin,
-    /// preferring a local loopback host when accessible so local admin cookies auto-mint.
-    pub fn plugin_manage_url(&self, name: &str) -> String {
+    fn local_http_origin(&self) -> String {
         let host = self
             .local_loopback_host()
             .map(str::to_string)
             .unwrap_or_else(|| {
                 server::format_url_host(server::connect_host(&self.config.server.host))
             });
-        format!("http://{}:{}/{}/m", host, self.config.server.port, name)
+        format!("http://{}:{}", host, self.config.server.port)
+    }
+
+    /// Build the canonical management URL (`http://{host}:{port}/{plugin}/m`) for a plugin,
+    /// preferring a local loopback host when accessible so local admin cookies auto-mint.
+    pub fn plugin_manage_url(&self, name: &str) -> String {
+        format!("{}/{}/m", self.local_http_origin(), name)
+    }
+
+    /// Build the canonical service portal URL (`http://{host}:{port}/`),
+    /// preferring a local loopback host when accessible.
+    pub fn portal_url(&self) -> String {
+        format!("{}/", self.local_http_origin())
+    }
+
+    /// Build the unified admin console URL (`http://{host}:{port}/admin[#view=...]`),
+    /// preferring a local loopback host when accessible so local admin cookies auto-mint.
+    pub fn admin_url(&self, view: Option<&str>) -> String {
+        let base = format!("{}/admin", self.local_http_origin());
+        match view.map(str::trim) {
+            Some(v @ ("overview" | "plugins" | "acl" | "data")) => format!("{}#view={}", base, v),
+            _ => base,
+        }
     }
 
     /// Inspect an error chain to extract the occupied address when binding failed with `AddrInUse`.
@@ -1132,6 +1152,45 @@ mod tests {
         );
 
         drop(occupied);
+        rt.shutdown_and_wait().await;
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_portal_and_admin_url_helpers() {
+        let id = RT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_dir =
+            std::env::temp_dir().join(format!("dambo_rt_urls_{}_{}", std::process::id(), id));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("etc")).unwrap();
+        fs::create_dir_all(temp_dir.join("static/html/default")).unwrap();
+        fs::write(
+            temp_dir.join("static/html/default/plugin.html"),
+            "<html>d</html>",
+        )
+        .unwrap();
+
+        let cfg_path = temp_dir.join("etc/config.toml");
+        fs::write(
+            &cfg_path,
+            "[bilibili]\nroom_id = 0\n[server]\nhost = \"0.0.0.0\"\nport = 3948\nhtml_dir = \"static/html\"\n",
+        )
+        .unwrap();
+
+        let rt = DamboRuntime::from_config_path(&cfg_path).unwrap();
+        assert_eq!(rt.plugin_url("default"), "http://localhost:3948/default/");
+        assert_eq!(
+            rt.plugin_manage_url("default"),
+            "http://localhost:3948/default/m"
+        );
+        assert_eq!(rt.portal_url(), "http://localhost:3948/");
+        assert_eq!(rt.admin_url(None), "http://localhost:3948/admin");
+        assert_eq!(
+            rt.admin_url(Some("acl")),
+            "http://localhost:3948/admin#view=acl"
+        );
+        assert_eq!(rt.admin_url(Some("invalid")), "http://localhost:3948/admin");
+
         rt.shutdown_and_wait().await;
         let _ = fs::remove_dir_all(&temp_dir);
     }

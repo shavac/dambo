@@ -320,7 +320,7 @@
       <div class="between" style="margin-bottom: 14px;">
         <div>
           <h2 style="font-size: 16px;">插件目录（OBS 浏览器源 &amp; 独立管理页）</h2>
-          <div class="muted">在 OBS Studio 中添加「浏览器」源时，请直接使用下方的 <code>/{id}/plugin.html</code> 地址</div>
+          <div class="muted">在 OBS Studio 中添加「浏览器」源时，请直接使用下方的 <code>/{id}/</code> 地址</div>
         </div>
         <div class="row">
           <input type="search" id="plugin-search-input" placeholder="按名称、ID 或描述筛选插件…" />
@@ -538,7 +538,7 @@
           desc.textContent = p.description || '无描述信息（可在 plugin.json 中设置 description）';
           head.appendChild(desc);
 
-          const obsPath = '/' + encodeURIComponent(p.plugin_name) + '/plugin.html';
+          const obsPath = '/' + encodeURIComponent(p.plugin_name) + '/';
           const obsUrl = new URL(obsPath, window.location.origin).toString();
           const urlCode = document.createElement('code');
           urlCode.className = 'plugin-url-box';

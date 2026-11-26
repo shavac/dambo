@@ -20,9 +20,8 @@ let i18nMessages = {};
 let pluginList = [];
 let aclList = [];
 let lanPayload = null;
-let lanSelectedPath = "/";
+let lanSelectedPath = "/admin";
 let lanSelectedIdx = 0;
-let activePluginTab = "plugins";
 let securityMode = "open";
 let currentHistoryRooms = [];
 let lastRoomOptions = null;
@@ -101,7 +100,7 @@ function computeRequiredMinPanelWidth() {
     const accountBadge = document.getElementById('account-badge');
     const roomSwitchBtn = document.getElementById('room-switch-btn');
     const danmakuToggleBtn = document.getElementById('danmaku-toggle-btn');
-    const lanGroup = document.querySelector('.lan-menu-group');
+    const consoleGroup = document.querySelector('.console-menu-group');
     const pluginGroup = document.querySelector('.plugin-menu-group');
     const moreGroup = document.querySelector('.more-menu-group');
     const winControls = document.querySelector('.win-controls');
@@ -116,7 +115,7 @@ function computeRequiredMinPanelWidth() {
         ...dividers,
         roomSwitchBtn,
         danmakuToggleBtn,
-        lanGroup,
+        consoleGroup,
         pluginGroup,
         moreGroup,
         winControls,
@@ -371,7 +370,7 @@ function renderPlugins(plugins) {
 
         const urlEl = document.createElement('div');
         urlEl.className = 'plugin-url';
-        urlEl.innerText = `${p.route}  ·  ${p.url}`;
+        urlEl.innerText = p.url;
         urlEl.title = p.url;
         main.appendChild(urlEl);
 
@@ -450,11 +449,25 @@ function renderPlugins(plugins) {
     scheduleSyncPanelMinWidth();
 }
 
-function displayAclParty(display, namedomain) {
-    if (display && (display.name || display.plugin_name)) {
-        return `${display.name || display.plugin_name} (${namedomain})`;
+function renderAcls(acls) {
+    aclList = Array.isArray(acls) ? acls : [];
+    const pendingCount = aclList.filter((r) => r.status === 'pending').length;
+
+    const badgeEl = document.getElementById('console-pending-badge');
+    if (badgeEl) {
+        badgeEl.innerText = String(pendingCount);
+        badgeEl.classList.toggle('hidden', pendingCount === 0);
     }
-    return namedomain;
+
+    const alertEl = document.getElementById('console-acl-alert');
+    const alertTextEl = document.getElementById('console-acl-alert-text');
+    if (alertEl) {
+        alertEl.classList.toggle('hidden', pendingCount === 0);
+    }
+    if (alertTextEl && pendingCount > 0) {
+        alertTextEl.innerText = t('console.pending_alert', { count: pendingCount });
+    }
+    scheduleSyncPanelMinWidth();
 }
 
 function renderLanMenu() {
@@ -541,193 +554,6 @@ async function fetchLanUrls(path) {
     }
 }
 
-function setActivePluginTab(tab) {
-    activePluginTab = tab === 'acl' ? 'acl' : 'plugins';
-    const isAcl = activePluginTab === 'acl';
-    document.getElementById('tab-plugins-btn')?.classList.toggle('active', !isAcl);
-    document.getElementById('tab-acl-btn')?.classList.toggle('active', isAcl);
-    document.getElementById('plugin-cards-list')?.classList.toggle('hidden', isAcl);
-    document.getElementById('plugin-dropdown-footer')?.classList.toggle('hidden', isAcl);
-    document.getElementById('acl-cards-list')?.classList.toggle('hidden', !isAcl);
-}
-
-function renderAcls(acls) {
-    aclList = Array.isArray(acls) ? acls : [];
-    const attentionCount = aclList.filter(
-        (r) => r.status === 'pending' || r.status === 'auto_granted'
-    ).length;
-    const badgeEl = document.getElementById('acl-count-badge');
-    if (badgeEl) {
-        badgeEl.innerText = String(attentionCount);
-        badgeEl.classList.toggle('hidden', attentionCount === 0);
-    }
-
-    const listEl = document.getElementById('acl-cards-list');
-    if (!listEl) return;
-    listEl.replaceChildren();
-
-    if (aclList.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'plugin-empty';
-        empty.innerText = t('acl.empty');
-        listEl.appendChild(empty);
-        return;
-    }
-
-    aclList.forEach((rec) => {
-        const card = document.createElement('div');
-        card.className = 'plugin-card';
-
-        const main = document.createElement('div');
-        main.className = 'plugin-card-main';
-
-        const header = document.createElement('div');
-        header.className = 'plugin-card-header';
-
-        const routeText = document.createElement('span');
-        routeText.className = 'plugin-title';
-        routeText.innerText = `${displayAclParty(rec.requester_display, rec.requester)} → ${displayAclParty(rec.owner_display, rec.owner)}`;
-        routeText.title = routeText.innerText;
-        header.appendChild(routeText);
-
-        const resBadge = document.createElement('span');
-        resBadge.className = 'plugin-badge';
-        resBadge.innerText = rec.resource;
-        header.appendChild(resBadge);
-
-        const statusBadge = document.createElement('span');
-        if (rec.status === 'auto_granted') {
-            statusBadge.className = 'acl-status-badge warn';
-            statusBadge.innerText = `${t('acl.status_auto_granted')} (${rec.level})`;
-        } else if (rec.status === 'granted') {
-            statusBadge.className = 'acl-status-badge ok';
-            statusBadge.innerText = `${t('acl.status_granted')} (${rec.level})`;
-        } else if (rec.status === 'pending') {
-            statusBadge.className = 'acl-status-badge warn';
-            statusBadge.innerText = rec.requested_level
-                ? `${t('acl.status_pending')} (${rec.requested_level})`
-                : t('acl.status_pending');
-        } else {
-            statusBadge.className = 'acl-status-badge danger';
-            statusBadge.innerText = t('acl.status_denied');
-        }
-        header.appendChild(statusBadge);
-        main.appendChild(header);
-
-        if (rec.status === 'auto_granted') {
-            const hint = document.createElement('div');
-            hint.className = 'plugin-desc';
-            hint.innerText = t('acl.auto_hint');
-            hint.title = hint.innerText;
-            main.appendChild(hint);
-        } else if (rec.reason) {
-            const reasonEl = document.createElement('div');
-            reasonEl.className = 'plugin-desc';
-            reasonEl.innerText = rec.reason;
-            reasonEl.title = rec.reason;
-            main.appendChild(reasonEl);
-        }
-
-        const actions = document.createElement('div');
-        actions.className = 'plugin-card-actions';
-
-        const mutateAcl = async (level, note) => {
-            if (!invoke) return;
-            try {
-                await invoke('set_capsule_acl', {
-                    owner: rec.owner,
-                    requester: rec.requester,
-                    resource: rec.resource,
-                    level,
-                    note: note || null,
-                });
-                showToast(t('toast.acl_updated', { resource: rec.resource }));
-                await fetchAllAcls();
-            } catch (err) {
-                showToast(t('toast.error_prefix', { error: String(err) }));
-            }
-        };
-
-        const deleteAcl = async () => {
-            if (!invoke) return;
-            try {
-                await invoke('delete_capsule_acl', {
-                    owner: rec.owner,
-                    requester: rec.requester,
-                    resource: rec.resource,
-                });
-                showToast(t('toast.acl_deleted', { resource: rec.resource }));
-                await fetchAllAcls();
-            } catch (err) {
-                showToast(t('toast.error_prefix', { error: String(err) }));
-            }
-        };
-
-        if (rec.status === 'pending') {
-            const row = document.createElement('div');
-            row.className = 'plugin-card-actions-row';
-            const approveBtn = document.createElement('button');
-            approveBtn.type = 'button';
-            approveBtn.className = 'plugin-btn primary';
-            approveBtn.innerText = t('acl.approve');
-            const targetLvl =
-                rec.requested_level || (rec.resource.startsWith('topic:') ? 'subscribe' : 'read');
-            approveBtn.onclick = () => mutateAcl(targetLvl, null);
-
-            const denyBtn = document.createElement('button');
-            denyBtn.type = 'button';
-            denyBtn.className = 'plugin-btn danger';
-            denyBtn.innerText = t('acl.deny');
-            denyBtn.onclick = () => mutateAcl('none', null);
-
-            row.appendChild(approveBtn);
-            row.appendChild(denyBtn);
-            actions.appendChild(row);
-        } else if (rec.status === 'auto_granted') {
-            const promoteBtn = document.createElement('button');
-            promoteBtn.type = 'button';
-            promoteBtn.className = 'plugin-btn primary';
-            promoteBtn.innerText = t('acl.promote');
-            promoteBtn.onclick = () => mutateAcl(rec.level, 'Confirmed in capsule UI');
-
-            const revokeBtn = document.createElement('button');
-            revokeBtn.type = 'button';
-            revokeBtn.className = 'plugin-btn danger';
-            revokeBtn.innerText = t('acl.revoke_deny');
-            revokeBtn.onclick = () => mutateAcl('none', 'Revoked auto-grant in capsule UI');
-
-            actions.appendChild(promoteBtn);
-            actions.appendChild(revokeBtn);
-        } else if (rec.status === 'granted') {
-            const denyBtn = document.createElement('button');
-            denyBtn.type = 'button';
-            denyBtn.className = 'plugin-btn warn';
-            denyBtn.innerText = t('acl.revoke_deny');
-            denyBtn.onclick = () => mutateAcl('none', null);
-
-            const delBtn = document.createElement('button');
-            delBtn.type = 'button';
-            delBtn.className = 'plugin-btn danger';
-            delBtn.innerText = t('acl.delete');
-            delBtn.onclick = deleteAcl;
-
-            actions.appendChild(denyBtn);
-            actions.appendChild(delBtn);
-        } else {
-            const delBtn = document.createElement('button');
-            delBtn.type = 'button';
-            delBtn.className = 'plugin-btn danger';
-            delBtn.innerText = t('acl.delete');
-            delBtn.onclick = deleteAcl;
-            actions.appendChild(delBtn);
-        }
-
-        card.appendChild(main);
-        card.appendChild(actions);
-        listEl.appendChild(card);
-    });
-}
-
 async function fetchAllAcls() {
     if (!invoke) return;
     try {
@@ -750,12 +576,12 @@ function canSendDanmaku() {
 
 function isAnyMenuOpen() {
     const roomMenu = document.getElementById('room-dropdown-menu');
-    const lanMenu = document.getElementById('lan-dropdown-menu');
+    const consoleMenu = document.getElementById('console-dropdown-menu');
     const pluginMenu = document.getElementById('plugin-dropdown-menu');
     const moreMenu = document.getElementById('more-dropdown-menu');
     return Boolean(
         (roomMenu && !roomMenu.classList.contains('hidden')) ||
-        (lanMenu && !lanMenu.classList.contains('hidden')) ||
+        (consoleMenu && !consoleMenu.classList.contains('hidden')) ||
         (pluginMenu && !pluginMenu.classList.contains('hidden')) ||
         (moreMenu && !moreMenu.classList.contains('hidden'))
     );
@@ -935,11 +761,11 @@ function syncDanmakuUiState() {
 
 function hideAllDropdownMenusOnly() {
     document.getElementById('room-dropdown-menu')?.classList.add('hidden');
-    const lanMenu = document.getElementById('lan-dropdown-menu');
-    const lanBtn = document.getElementById('lan-dropdown-btn');
-    lanMenu?.classList.add('hidden');
-    lanBtn?.classList.remove('active');
-    lanBtn?.setAttribute('aria-expanded', 'false');
+    const consoleMenu = document.getElementById('console-dropdown-menu');
+    const consoleBtn = document.getElementById('console-dropdown-btn');
+    consoleMenu?.classList.add('hidden');
+    consoleBtn?.classList.remove('active');
+    consoleBtn?.setAttribute('aria-expanded', 'false');
     document.getElementById('plugin-dropdown-menu')?.classList.add('hidden');
     document.getElementById('plugin-dropdown-btn')?.classList.remove('active');
     document.getElementById('plugin-dropdown-btn')?.setAttribute('aria-expanded', 'false');
@@ -1009,10 +835,10 @@ function openSingleDropdownMenu(target) {
     hideAllDropdownMenusOnly();
     if (target === 'room') {
         document.getElementById('room-dropdown-menu')?.classList.remove('hidden');
-    } else if (target === 'lan') {
-        document.getElementById('lan-dropdown-menu')?.classList.remove('hidden');
-        document.getElementById('lan-dropdown-btn')?.classList.add('active');
-        document.getElementById('lan-dropdown-btn')?.setAttribute('aria-expanded', 'true');
+    } else if (target === 'console') {
+        document.getElementById('console-dropdown-menu')?.classList.remove('hidden');
+        document.getElementById('console-dropdown-btn')?.classList.add('active');
+        document.getElementById('console-dropdown-btn')?.setAttribute('aria-expanded', 'true');
     } else if (target === 'plugin') {
         document.getElementById('plugin-dropdown-menu')?.classList.remove('hidden');
         document.getElementById('plugin-dropdown-btn')?.classList.add('active');
@@ -1033,13 +859,13 @@ function setDropdownOpen(open) {
     syncWindowHeight();
 }
 
-function setLanMenuOpen(open) {
+function setConsoleMenuOpen(open) {
     if (open) {
-        openSingleDropdownMenu('lan');
+        openSingleDropdownMenu('console');
     } else {
-        document.getElementById('lan-dropdown-menu')?.classList.add('hidden');
-        document.getElementById('lan-dropdown-btn')?.classList.remove('active');
-        document.getElementById('lan-dropdown-btn')?.setAttribute('aria-expanded', 'false');
+        document.getElementById('console-dropdown-menu')?.classList.add('hidden');
+        document.getElementById('console-dropdown-btn')?.classList.remove('active');
+        document.getElementById('console-dropdown-btn')?.setAttribute('aria-expanded', 'false');
     }
     syncWindowHeight();
 }
@@ -1240,7 +1066,7 @@ async function hydrateInitialState() {
         if (Array.isArray(plugins)) {
             renderPlugins(plugins);
         }
-        await Promise.all([fetchLanUrls('/'), fetchAllAcls()]);
+        await Promise.all([fetchLanUrls('/admin'), fetchAllAcls()]);
         scheduleSyncPanelMinWidth();
     } catch (e) {
         console.error('Failed to hydrate initial UI state:', e);
@@ -1610,7 +1436,7 @@ podContainerEl?.addEventListener('pointerdown', (e) => {
     if (
         e.target instanceof Element &&
         e.target.closest(
-            'button, input, textarea, select, a, .room-pill, .resize-handle-right, .dropdown-menu, .lan-dropdown-menu, .plugin-dropdown-menu, .more-dropdown-menu'
+            'button, input, textarea, select, a, .room-pill, .resize-handle-right, .dropdown-menu, .console-dropdown-menu, .plugin-dropdown-menu, .more-dropdown-menu'
         )
     ) {
         return;
@@ -1674,18 +1500,54 @@ document.getElementById('room-switch-btn')?.addEventListener('click', async () =
     }
 });
 
-document.getElementById('lan-dropdown-btn')?.addEventListener('click', async () => {
-    const menu = document.getElementById('lan-dropdown-menu');
+document.getElementById('console-dropdown-btn')?.addEventListener('click', async () => {
+    const menu = document.getElementById('console-dropdown-menu');
     const willOpen = menu ? menu.classList.contains('hidden') : false;
-    setLanMenuOpen(willOpen);
+    setConsoleMenuOpen(willOpen);
     if (willOpen) {
-        await fetchLanUrls(lanSelectedPath);
+        await Promise.all([fetchLanUrls(lanSelectedPath), fetchAllAcls()]);
+    }
+});
+
+document.getElementById('console-open-admin-btn')?.addEventListener('click', async () => {
+    if (!invoke) return;
+    setConsoleMenuOpen(false);
+    try {
+        await invoke('open_admin_console', { view: null });
+        showToast(t('toast.opened_admin'));
+    } catch (e) {
+        console.error('open_admin_console failed:', e);
+        showToast(t('toast.error_prefix', { error: String(e) }));
+    }
+});
+
+document.getElementById('console-open-portal-btn')?.addEventListener('click', async () => {
+    if (!invoke) return;
+    setConsoleMenuOpen(false);
+    try {
+        await invoke('open_service_portal');
+        showToast(t('toast.opened_portal'));
+    } catch (e) {
+        console.error('open_service_portal failed:', e);
+        showToast(t('toast.error_prefix', { error: String(e) }));
+    }
+});
+
+document.getElementById('console-acl-open-btn')?.addEventListener('click', async () => {
+    if (!invoke) return;
+    setConsoleMenuOpen(false);
+    try {
+        await invoke('open_admin_console', { view: 'acl' });
+        showToast(t('toast.opened_admin'));
+    } catch (e) {
+        console.error('open_admin_console(acl) failed:', e);
+        showToast(t('toast.error_prefix', { error: String(e) }));
     }
 });
 
 document.querySelectorAll('.lan-path-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
-        const nextPath = btn.getAttribute('data-lan-path') || '/';
+        const nextPath = btn.getAttribute('data-lan-path') || '/admin';
         await fetchLanUrls(nextPath);
     });
 });
@@ -1702,22 +1564,13 @@ document.getElementById('lan-copy-btn')?.addEventListener('click', async () => {
     }
 });
 
-document.getElementById('tab-plugins-btn')?.addEventListener('click', () => {
-    setActivePluginTab('plugins');
-});
-
-document.getElementById('tab-acl-btn')?.addEventListener('click', async () => {
-    setActivePluginTab('acl');
-    await fetchAllAcls();
-});
-
 document.getElementById('plugin-dropdown-btn')?.addEventListener('click', async () => {
     const menu = document.getElementById('plugin-dropdown-menu');
     const willOpen = menu ? menu.classList.contains('hidden') : false;
     setPluginMenuOpen(willOpen);
     if (willOpen && invoke) {
         try {
-            const [plugins] = await Promise.all([invoke('get_plugins'), fetchAllAcls()]);
+            const plugins = await invoke('get_plugins');
             renderPlugins(plugins);
         } catch (e) {
             console.error('Failed to fetch plugins:', e);
@@ -1810,10 +1663,10 @@ document.addEventListener('click', (e) => {
         setDropdownOpen(false);
     }
 
-    const lanMenu = document.getElementById('lan-dropdown-menu');
-    const lanGroup = document.querySelector('.lan-menu-group');
-    if (lanMenu && !lanMenu.classList.contains('hidden') && lanGroup && !lanGroup.contains(e.target)) {
-        setLanMenuOpen(false);
+    const consoleMenu = document.getElementById('console-dropdown-menu');
+    const consoleGroup = document.querySelector('.console-menu-group');
+    if (consoleMenu && !consoleMenu.classList.contains('hidden') && consoleGroup && !consoleGroup.contains(e.target)) {
+        setConsoleMenuOpen(false);
     }
 
     const pluginMenu = document.getElementById('plugin-dropdown-menu');

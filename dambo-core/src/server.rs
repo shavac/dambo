@@ -1010,10 +1010,11 @@ mod tests {
     fn test_embedded_portal_and_admin_html_security() {
         assert!(PORTAL_INDEX_HTML.contains("id=\"dambo-portal-root\""));
         assert!(PORTAL_INDEX_HTML.contains("/admin"));
-        assert!(PORTAL_INDEX_HTML.contains("/plugin.html"));
+        assert!(!PORTAL_INDEX_HTML.contains("/plugin.html"));
         assert!(!PORTAL_INDEX_HTML.contains("innerHTML"));
 
         assert!(ADMIN_CONSOLE_HTML.contains("id=\"dambo-admin-root\""));
+        assert!(ADMIN_CONSOLE_HTML.contains("hashchange"));
         assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/events?mode=admin"));
         assert!(ADMIN_CONSOLE_HTML.contains("/ws/event"));
         assert!(ADMIN_CONSOLE_HTML.contains("/api/v1/system/status"));

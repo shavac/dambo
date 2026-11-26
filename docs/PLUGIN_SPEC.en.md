@@ -37,7 +37,7 @@ Place plugins under `static/html/<plugin-name>/` (auto hot-reloaded in ~200ms). 
 
 ```text
 static/html/<plugin-name>/
-├── plugin.html     # [Required] OBS view page (legacy index.html is no longer supported), served at GET /{plugin-name}/plugin.html (e.g. http://localhost:3838/default/plugin.html) and GET /{plugin-name}/
+├── plugin.html     # [Required] OBS view page (legacy index.html is no longer supported), served at GET /{plugin-name}/ (e.g. http://localhost:3838/default/)
 ├── plugin.json     # [Recommended] Manifest, recommended OBS dimensions, and typed defaults
 ├── plugin.css      # [Optional] View stylesheet
 ├── plugin.js       # [Optional] View script
@@ -336,5 +336,5 @@ Verify all 5 points before outputting the code:
 4. `plugin.json` is valid JSON with no `permissions` field, and the view page stays transparent and clear of the top-right `100×44px` region.
 5. End with a clear 3-step install guide:
    - In Dambo's capsule, click **Plugins -> Open Plugins Folder** (`static/html/`), create `<plugin-name>/`, and drop all generated files inside;
-   - No restart needed (~200ms hot-reload)—click **Open on Desktop** or **Copy OBS URL** (such as `http://localhost:3838/default/plugin.html` for the default overlay or `http://localhost:3838/<plugin-name>/plugin.html`) and add it as an OBS Browser Source;
+   - No restart needed (~200ms hot-reload)—click **Open on Desktop** or **Copy OBS URL** (such as `http://localhost:3838/default/` for the default overlay or `http://localhost:3838/<plugin-name>/`) and add it as an OBS Browser Source;
    - Click **Manage** in Dambo or open the unified Admin Console (`http://localhost:3838/admin`), or visit `http://localhost:<port>/<plugin-name>/m` to edit settings, manage ACLs, or use your custom control panel.
