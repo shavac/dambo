@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <base href="/scoreboard/" />
+  <title>多插件通用积分榜 · 管理面板</title>
+  <link rel="stylesheet" href="./manage.css" />
+</head>
+<body>
+  <main id="dambo-manage-root">
+    <!-- 顶部信息卡片 -->
+    <section class="card" id="sec-info">
+      <div class="between">
+        <div class="row">
+          <h1 class="intro-title" id="plugin-title">多插件通用积分榜</h1>
+          <div class="row" id="plugin-badges"></div>
+        </div>
+        <div class="row">
+          <button type="button" class="small" id="reload-all-btn">刷新</button>
+        </div>
+      </div>
+
+      <p class="intro-desc" id="plugin-desc">接收其他插件通过 Topic 或数据存储推送的积分并实时排名，支持多数据源加权合并、多主题多布局、持久化与实时调分。</p>
+
+      <div class="obs-bar">
+        <div class="obs-url-wrap">
+          <span class="muted">OBS 浏览器源</span>
+          <code class="obs-url-code" id="obs-url-code">-</code>
+        </div>
+        <div class="row">
+          <button type="button" class="small" id="copy-view-btn">复制 OBS 链接</button>
+          <button type="button" class="small" id="copy-obs-nosafe-btn" title="隐藏桌面悬浮窗顶部 48px 安全留白">复制纯净 OBS 链接 (?safe_top=0)</button>
+        </div>
+      </div>
+
+      <div class="tech-line" id="plugin-tech-meta">-</div>
+    </section>
+
+    <!-- 主功能选项卡 -->
+    <nav class="main-tabs" role="tablist" aria-label="积分榜管理分区">
+      <button type="button" class="main-tab-btn active" role="tab" data-main-tab="scores">
+        <span>积分与榜单</span>
+        <span class="tab-badge" id="tab-count-scores">0</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="sources">
+        <span>数据源接入</span>
+        <span class="tab-badge" id="tab-count-sources">0</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="config">
+        <span>外观与规则</span>
+        <span class="tab-badge" id="tab-count-config">0</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="push">
+        <span>推送协议与权限</span>
+        <span class="tab-badge warn hidden" id="tab-count-acl">0</span>
+      </button>
+      <button type="button" class="main-tab-btn" role="tab" data-main-tab="data">
+        <span>存储与广播</span>
+        <span class="tab-badge" id="tab-count-topics">0</span>
+      </button>
+    </nav>
+
+    <!-- 1. 积分与榜单控制面板 -->
+    <section class="card" id="sec-scores">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">实时汇总榜单与手动调分</h2>
+          <div class="muted" id="scores-mode-hint">当前存储模式：持久化（自动同步所有在线 OBS / 悬浮窗）</div>
+        </div>
+        <div class="row">
+          <button type="button" class="small" id="sim-push-btn">模拟测试加分 (+10)</button>
+          <button type="button" class="small" id="toggle-io-btn">导入 / 导出 JSON</button>
+          <button type="button" class="danger small" id="reset-all-scores-btn">清空全部积分</button>
+        </div>
+      </div>
+
+      <!-- 导入导出折叠区 -->
+      <div class="item-box hidden" id="io-panel" style="margin-bottom: 12px;">
+        <div class="item-top">
+          <strong>JSON 导入 / 导出</strong>
+          <div class="row">
+            <button type="button" class="small" id="export-json-btn">生成当前榜单 JSON</button>
+            <button type="button" class="small" id="copy-json-btn">复制 JSON</button>
+            <button type="button" class="primary small" id="import-merge-btn">合并导入</button>
+            <button type="button" class="danger small" id="import-replace-btn">清空后覆盖导入</button>
+          </div>
+        </div>
+        <textarea id="io-json-textarea" placeholder='支持数组格式：[{"uid": 1001, "uname": "测试玩家", "score": 50, "tag": "活动"}]'></textarea>
+      </div>
+
+      <!-- 新增 / 手动调整表单 -->
+      <form class="item-box" id="manual-score-form" style="margin-bottom: 14px;">
+        <div class="item-top">
+          <strong>新增 / 手动加减或设定玩家分数</strong>
+          <span class="muted">填 UID 时以 UID 作为唯一身份；留空 UID 则按昵称去重合并</span>
+        </div>
+        <div class="field-grid">
+          <label>玩家 UID (选填)<br /><input type="number" id="m-uid" min="0" step="1" placeholder="例如 42 或留空" /></label>
+          <label>玩家昵称 *<br /><input type="text" id="m-uname" maxlength="64" placeholder="输入昵称" required /></label>
+          <label>调整方式<br />
+            <select id="m-op">
+              <option value="add">累加分数 (delta)</option>
+              <option value="set">直接设为目标总分 (set)</option>
+            </select>
+          </label>
+          <label>分值 *<br /><input type="number" id="m-val" step="any" value="10" required /></label>
+          <label>来源标签 (选填)<br /><input type="text" id="m-tag" maxlength="24" placeholder="手动" /></label>
+          <label>头像 URL (选填)<br /><input type="url" id="m-face" placeholder="https://..." /></label>
+        </div>
+        <div class="row">
+          <button type="submit" class="primary small">应用积分调整</button>
+        </div>
+      </form>
+
+      <!-- 实时排行榜列表 -->
+      <div class="kv-list" id="manage-rank-list"></div>
+    </section>
+
+    <!-- 2. 数据源接入 -->
+    <section class="card hidden" id="sec-sources">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">多插件数据源接入与权重合并</h2>
+          <div class="muted">支持跨插件公开 Topic 自动发现、指定插件 Topic 订阅以及只读 KV 存储实时监听</div>
+        </div>
+        <div class="row">
+          <button type="button" class="ok small" id="preset-game24-topic-btn">+ 一键接入 24点 回合流</button>
+          <button type="button" class="small" id="preset-game24-kv-btn">+ 一键接入 24点 内存榜</button>
+        </div>
+      </div>
+
+      <!-- 自动发现配置 -->
+      <div class="item-box" style="margin-bottom: 12px;">
+        <div class="item-top">
+          <div class="row">
+            <strong>公开积分 Topic 自动发现</strong>
+            <label class="row">
+              <input type="checkbox" id="src-auto-discover-cb" />
+              <span>开启自动扫描与免 ACL 订阅</span>
+            </label>
+          </div>
+          <button type="button" class="small" id="save-auto-topics-btn">保存自动发现设置</button>
+        </div>
+        <div class="row">
+          <label style="flex: 1 1 280px;">自动订阅的公开 Topic 名（英文逗号分隔）：
+            <input type="text" id="src-auto-names-input" style="width: 100%; margin-top: 4px;" placeholder="scoreboard, score, scores" />
+          </label>
+        </div>
+        <div class="muted" id="auto-discovered-list">正在扫描已安装插件的公开 Topic…</div>
+      </div>
+
+      <!-- 显式数据源列表 -->
+      <h3 class="muted" style="margin: 6px 0 8px;">已配置的显式数据源规则（<code>defaults.sources</code>）</h3>
+      <div class="kv-list" id="sources-list"></div>
+
+      <!-- 新增显式数据源 -->
+      <form class="item-box" id="add-source-form" style="margin-top: 14px;">
+        <div class="item-top">
+          <strong>添加新数据源规则</strong>
+          <span class="muted">从已安装插件中选择 Topic 或 KV 命名空间</span>
+        </div>
+        <div class="field-grid">
+          <label>目标插件 *<br /><select id="new-src-plugin" required></select></label>
+          <label>接入方式 *<br />
+            <select id="new-src-mode">
+              <option value="topic">Topic 实时订阅 (topic)</option>
+              <option value="memory_kv">内存 KV 监听 (memory_kv)</option>
+              <option value="persist_kv">持久化 KV 监听 (persist_kv)</option>
+            </select>
+          </label>
+          <label>Topic 名或 KV 命名空间 *<br /><input type="text" id="new-src-target" placeholder="例如 scoreboard / round / scores" required /></label>
+          <label>权重倍率 (weight)<br /><input type="number" id="new-src-weight" step="any" value="1" /></label>
+          <label>展示标签 (选填)<br /><input type="text" id="new-src-label" maxlength="32" placeholder="如 24点 / 抽奖" /></label>
+          <label>分数字段名 (score_field)<br /><input type="text" id="new-src-score-field" value="score" placeholder="score" /></label>
+          <label>昵称字段名 (name_field)<br /><input type="text" id="new-src-name-field" value="uname" placeholder="uname" /></label>
+        </div>
+        <div class="row">
+          <button type="submit" class="primary small">添加并启用数据源</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 3. 外观与规则配置 -->
+    <section class="card hidden" id="sec-config">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">外观、布局与排名规则配置</h2>
+          <div class="muted">修改将实时同步到所有在线展示页（OBS 浏览器源 / 桌面悬浮窗）；URL 查询参数仍具最高覆盖优先级</div>
+        </div>
+        <div class="row">
+          <button type="button" class="primary small" id="save-all-cfg-btn">保存全部修改</button>
+          <button type="button" class="danger small" id="reset-all-cfg-btn">全部恢复默认</button>
+        </div>
+      </div>
+      <div id="config-groups-wrap"></div>
+    </section>
+
+    <!-- 4. 推送协议与权限（ACL） -->
+    <section class="card hidden" id="sec-push">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">跨插件推送权限管理（ACL）与接入协议</h2>
+          <div class="muted">其他插件既可通过公开 Topic 免授权推分，也可申请/获批写入权限后直接更新本榜单数据存储</div>
+        </div>
+      </div>
+
+      <!-- 一键授权其他插件写入 scores -->
+      <div class="item-box" style="margin-bottom: 14px;">
+        <div class="item-top">
+          <strong>快捷授予其他插件直接写入权限</strong>
+          <span class="muted">跨插件写入存储（<code>persist:scores</code> / <code>memory:scores</code>）始终需明确授权</span>
+        </div>
+        <div class="row">
+          <select id="grant-plugin-select"></select>
+          <select id="grant-resource-select">
+            <option value="persist:scores">持久化榜单 (persist:scores)</option>
+            <option value="memory:scores">内存态榜单 (memory:scores)</option>
+            <option value="persist:*">全部持久化命名空间 (persist:*)</option>
+            <option value="memory:*">全部内存态命名空间 (memory:*)</option>
+          </select>
+          <button type="button" class="ok small" id="quick-grant-write-btn">立即授予写入权限</button>
+        </div>
+      </div>
+
+      <h3 class="muted" style="margin: 6px 0 8px;">待审批外部请求</h3>
+      <div class="acl-list" id="acl-pending-list"></div>
+
+      <h3 class="muted" style="margin: 14px 0 8px;">已授权 / 已处理入站规则</h3>
+      <div class="acl-list" id="acl-granted-list"></div>
+
+      <h3 class="muted" style="margin: 14px 0 8px;">本插件对外发起的读取申请</h3>
+      <div class="acl-list" id="acl-outgoing-list"></div>
+
+      <!-- 开发者接入协议说明 -->
+      <h3 class="muted" style="margin: 18px 0 8px;">其他插件推送数据协议示例（<code>/sdk/dambo.js</code>）</h3>
+      <div class="kv-list" id="protocol-examples"></div>
+    </section>
+
+    <!-- 5. 存储浏览与对外广播 Topic -->
+    <section class="card hidden" id="sec-data">
+      <div class="card-header">
+        <div>
+          <h2 class="card-title">存储检查器与对外广播 Topic</h2>
+          <div class="muted">查看或清理当前插件的 <code>persist</code> / <code>memory</code> 底层键值，以及对外广播的 <code>leaderboard</code> Topic</div>
+        </div>
+        <div class="tabs">
+          <button type="button" class="active" data-store-tab="persist">持久化 (persist)</button>
+          <button type="button" data-store-tab="memory">内存态 (memory)</button>
+        </div>
+      </div>
+
+      <h3 class="muted" style="margin: 4px 0 8px;">对外发布订阅源（Topics）</h3>
+      <div class="topic-list" id="topic-list" style="margin-bottom: 16px;"></div>
+
+      <div class="row" style="margin-bottom: 12px;">
+        <label>命名空间：
+          <select id="ns-select"></select>
+        </label>
+        <input type="text" id="ns-custom-input" placeholder="或输入新命名空间" style="width: 170px;" />
+        <input type="text" id="prefix-filter-input" placeholder="前缀过滤 (prefix)" style="width: 160px;" />
+        <button type="button" class="small" id="refresh-data-btn">加载</button>
+        <button type="button" class="danger small" id="clear-ns-btn">清空当前命名空间</button>
+      </div>
+
+      <div class="kv-list" id="kv-list"></div>
+    </section>
+  </main>
+
+  <!-- 远程管理员解锁弹窗 -->
+  <div class="modal-backdrop" id="auth-modal">
+    <form class="modal" id="auth-form">
+      <h2 class="card-title">需要远程管理口令</h2>
+      <div class="muted">当前主机开启了 <code>[server].admin_token</code>，请输入管理员口令以解锁管理操作。</div>
+      <input type="password" id="auth-token-input" placeholder="输入 admin_token" autocomplete="current-password" required />
+      <div class="muted hidden" id="auth-error-text" style="color: #fca5a5;"></div>
+      <div class="row" style="justify-content: flex-end;">
+        <button type="submit" class="primary">验证并解锁</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/sdk/dambo.js"></script>
+  <script src="./manage.js"></script>
+</body>
+</html>

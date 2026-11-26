@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
+  <base href="/scoreboard/" />
+  <title>多插件通用积分榜</title>
+  <link rel="stylesheet" href="./plugin.css" />
+</head>
+<body>
+  <main id="app-shell" class="app-shell">
+    <section id="board" class="board theme-glass-dark layout-list" aria-label="多插件实时积分榜">
+      <header id="board-header" class="board-header">
+        <div class="header-main">
+          <div class="title-row">
+            <h1 id="board-title" class="board-title">实时积分榜</h1>
+            <span id="page-pill" class="page-pill hidden">1/1</span>
+          </div>
+          <p id="board-subtitle" class="board-subtitle">多插件联动排名</p>
+        </div>
+        <div class="header-meta">
+          <span id="source-pill" class="source-pill" title="已接入活跃数据源">0 源</span>
+        </div>
+      </header>
+
+      <div id="podium-stage" class="podium-stage hidden" aria-label="前三名领奖台"></div>
+
+      <ol id="rank-list" class="rank-list" aria-live="polite"></ol>
+
+      <div id="empty-state" class="empty-state hidden">
+        <div class="empty-icon" aria-hidden="true">🏆</div>
+        <div id="empty-text" class="empty-text">等待积分推送…</div>
+        <div class="empty-sub">支持跨插件 Topic 广播、KV 存储监听与手动调分</div>
+      </div>
+
+      <footer id="board-footer" class="board-footer">
+        <span id="footer-stats" class="footer-stats">共 0 位上榜</span>
+        <span id="footer-store" class="footer-store">持久化</span>
+      </footer>
+    </section>
+  </main>
+
+  <script src="/sdk/dambo.js"></script>
+  <script src="./plugin.js"></script>
+</body>
+</html>

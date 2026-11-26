@@ -622,7 +622,7 @@ fn test_builtin_plugin_manifests_and_defaults_are_valid() {
     let html_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html");
     let plugins = crate::plugin::scan_plugins(&html_dir);
     let names: BTreeSet<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
-    for required in ["default", "list", "sc-ticker", "game24"] {
+    for required in ["default", "list", "sc-ticker", "game24", "scoreboard"] {
         assert!(
             names.contains(required),
             "Expected built-in plugin '{}' in {:?}, got {:?}",
@@ -635,7 +635,7 @@ fn test_builtin_plugin_manifests_and_defaults_are_valid() {
     for p in &plugins {
         assert!(matches!(
             p.name.as_str(),
-            "default" | "list" | "sc-ticker" | "game24"
+            "default" | "list" | "sc-ticker" | "game24" | "scoreboard"
         ));
         assert!(
             !p.plugin_id.is_empty(),
@@ -667,6 +667,82 @@ fn test_builtin_plugin_manifests_and_defaults_are_valid() {
             assert!(is_valid_key(k), "Invalid key '{}' in '{}'", k, p.name);
             assert_ne!(parsed.value, serde_json::Value::Null);
         }
+    }
+}
+
+#[test]
+fn test_scoreboard_plugin_assets_and_security_contract() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html/scoreboard");
+    for file in [
+        "plugin.json",
+        "plugin.html",
+        "plugin.css",
+        "plugin.js",
+        "manage.html",
+        "manage.css",
+        "manage.js",
+    ] {
+        assert!(
+            dir.join(file).is_file(),
+            "Missing scoreboard asset file '{}'",
+            file
+        );
+    }
+
+    let html_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html");
+    let plugins = crate::plugin::scan_plugins(&html_dir);
+    let sb = plugins
+        .iter()
+        .find(|p| p.name == "scoreboard")
+        .expect("scoreboard plugin should be discovered by scan_plugins");
+    assert_eq!(sb.plugin_id, "scoreboard");
+    assert_eq!(sb.namedomain, "scoreboard@1");
+    assert!(sb.has_custom_manage);
+    assert!(sb.defaults.contains_key("theme"));
+    assert!(sb.defaults.contains_key("layout"));
+    assert!(sb.defaults.contains_key("sources"));
+    assert!(sb.defaults.contains_key("storage_mode"));
+
+    let plugin_html = fs::read_to_string(dir.join("plugin.html")).unwrap();
+    let plugin_js = fs::read_to_string(dir.join("plugin.js")).unwrap();
+    let manage_html = fs::read_to_string(dir.join("manage.html")).unwrap();
+    let manage_js = fs::read_to_string(dir.join("manage.js")).unwrap();
+
+    assert!(plugin_html.contains("no-referrer"));
+    assert!(plugin_html.contains("<base href=\"/scoreboard/\""));
+    assert!(plugin_html.contains("<script src=\"/sdk/dambo.js\"></script>"));
+    assert!(plugin_html.contains("./plugin.js"));
+
+    assert!(!manage_html.contains("no-referrer"));
+    assert!(!manage_html.contains("<a "));
+    assert!(manage_html.contains("<base href=\"/scoreboard/\""));
+    assert!(manage_html.contains("<script src=\"/sdk/dambo.js\"></script>"));
+    assert!(manage_html.contains("./manage.js"));
+
+    assert!(manage_js.contains("Dambo.plugin.unlockManage"));
+    assert!(manage_js.contains("Dambo.acl.set"));
+
+    for (name, content) in [
+        ("plugin.html", &plugin_html),
+        ("plugin.js", &plugin_js),
+        ("manage.html", &manage_html),
+        ("manage.js", &manage_js),
+    ] {
+        assert!(
+            !content.contains("innerHTML"),
+            "{} must never use innerHTML",
+            name
+        );
+        assert!(
+            !content.contains("fetch("),
+            "{} must use Dambo SDK rather than raw fetch()",
+            name
+        );
+        assert!(
+            !content.contains("localhost") && !content.contains("127.0.0.1"),
+            "{} must not hardcode hostnames",
+            name
+        );
     }
 }
 

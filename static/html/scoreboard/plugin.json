@@ -1,0 +1,436 @@
+{
+  "plugin_id": "scoreboard",
+  "version": "1.0.0",
+  "name": "多插件通用积分榜",
+  "description": "接收其他插件通过 Topic 或数据存储推送的积分并实时排名，支持多数据源加权合并、多主题多布局、持久化与自定义管理面板。",
+  "obs": {
+    "width": 420,
+    "height": 640
+  },
+  "defaults": {
+    "title": {
+      "type": "string",
+      "value": "实时积分榜",
+      "meta": {
+        "max_length": 48,
+        "label": "榜单主标题"
+      }
+    },
+    "subtitle": {
+      "type": "string",
+      "value": "多插件联动排名",
+      "meta": {
+        "max_length": 64,
+        "label": "榜单副标题"
+      }
+    },
+    "empty_text": {
+      "type": "string",
+      "value": "等待积分推送…",
+      "meta": {
+        "max_length": 64,
+        "label": "空榜提示文案"
+      }
+    },
+    "score_prefix": {
+      "type": "string",
+      "value": "",
+      "meta": {
+        "max_length": 12,
+        "label": "分值前缀",
+        "description": "例如积分符号或货币前缀，可留空"
+      }
+    },
+    "score_unit": {
+      "type": "string",
+      "value": "分",
+      "meta": {
+        "max_length": 16,
+        "label": "分值单位"
+      }
+    },
+    "score_decimals": {
+      "type": "number",
+      "value": 0,
+      "meta": {
+        "min": 0,
+        "max": 4,
+        "step": 1,
+        "format": "integer",
+        "label": "小数位数"
+      }
+    },
+    "theme": {
+      "type": "enum",
+      "value": "glass-dark",
+      "meta": {
+        "label": "视觉主题",
+        "options": [
+          { "value": "glass-dark", "label": "深色毛玻璃" },
+          { "value": "cyber-neon", "label": "赛博霓虹" },
+          { "value": "warm-gold", "label": "黑金荣耀" },
+          { "value": "minimal-light", "label": "极简浅色" },
+          { "value": "transparent-hud", "label": "纯净透明悬浮" }
+        ]
+      }
+    },
+    "layout": {
+      "type": "enum",
+      "value": "list",
+      "meta": {
+        "label": "布局模式",
+        "options": [
+          { "value": "list", "label": "经典列表" },
+          { "value": "podium", "label": "领奖台 + 列表" },
+          { "value": "compact", "label": "紧凑列表" },
+          { "value": "ticker", "label": "横向滚动条" }
+        ]
+      }
+    },
+    "accent_color": {
+      "type": "string",
+      "value": "#38bdf8",
+      "meta": {
+        "format": "color",
+        "label": "强调主题色"
+      }
+    },
+    "gold_color": {
+      "type": "string",
+      "value": "#f59e0b",
+      "meta": {
+        "format": "color",
+        "label": "榜首金色"
+      }
+    },
+    "text_color": {
+      "type": "string",
+      "value": "#f8fafc",
+      "meta": {
+        "format": "color",
+        "label": "主文字颜色"
+      }
+    },
+    "bg_opacity": {
+      "type": "number",
+      "value": 0.86,
+      "meta": {
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "format": "slider",
+        "label": "背景不透明度"
+      }
+    },
+    "font_scale": {
+      "type": "number",
+      "value": 1,
+      "meta": {
+        "min": 0.7,
+        "max": 1.6,
+        "step": 0.05,
+        "format": "slider",
+        "label": "整体字体缩放"
+      }
+    },
+    "border_radius": {
+      "type": "number",
+      "value": 16,
+      "meta": {
+        "min": 0,
+        "max": 28,
+        "step": 2,
+        "format": "integer",
+        "label": "卡片圆角 (px)"
+      }
+    },
+    "row_gap": {
+      "type": "number",
+      "value": 8,
+      "meta": {
+        "min": 2,
+        "max": 20,
+        "step": 1,
+        "format": "integer",
+        "label": "行间距 (px)"
+      }
+    },
+    "max_width": {
+      "type": "number",
+      "value": 0,
+      "meta": {
+        "min": 0,
+        "max": 1920,
+        "step": 20,
+        "format": "integer",
+        "label": "最大宽度 (px)",
+        "description": "0 表示自适应容器宽度"
+      }
+    },
+    "show_header": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示顶部标题栏"
+      }
+    },
+    "show_footer": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示底部统计栏"
+      }
+    },
+    "show_medals": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "前三名显示奖牌"
+      }
+    },
+    "show_avatar": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示玩家头像"
+      }
+    },
+    "show_progress_bar": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示相对榜首进度条"
+      }
+    },
+    "show_delta": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示实时加减分浮标"
+      }
+    },
+    "show_source_tag": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "显示来源标签"
+      }
+    },
+    "show_empty_state": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "无数据时显示占位面板",
+        "description": "关闭后无任何玩家得分时自动透明隐藏"
+      }
+    },
+    "delta_ttl_ms": {
+      "type": "number",
+      "value": 2800,
+      "meta": {
+        "min": 800,
+        "max": 10000,
+        "step": 200,
+        "format": "integer",
+        "label": "涨跌提示停留时长 (ms)"
+      }
+    },
+    "top_n": {
+      "type": "number",
+      "value": 8,
+      "meta": {
+        "min": 1,
+        "max": 50,
+        "step": 1,
+        "format": "integer",
+        "label": "单页显示人数上限"
+      }
+    },
+    "sort_order": {
+      "type": "enum",
+      "value": "desc",
+      "meta": {
+        "label": "排序方向",
+        "options": [
+          { "value": "desc", "label": "高分在前" },
+          { "value": "asc", "label": "低分在前" }
+        ]
+      }
+    },
+    "tie_breaker": {
+      "type": "enum",
+      "value": "recent",
+      "meta": {
+        "label": "同分决胜规则",
+        "options": [
+          { "value": "recent", "label": "最近更新优先" },
+          { "value": "earliest", "label": "先达到优先" },
+          { "value": "name", "label": "按昵称排序" }
+        ]
+      }
+    },
+    "rank_mode": {
+      "type": "enum",
+      "value": "sequential",
+      "meta": {
+        "label": "并列名次显示方式",
+        "options": [
+          { "value": "sequential", "label": "顺序名次 (1,2,3)" },
+          { "value": "competition", "label": "并列跳号 (1,2,2,4)" },
+          { "value": "dense", "label": "并列紧凑 (1,2,2,3)" }
+        ]
+      }
+    },
+    "min_score": {
+      "type": "number",
+      "value": 0,
+      "meta": {
+        "min": -1000000,
+        "max": 1000000,
+        "step": 1,
+        "label": "最低上榜分数阈值"
+      }
+    },
+    "hide_zero_scores": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "隐藏 0 分及以下条目"
+      }
+    },
+    "auto_paginate": {
+      "type": "bool",
+      "value": false,
+      "meta": {
+        "label": "自动轮播翻页",
+        "description": "当总人数超过单页上限时定时滚动分页"
+      }
+    },
+    "page_interval_sec": {
+      "type": "number",
+      "value": 8,
+      "meta": {
+        "min": 3,
+        "max": 60,
+        "step": 1,
+        "format": "integer",
+        "label": "自动翻页间隔 (秒)"
+      }
+    },
+    "storage_mode": {
+      "type": "enum",
+      "value": "persist",
+      "meta": {
+        "label": "积分存储模式",
+        "options": [
+          { "value": "persist", "label": "持久化 (重启保留)" },
+          { "value": "memory", "label": "内存态 (重启清零)" }
+        ]
+      }
+    },
+    "auto_discover_topics": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "自动发现其他插件的公开积分 Topic",
+        "description": "自动订阅其他已安装插件公布的公开同名 Topic（免手动 ACL）"
+      }
+    },
+    "auto_topic_names": {
+      "type": "list",
+      "value": ["scoreboard", "score", "scores"],
+      "meta": {
+        "max_items": 16,
+        "item": {
+          "type": "string",
+          "meta": { "max_length": 64 }
+        },
+        "label": "自动发现 Topic 名称列表",
+        "description": "自动识别并订阅以上名称的公开 Topic"
+      }
+    },
+    "sources": {
+      "type": "list",
+      "value": [
+        {
+          "id": "game24_round",
+          "enabled": true,
+          "plugin": "game24",
+          "mode": "topic",
+          "target": "round",
+          "weight": 10,
+          "label": "24点",
+          "score_field": "score",
+          "name_field": "uname"
+        }
+      ],
+      "meta": {
+        "max_items": 32,
+        "label": "显式数据源规则",
+        "description": "配置要监听的跨插件 Topic 或 KV 命名空间及权重倍率",
+        "item": {
+          "type": "struct",
+          "meta": {
+            "fields": {
+              "id": {
+                "type": "string",
+                "meta": { "max_length": 48 }
+              },
+              "enabled": {
+                "type": "bool"
+              },
+              "plugin": {
+                "type": "string",
+                "meta": { "max_length": 64 }
+              },
+              "mode": {
+                "type": "enum",
+                "meta": {
+                  "options": [
+                    { "value": "topic", "label": "Topic 实时订阅" },
+                    { "value": "memory_kv", "label": "内存存储 (memory)" },
+                    { "value": "persist_kv", "label": "持久化存储 (persist)" }
+                  ]
+                }
+              },
+              "target": {
+                "type": "string",
+                "meta": { "max_length": 128 }
+              },
+              "weight": {
+                "type": "number",
+                "meta": { "min": -1000, "max": 10000 }
+              },
+              "label": {
+                "type": "string",
+                "optional": true,
+                "nullable": true,
+                "meta": { "max_length": 32 }
+              },
+              "score_field": {
+                "type": "string",
+                "optional": true,
+                "nullable": true,
+                "meta": { "max_length": 64 }
+              },
+              "name_field": {
+                "type": "string",
+                "optional": true,
+                "nullable": true,
+                "meta": { "max_length": 64 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "publish_leaderboard_topic": {
+      "type": "bool",
+      "value": false,
+      "meta": {
+        "label": "向外广播排行榜 Topic",
+        "description": "开启后向公开 Topic `leaderboard` 广播当前排名快照供其他插件消费"
+      }
+    }
+  }
+}
