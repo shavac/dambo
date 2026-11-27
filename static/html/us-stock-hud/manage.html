@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <base href="/us-stock-hud/" />
+  <title>美股实时弹幕实盘 HUD · 控制面板</title>
+  <link rel="stylesheet" href="./manage.css" />
+</head>
+<body>
+  <main id="manage-root" class="manage-root">
+    <!-- 顶部信息卡片 -->
+    <section class="card" id="sec-header">
+      <div class="between">
+        <div class="row">
+          <h1 class="page-title" id="plugin-title">美股实时弹幕实盘 HUD</h1>
+          <div class="row" id="plugin-badges"></div>
+        </div>
+        <div class="row">
+          <button type="button" class="small" id="reload-all-btn">刷新同步</button>
+        </div>
+      </div>
+
+      <p class="muted desc-line" id="plugin-desc">16:9 金融终端风实时美股弹幕模拟交易游戏：粉丝牌准入、大航海焦点抢占、Finnhub REST+WS 行情、多空开平仓与爆仓强平。</p>
+
+      <div class="obs-bar">
+        <div class="obs-url-box">
+          <span class="muted">OBS 浏览器源 (1920×1080)</span>
+          <code class="obs-code" id="obs-url-code">-</code>
+        </div>
+        <div class="row">
+          <button type="button" class="small primary" id="copy-obs-btn">复制 OBS 链接</button>
+          <button type="button" class="small" id="copy-obs-transparent-btn">复制纯透明 OBS 链接 (?bg_mode=transparent)</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 四大功能页签 -->
+    <nav class="tabs" role="tablist" aria-label="控制台功能分页">
+      <button type="button" class="tab-btn active" role="tab" data-tab="config">
+        <span>行情源与全参数配置</span>
+        <span class="badge" id="tab-mode-badge">演练模式</span>
+      </button>
+      <button type="button" class="tab-btn" role="tab" data-tab="sim">
+        <span>弹幕演练与焦点遥控</span>
+      </button>
+      <button type="button" class="tab-btn" role="tab" data-tab="accounts">
+        <span>玩家账本与大航海</span>
+        <span class="badge" id="tab-accounts-count">0</span>
+      </button>
+      <button type="button" class="tab-btn" role="tab" data-tab="telemetry">
+        <span>成交流水与行情遥测</span>
+        <span class="badge" id="tab-quotes-count">0</span>
+      </button>
+    </nav>
+
+    <!-- Tab 1: Finnhub 行情源与全部配置参数 -->
+    <section class="card" id="panel-config">
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">Finnhub 实时行情接口</h2>
+          <div class="muted">支持 REST Quote/Metrics + WebSocket 实时成交推流；auto 模式下未填 Key 自动启用本地演练行情</div>
+        </div>
+        <span class="badge warn" id="runtime-hud-badge">等待连接展示端</span>
+      </div>
+
+      <div class="subbox">
+        <div class="between" style="margin-bottom: 8px;">
+          <strong>Finnhub API Key</strong>
+          <span class="muted">修改后立即热同步到 16:9 展示端</span>
+        </div>
+        <div class="row">
+          <input type="password" id="cfg-finnhub-key" placeholder="粘贴 Finnhub 免费 API Key" autocomplete="off" style="flex: 1 1 260px;" />
+          <button type="button" class="small" id="toggle-key-btn">显示</button>
+          <button type="button" class="small primary" id="save-key-btn">保存 Key</button>
+          <button type="button" class="small ok" id="test-key-btn">测试连通性 (AAPL)</button>
+        </div>
+        <div class="test-status muted" id="key-test-result">尚未执行连通性测试</div>
+      </div>
+
+      <div class="card-head" style="margin-top: 18px;">
+        <div>
+          <h2 class="card-title">全量游戏与视觉参数</h2>
+          <div class="muted">所有修改即时持久化到 Dambo 数据库并通过 SSE 热更新到 OBS/桌面展示端</div>
+        </div>
+        <div class="row">
+          <button type="button" class="small primary" id="save-all-cfg-btn">保存全部参数</button>
+          <button type="button" class="small danger" id="reset-all-cfg-btn">恢复默认参数</button>
+        </div>
+      </div>
+
+      <div class="cfg-sections">
+        <fieldset class="cfg-group">
+          <legend>一、行情源与美股开闭市</legend>
+          <div class="field-grid">
+            <label>行情模式 (market_data_mode)
+              <select id="cfg-market-mode">
+                <option value="auto">自动切换 (有 Key 走 Finnhub / 无 Key 演练)</option>
+                <option value="finnhub">仅 Finnhub 实盘行情</option>
+                <option value="demo">仅本地模拟演练行情</option>
+              </select>
+            </label>
+            <label>美股时段显示 (market_session_override)
+              <select id="cfg-session-override">
+                <option value="auto">自动实时美东时间 (ET)</option>
+                <option value="regular">已开市·盘中交易 Regular Hours</option>
+                <option value="pre">盘前交易 Pre-Market</option>
+                <option value="after">盘后交易 After-Hours</option>
+                <option value="closed">已闭市 Market Closed</option>
+              </select>
+            </label>
+            <label>REST 轮询间隔秒 (poll_interval_sec)
+              <input type="number" id="cfg-poll-sec" min="3" max="120" step="1" />
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-enable-ws" />
+              <span>启用 Finnhub WebSocket 逐笔推流 (enable_finnhub_ws)</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-trade-closed" />
+              <span>闭市/盘前盘后允许模拟下单 (allow_trading_when_closed)</span>
+            </label>
+            <label class="span-2">顶部大盘与巨头跑马灯 (marquee_major_tickers)
+              <input type="text" id="cfg-marquee-major" maxlength="200" />
+            </label>
+            <label class="span-2">2×4 自选报价矩阵标的 (watchlist_tickers)
+              <input type="text" id="cfg-watchlist" maxlength="200" />
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset class="cfg-group">
+          <legend>二、粉丝牌准入与大航海焦点抢占</legend>
+          <div class="field-grid">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-require-medal" />
+              <span>开启粉丝牌(灯牌)硬性准入 (require_fan_medal)</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-guard-bypass" />
+              <span>大航海成员免灯牌准入 (guard_bypass_medal)</span>
+            </label>
+            <label>限定本房粉丝牌名称 (room_medal_name)
+              <input type="text" id="cfg-room-medal" maxlength="40" placeholder="留空接受任意有效灯牌" />
+            </label>
+            <label>最低粉丝牌等级 (min_medal_level)
+              <input type="number" id="cfg-min-medal-lv" min="1" max="40" step="1" />
+            </label>
+            <label>自选自动轮换间隔秒 (focus_auto_rotate_sec)
+              <input type="number" id="cfg-rot-sec" min="3" max="120" step="1" />
+            </label>
+            <label>普通灯牌锁定时长秒 (focus_lock_lv0_sec)
+              <input type="number" id="cfg-lock-lv0" min="3" max="60" step="1" />
+            </label>
+            <label>舰长 Lv1 锁定时长秒 (focus_lock_lv1_sec)
+              <input type="number" id="cfg-lock-lv1" min="4" max="60" step="1" />
+            </label>
+            <label>提督 Lv2 锁定时长秒 (focus_lock_lv2_sec)
+              <input type="number" id="cfg-lock-lv2" min="5" max="120" step="1" />
+            </label>
+            <label>总督 Lv3 锁定时长秒 (focus_lock_lv3_sec)
+              <input type="number" id="cfg-lock-lv3" min="5" max="120" step="1" />
+            </label>
+            <label>持仓悬浮卡停留秒 (pos_card_duration_sec)
+              <input type="number" id="cfg-pos-dur" min="3" max="20" step="1" />
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset class="cfg-group">
+          <legend>三、模拟撮合引擎与做空风控</legend>
+          <div class="field-grid">
+            <label>初始模拟资金 USD (initial_balance)
+              <input type="number" id="cfg-init-bal" min="1000" max="100000000" step="1000" />
+            </label>
+            <label>最小下单金额 USD (min_trade_usd)
+              <input type="number" id="cfg-min-trade" min="1" max="100000" step="50" />
+            </label>
+            <label>做空杠杆倍数 (short_leverage)
+              <input type="number" id="cfg-short-lev" min="1" max="10" step="0.5" />
+            </label>
+            <label>爆仓维持保证金率 (liquidation_maint_ratio)
+              <input type="number" id="cfg-liq-ratio" min="0.05" max="0.8" step="0.05" />
+            </label>
+            <label>手续费率 bps (commission_bps)
+              <input type="number" id="cfg-comm-bps" min="0" max="100" step="1" />
+            </label>
+            <label>单玩家冷却毫秒 (trade_cooldown_ms)
+              <input type="number" id="cfg-cooldown" min="0" max="15000" step="100" />
+            </label>
+            <label>Whale Alert 门槛 USD (whale_threshold_usd)
+              <input type="number" id="cfg-whale-usd" min="1000" max="10000000" step="1000" />
+            </label>
+            <label>战报横幅停留秒 (banner_duration_sec)
+              <input type="number" id="cfg-banner-sec" min="2" max="15" step="1" />
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-frac-shares" />
+              <span>允许碎股成交 (allow_fractional_shares)</span>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset class="cfg-group">
+          <legend>四、终端视觉与 OBS 透明叠加</legend>
+          <div class="field-grid">
+            <label>终端标题标识 (hud_title)
+              <input type="text" id="cfg-hud-title" maxlength="48" />
+            </label>
+            <label>背景渲染风格 (bg_mode)
+              <select id="cfg-bg-mode">
+                <option value="solid">深炭灰/午夜蓝金融终端</option>
+                <option value="glass">半透明毛玻璃叠加</option>
+                <option value="transparent">纯透明背景 (OBS 叠加)</option>
+              </select>
+            </label>
+            <label>背景不透明度 (bg_opacity)
+              <input type="number" id="cfg-bg-opacity" min="0" max="1" step="0.05" />
+            </label>
+            <label>上涨/做多颜色 (color_up)
+              <input type="color" id="cfg-color-up" />
+            </label>
+            <label>下跌/做空颜色 (color_down)
+              <input type="color" id="cfg-color-down" />
+            </label>
+            <label>榜首/巨鲸颜色 (color_gold)
+              <input type="color" id="cfg-color-gold" />
+            </label>
+            <label>排行榜人数 (leaderboard_top_n)
+              <input type="number" id="cfg-lb-topn" min="5" max="8" step="1" />
+            </label>
+            <label>排行榜排序 (leaderboard_sort)
+              <select id="cfg-lb-sort">
+                <option value="equity">按实时总资产排序</option>
+                <option value="return_pct">按总收益率排序</option>
+              </select>
+            </label>
+            <label>重仓标签轮播秒 (holding_rotate_sec)
+              <input type="number" id="cfg-hold-rot" min="1.5" max="15" step="0.5" />
+            </label>
+            <label>跑马灯滚动周期秒 (marquee_speed_sec)
+              <input type="number" id="cfg-mq-speed" min="12" max="90" step="2" />
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfg-safe-corner" />
+              <span>避开右上角 104×44px 控制区 (reserve_overlay_corner)</span>
+            </label>
+          </div>
+        </fieldset>
+      </div>
+    </section>
+
+    <!-- Tab 2: 弹幕演练与焦点遥控 -->
+    <section class="card hidden" id="panel-sim">
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">弹幕交易指令演练器</h2>
+          <div class="muted">直接向在线 HUD 展示端发送测试弹幕事件，验证粉丝牌拦截、大航海抢占、多空撮合、爆仓与查股卡片</div>
+        </div>
+      </div>
+
+      <form id="sim-danmaku-form" class="subbox">
+        <div class="field-grid">
+          <label>玩家 UID
+            <input type="number" id="sim-uid" value="10086" min="1" step="1" />
+          </label>
+          <label>玩家昵称
+            <input type="text" id="sim-uname" value="华尔街之狼" maxlength="32" required />
+          </label>
+          <label>粉丝牌名称 (留空测试无灯牌拦截)
+            <input type="text" id="sim-medal-name" value="小鲸鱼" maxlength="24" />
+          </label>
+          <label>粉丝牌等级
+            <input type="number" id="sim-medal-lv" value="18" min="0" max="40" step="1" />
+          </label>
+          <label>大航海身份 (B站 raw guard_level)
+            <select id="sim-guard-level">
+              <option value="0">普通灯牌观众 (Lv0)</option>
+              <option value="3">⚓ 舰长 (Lv1 优先级)</option>
+              <option value="2">⚔️ 提督 (Lv2 优先级)</option>
+              <option value="1">👑 总督 (Lv3 最高优先级)</option>
+            </select>
+          </label>
+          <label>弹幕指令内容
+            <input type="text" id="sim-content" value="买入 NVDA 30000" maxlength="80" required />
+          </label>
+        </div>
+        <div class="row" style="margin-top: 10px;">
+          <button type="submit" class="primary">发送测试弹幕</button>
+          <button type="button" class="small" data-preset="no-medal">无灯牌测试(应静默忽略)</button>
+          <button type="button" class="small" data-preset="lv0-quote">普通灯牌 查股 AAPL</button>
+          <button type="button" class="small" data-preset="lv2-preempt">提督抢占 查股 TSLA</button>
+          <button type="button" class="small" data-preset="lv3-whale">总督全仓 买入 NVDA all</button>
+          <button type="button" class="small" data-preset="short-tsla">做空 TSLA 25000</button>
+          <button type="button" class="small" data-preset="cover-tsla">平空 TSLA</button>
+          <button type="button" class="small" data-preset="pos-card">持仓(pos) 卡片测试</button>
+        </div>
+      </form>
+
+      <div class="subbox" style="margin-top: 14px;">
+        <div class="between" style="margin-bottom: 8px;">
+          <strong>主图焦点与行情异动演练</strong>
+          <span class="muted">可手动切换主图焦点或在演练模式下触发暴涨/暴跌测试强平爆仓</span>
+        </div>
+        <div class="row">
+          <input type="text" id="ctrl-symbol" value="TSLA" maxlength="10" style="width: 120px;" />
+          <button type="button" class="small primary" id="ctrl-pin-btn">立即切换主图焦点</button>
+          <button type="button" class="small danger" id="ctrl-pump-btn">演练暴涨 +48% (测试空仓爆仓)</button>
+          <button type="button" class="small ok" id="ctrl-dump-btn">演练暴跌 -25%</button>
+          <button type="button" class="small" id="ctrl-clear-feed-btn">清空流水展示</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab 3: 玩家账本与大航海名录 -->
+    <section class="card hidden" id="panel-accounts">
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">玩家账户与持仓账本</h2>
+          <div class="muted" id="accounts-summary-line">共 0 位已开户玩家</div>
+        </div>
+        <div class="row">
+          <button type="button" class="small danger" id="reset-season-btn">重置新赛季 (清空全员账本)</button>
+        </div>
+      </div>
+
+      <form id="adjust-cash-form" class="subbox" style="margin-bottom: 14px;">
+        <div class="between" style="margin-bottom: 8px;">
+          <strong>手动调整玩家资金 / 设定大航海等级</strong>
+        </div>
+        <div class="field-grid">
+          <label>玩家 UID (选填)
+            <input type="number" id="adj-uid" min="0" step="1" placeholder="如 10086" />
+          </label>
+          <label>玩家昵称 *
+            <input type="text" id="adj-name" maxlength="48" placeholder="输入昵称" required />
+          </label>
+          <label>资金操作
+            <select id="adj-op">
+              <option value="add">追加可用资金 (+USD)</option>
+              <option value="set">设为目标可用资金 (=USD)</option>
+            </select>
+          </label>
+          <label>资金数额 (USD)
+            <input type="number" id="adj-val" step="100" value="50000" required />
+          </label>
+          <label>大航海优先级覆盖
+            <select id="adj-guard">
+              <option value="">不修改</option>
+              <option value="3">设为 总督 (Lv3)</option>
+              <option value="2">设为 提督 (Lv2)</option>
+              <option value="1">设为 舰长 (Lv1)</option>
+              <option value="0">清除覆盖 (普通 Lv0)</option>
+            </select>
+          </label>
+        </div>
+        <div class="row" style="margin-top: 8px;">
+          <button type="submit" class="small primary">应用修改</button>
+        </div>
+      </form>
+
+      <div id="accounts-list" class="list-stack"></div>
+    </section>
+
+    <!-- Tab 4: 成交流水与行情遥测 -->
+    <section class="card hidden" id="panel-telemetry">
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">HUD 实时遥测与焦点队列</h2>
+          <div class="muted" id="telemetry-line">等待展示端上报状态…</div>
+        </div>
+      </div>
+
+      <div class="subbox" style="margin-bottom: 14px;">
+        <strong>当前焦点与排队情况</strong>
+        <div id="focus-queue-box" class="muted" style="margin-top: 6px;">暂无锁定</div>
+      </div>
+
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">最近成交流水 (<code>trade_feed</code>)</h2>
+        </div>
+      </div>
+      <div id="manage-feed-list" class="list-stack" style="margin-bottom: 16px;"></div>
+
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">实时缓存报价 (<code>Dambo.memory/quotes</code>)</h2>
+        </div>
+      </div>
+      <div id="manage-quotes-grid" class="quotes-grid"></div>
+    </section>
+  </main>
+
+  <!-- 远程管理员解锁弹窗 -->
+  <div class="modal-backdrop" id="auth-modal">
+    <form class="modal" id="auth-form">
+      <h2 class="card-title">需要远程管理口令</h2>
+      <div class="muted">当前主机开启了 <code>[server].admin_token</code>，请输入管理员口令以解锁写入操作。</div>
+      <input type="password" id="auth-token-input" placeholder="输入 admin_token" autocomplete="current-password" required />
+      <div class="muted hidden" id="auth-error-text" style="color: #FCA5A5;"></div>
+      <div class="row" style="justify-content: flex-end;">
+        <button type="submit" class="primary">验证解锁</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/sdk/dambo.js"></script>
+  <script src="./engine.js"></script>
+  <script src="./manage.js"></script>
+</body>
+</html>

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
+  <base href="/us-stock-hud/" />
+  <title>美股实时弹幕实盘 HUD</title>
+  <link rel="stylesheet" href="./plugin.css" />
+</head>
+<body class="bg-solid">
+  <div id="hud-root" class="hud-root">
+    <!-- 1. 顶部通栏：开闭市状态 + 双层行情跑马灯 + 安全区 -->
+    <header id="topbar" class="topbar">
+      <div class="topbar-left">
+        <div class="brand-cluster">
+          <span class="brand-badge">NYSE // NASDAQ</span>
+          <h1 id="hud-title" class="hud-title">US.TERM // 美股弹幕实盘</h1>
+        </div>
+        <div class="status-cluster">
+          <div id="market-session-pill" class="session-pill is-closed">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <span id="market-session-text" class="session-text">已闭市 Market Closed</span>
+            <span id="et-clock" class="et-clock tabular">00:00:00 ET</span>
+          </div>
+          <span id="data-mode-pill" class="meta-pill">演练行情</span>
+          <span id="ws-link-pill" class="meta-pill">弹幕连接中</span>
+        </div>
+      </div>
+
+      <div class="topbar-marquee" aria-label="美股实时行情双层跑马灯">
+        <div class="marquee-row">
+          <span class="marquee-tag tag-major">大盘·巨头</span>
+          <div class="marquee-viewport">
+            <div id="marquee-major-track" class="marquee-track"></div>
+          </div>
+        </div>
+        <div class="marquee-row">
+          <span class="marquee-tag tag-hot">持仓热榜12</span>
+          <div class="marquee-viewport">
+            <div id="marquee-hot-track" class="marquee-track marquee-track-slow"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="topbar-safe-corner" class="topbar-safe-corner" aria-hidden="true"></div>
+    </header>
+
+    <!-- 2. 主体双栏竞技舞台：左 62% 行情主战区 + 右 38% 社交竞技区 -->
+    <main class="arena-grid">
+      <!-- 左侧主战区 -->
+      <section class="left-arena" aria-label="行情主战区">
+        <!-- 2x4 自选报价矩阵 -->
+        <div id="watchlist-grid" class="watchlist-grid" aria-label="自选报价矩阵"></div>
+
+        <!-- 焦点股分时图 + HUD 浮层 + 超级查股卡 + 战报横幅 -->
+        <section class="chart-panel" aria-label="焦点股分时走势">
+          <div class="focus-header">
+            <div class="focus-id-wrap">
+              <div class="focus-sym-row">
+                <span id="focus-symbol" class="focus-symbol">NVDA</span>
+                <span id="focus-name" class="focus-name">NVIDIA Corp.</span>
+              </div>
+              <div id="focus-lock-pill" class="focus-lock-pill">自动轮换 10s</div>
+            </div>
+            <div class="focus-price-wrap">
+              <span id="focus-price" class="focus-price tabular">$0.00</span>
+              <span id="focus-change" class="focus-change tabular flat">+0.00 (+0.00%)</span>
+            </div>
+          </div>
+
+          <div class="chart-stage">
+            <!-- 大单/爆仓战报横幅 -->
+            <div id="alert-banner-slot" class="alert-banner-slot hidden" role="status" aria-live="polite"></div>
+
+            <!-- 盘口 HUD 半透明浮层 -->
+            <div id="chart-hud-overlay" class="chart-hud-overlay">
+              <div class="hud-stat"><span class="hud-k">今开</span><span id="hud-open" class="hud-v tabular">--</span></div>
+              <div class="hud-stat"><span class="hud-k">昨收</span><span id="hud-prev" class="hud-v tabular">--</span></div>
+              <div class="hud-stat"><span class="hud-k">最高</span><span id="hud-high" class="hud-v tabular">--</span></div>
+              <div class="hud-stat"><span class="hud-k">最低</span><span id="hud-low" class="hud-v tabular">--</span></div>
+              <div class="hud-stat"><span class="hud-k">成交量</span><span id="hud-vol" class="hud-v tabular">--</span></div>
+              <div id="hud-avg-cost-wrap" class="hud-stat is-gold hidden">
+                <span class="hud-k">全服均价</span>
+                <span id="hud-avg-cost" class="hud-v tabular">--</span>
+              </div>
+            </div>
+
+            <canvas id="focus-chart-canvas" class="focus-chart-canvas"></canvas>
+
+            <!-- 超级查股详情浮层（大航海优先级抢占） -->
+            <div id="super-quote-overlay" class="super-quote-overlay hidden" aria-live="polite">
+              <div class="sq-head">
+                <div class="sq-title-group">
+                  <span class="sq-kicker">SUPER QUOTE // 超级查股</span>
+                  <div class="sq-sym-line">
+                    <span id="sq-symbol" class="sq-symbol">NVDA</span>
+                    <span id="sq-name" class="sq-name">NVIDIA Corp.</span>
+                  </div>
+                </div>
+                <div class="sq-owner-group">
+                  <span id="sq-owner-badge" class="sq-owner-badge"></span>
+                  <span id="sq-countdown" class="sq-countdown tabular">12s</span>
+                </div>
+              </div>
+
+              <div class="sq-price-row">
+                <span id="sq-price" class="sq-price tabular">$0.00</span>
+                <span id="sq-change" class="sq-change tabular">+0.00 (+0.00%)</span>
+                <span id="sq-ext-pill" class="sq-ext-pill hidden">盘后 $0.00</span>
+              </div>
+
+              <div class="sq-ranges">
+                <div class="sq-range-block">
+                  <div class="sq-range-labels">
+                    <span>日内高低点</span>
+                    <span id="sq-day-range-text" class="tabular">-- ~ --</span>
+                  </div>
+                  <div class="sq-track">
+                    <div id="sq-day-fill" class="sq-fill"></div>
+                    <div id="sq-day-dot" class="sq-dot"></div>
+                  </div>
+                </div>
+                <div class="sq-range-block">
+                  <div class="sq-range-labels">
+                    <span>52 周区间</span>
+                    <span id="sq-w52-range-text" class="tabular">-- ~ --</span>
+                  </div>
+                  <div class="sq-track">
+                    <div id="sq-w52-fill" class="sq-fill is-gold"></div>
+                    <div id="sq-w52-dot" class="sq-dot is-gold"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="sq-room-split">
+                <div class="sq-split-head">
+                  <span>直播间多空持仓比例</span>
+                  <span id="sq-room-meta" class="tabular">多 50% / 空 50%</span>
+                </div>
+                <div class="sq-split-bar">
+                  <div id="sq-split-long" class="sq-split-long" style="width: 50%"></div>
+                  <div id="sq-split-short" class="sq-split-short" style="width: 50%"></div>
+                </div>
+              </div>
+
+              <div class="sq-progress-track">
+                <div id="sq-progress-bar" class="sq-progress-bar"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 多空资金博弈对抗条 -->
+        <section id="battle-bar" class="battle-panel" aria-label="多空资金博弈">
+          <div class="battle-side battle-long">
+            <span class="battle-label">看涨做多</span>
+            <span id="battle-long-val" class="battle-val tabular">$0 (50.0%)</span>
+          </div>
+          <div class="battle-track">
+            <div id="battle-long-fill" class="battle-fill-long" style="width: 50%"></div>
+            <div id="battle-short-fill" class="battle-fill-short" style="width: 50%"></div>
+            <div id="battle-divider" class="battle-divider" style="left: 50%"></div>
+          </div>
+          <div class="battle-side battle-short">
+            <span id="battle-short-val" class="battle-val tabular">(50.0%) $0</span>
+            <span class="battle-label">看跌做空</span>
+          </div>
+        </section>
+      </section>
+
+      <!-- 右侧社交竞技区 -->
+      <aside class="right-arena" aria-label="排行榜与成交流水">
+        <!-- 实时总资产/收益率排行榜 + 个人持仓悬浮卡 -->
+        <section class="leaderboard-panel" aria-label="资产排行榜">
+          <div class="panel-head">
+            <div class="panel-head-left">
+              <span class="panel-title">实时资产排行榜</span>
+              <span id="lb-sort-pill" class="panel-subpill">总资产</span>
+            </div>
+            <span id="lb-stats-text" class="panel-meta tabular">0 位交易员</span>
+          </div>
+
+          <!-- 个人持仓查询悬浮卡片（按大航海优先级排队，6秒收起） -->
+          <div id="pos-card-overlay" class="pos-card-overlay hidden" aria-live="polite"></div>
+
+          <ol id="leaderboard-list" class="leaderboard-list"></ol>
+        </section>
+
+        <!-- 实时弹幕撮合成交流水 Time & Sales -->
+        <section class="timesales-panel" aria-label="成交流水">
+          <div class="panel-head">
+            <div class="panel-head-left">
+              <span class="panel-title">成交流水 TIME &amp; SALES</span>
+              <span class="panel-subpill is-medal">仅灯牌受理</span>
+            </div>
+            <span id="ts-count-text" class="panel-meta tabular">0 笔成交</span>
+          </div>
+          <ul id="time-sales-list" class="time-sales-list" aria-live="polite"></ul>
+        </section>
+      </aside>
+    </main>
+
+    <!-- 3. 底部固定指令条 -->
+    <footer id="cmd-bar" class="cmd-bar" aria-label="弹幕交易指令栏">
+      <div id="medal-gate-notice" class="medal-gate-notice">需佩戴粉丝牌参与</div>
+      <div class="cmd-chips-wrap">
+        <span class="cmd-chip"><strong class="cmd-verb is-up">买入(buy)</strong> 代码 金额/all</span>
+        <span class="cmd-chip"><strong class="cmd-verb is-down">卖出(sell)</strong> 代码 数量/all</span>
+        <span class="cmd-chip"><strong class="cmd-verb is-down">做空(short)</strong> 代码 金额</span>
+        <span class="cmd-chip"><strong class="cmd-verb is-up">平空(cover)</strong> 代码</span>
+        <span class="cmd-chip"><strong class="cmd-verb is-gold">查股(quote)</strong> 代码</span>
+        <span class="cmd-chip"><strong class="cmd-verb is-cyan">持仓(pos)</strong></span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/sdk/dambo.js"></script>
+  <script src="./engine.js"></script>
+  <script src="./market.js"></script>
+  <script src="./chart.js"></script>
+  <script src="./plugin.js"></script>
+</body>
+</html>

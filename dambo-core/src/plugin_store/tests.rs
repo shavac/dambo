@@ -629,6 +629,7 @@ fn test_builtin_plugin_manifests_and_defaults_are_valid() {
         "game24",
         "scoreboard",
         "stock-real",
+        "us-stock-hud",
     ] {
         assert!(
             names.contains(required),
@@ -642,7 +643,13 @@ fn test_builtin_plugin_manifests_and_defaults_are_valid() {
     for p in &plugins {
         assert!(matches!(
             p.name.as_str(),
-            "default" | "list" | "sc-ticker" | "game24" | "scoreboard" | "stock-real"
+            "default"
+                | "list"
+                | "sc-ticker"
+                | "game24"
+                | "scoreboard"
+                | "stock-real"
+                | "us-stock-hud"
         ));
         assert!(
             !p.plugin_id.is_empty(),
@@ -825,6 +832,128 @@ fn test_stock_real_plugin_assets_and_security_contract() {
         assert!(
             !content.contains("innerHTML"),
             "{} must never use innerHTML",
+            name
+        );
+        assert!(
+            !content.contains("fetch('/api/") && !content.contains("fetch(\"/api/"),
+            "{} must use Dambo SDK for platform APIs",
+            name
+        );
+        assert!(
+            !content.contains("localhost") && !content.contains("127.0.0.1"),
+            "{} must not hardcode hostnames",
+            name
+        );
+    }
+}
+
+#[test]
+fn test_us_stock_hud_plugin_assets_and_security_contract() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html/us-stock-hud");
+    for file in [
+        "plugin.json",
+        "plugin.html",
+        "plugin.css",
+        "plugin.js",
+        "engine.js",
+        "market.js",
+        "chart.js",
+        "manage.html",
+        "manage.css",
+        "manage.js",
+    ] {
+        assert!(
+            dir.join(file).is_file(),
+            "Missing us-stock-hud asset file '{}'",
+            file
+        );
+    }
+
+    let html_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../static/html");
+    let plugins = crate::plugin::scan_plugins(&html_dir);
+    let hud = plugins
+        .iter()
+        .find(|p| p.name == "us-stock-hud")
+        .expect("us-stock-hud plugin should be discovered by scan_plugins");
+    assert_eq!(hud.plugin_id, "us-stock-hud");
+    assert_eq!(hud.version, "1");
+    assert_eq!(hud.namedomain, "us-stock-hud@1");
+    assert!(hud.has_custom_manage);
+    assert_eq!(hud.obs_width, Some(1920));
+    assert_eq!(hud.obs_height, Some(1080));
+    assert_eq!(
+        hud.parsed_defaults
+            .get("require_fan_medal")
+            .map(|e| &e.value),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        hud.parsed_defaults.get("initial_balance").map(|e| &e.value),
+        Some(&json!(100000))
+    );
+    assert_eq!(
+        hud.parsed_defaults.get("short_leverage").map(|e| &e.value),
+        Some(&json!(2))
+    );
+    assert_eq!(
+        hud.parsed_defaults
+            .get("focus_lock_lv2_sec")
+            .map(|e| &e.value),
+        Some(&json!(20))
+    );
+    assert_eq!(
+        hud.parsed_defaults
+            .get("pos_card_duration_sec")
+            .map(|e| &e.value),
+        Some(&json!(6))
+    );
+
+    let plugin_html = fs::read_to_string(dir.join("plugin.html")).unwrap();
+    let plugin_js = fs::read_to_string(dir.join("plugin.js")).unwrap();
+    let engine_js = fs::read_to_string(dir.join("engine.js")).unwrap();
+    let market_js = fs::read_to_string(dir.join("market.js")).unwrap();
+    let chart_js = fs::read_to_string(dir.join("chart.js")).unwrap();
+    let manage_html = fs::read_to_string(dir.join("manage.html")).unwrap();
+    let manage_js = fs::read_to_string(dir.join("manage.js")).unwrap();
+
+    assert!(plugin_html.contains("no-referrer"));
+    assert!(plugin_html.contains("<base href=\"/us-stock-hud/\""));
+    assert!(plugin_html.contains("<script src=\"/sdk/dambo.js\"></script>"));
+    assert!(plugin_html.contains("./plugin.js"));
+    for cmd in [
+        "买入(buy)",
+        "卖出(sell)",
+        "做空(short)",
+        "平空(cover)",
+        "查股(quote)",
+        "持仓(pos)",
+    ] {
+        assert!(plugin_html.contains(cmd), "Missing command chip: {}", cmd);
+    }
+
+    assert!(!manage_html.contains("no-referrer"));
+    assert!(!manage_html.contains("<a "));
+    assert!(manage_html.contains("<base href=\"/us-stock-hud/\""));
+    assert!(manage_html.contains("<script src=\"/sdk/dambo.js\"></script>"));
+    assert!(manage_html.contains("./manage.js"));
+
+    for (name, content) in [
+        ("plugin.html", &plugin_html),
+        ("plugin.js", &plugin_js),
+        ("engine.js", &engine_js),
+        ("market.js", &market_js),
+        ("chart.js", &chart_js),
+        ("manage.html", &manage_html),
+        ("manage.js", &manage_js),
+    ] {
+        assert!(
+            !content.contains("innerHTML"),
+            "{} must never use innerHTML",
+            name
+        );
+        assert!(
+            !content.contains("require("),
+            "{} must never use require()",
             name
         );
         assert!(

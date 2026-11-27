@@ -1,0 +1,405 @@
+{
+  "plugin_id": "us-stock-hud",
+  "version": "1.0.0",
+  "name": "美股实时弹幕实盘 HUD",
+  "description": "16:9 金融终端风实时美股弹幕模拟交易游戏：粉丝牌硬性准入、大航海焦点抢占、Finnhub REST+WS 实时行情、多空双向开平仓与爆仓强平、2×4 自选矩阵与全服成本均价线、超级查股卡及全参数可配控制面板。",
+  "obs": {
+    "width": 1920,
+    "height": 1080
+  },
+  "defaults": {
+    "finnhub_api_key": {
+      "type": "string",
+      "value": "",
+      "meta": {
+        "max_length": 128,
+        "placeholder": "粘贴 Finnhub 免费 API Key（留空在 auto 模式下自动启用本地演示行情）",
+        "label": "Finnhub API Key",
+        "description": "从 finnhub.io 免费注册获取（支持 REST + WebSocket 实时行情，免费额度 60 次/分钟）"
+      }
+    },
+    "market_data_mode": {
+      "type": "enum",
+      "value": "auto",
+      "meta": {
+        "label": "行情数据源模式",
+        "description": "auto 模式在未配置 Key 时使用逼真模拟演练行情，填入 Key 后自动切换 Finnhub 实盘",
+        "options": [
+          { "value": "auto", "label": "自动切换 (有 Key 走 Finnhub / 无 Key 演练)" },
+          { "value": "finnhub", "label": "仅 Finnhub 实盘行情" },
+          { "value": "demo", "label": "仅本地模拟演练行情" }
+        ]
+      }
+    },
+    "enable_finnhub_ws": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "启用 Finnhub WebSocket 逐笔推流",
+        "description": "配置 Key 后自动建立 wss://ws.finnhub.io 长连接接收盘中实时成交推送"
+      }
+    },
+    "poll_interval_sec": {
+      "type": "number",
+      "value": 10,
+      "meta": {
+        "min": 3,
+        "max": 120,
+        "step": 1,
+        "format": "integer",
+        "label": "REST 行情轮询间隔 (秒)",
+        "description": "兜底轮询自选与热门持仓标的（内置 54 次/分钟滑动窗口防限流队列）"
+      }
+    },
+    "market_session_override": {
+      "type": "enum",
+      "value": "auto",
+      "meta": {
+        "label": "美股时段状态",
+        "description": "默认按美东时间 (America/New_York) 自动计算盘前/盘中/盘后/闭市及美股休市日",
+        "options": [
+          { "value": "auto", "label": "自动实时美东时间 (ET)" },
+          { "value": "regular", "label": "强制显示: 已开市·盘中交易 Regular Hours" },
+          { "value": "pre", "label": "强制显示: 盘前交易 Pre-Market" },
+          { "value": "after", "label": "强制显示: 盘后交易 After-Hours" },
+          { "value": "closed", "label": "强制显示: 已闭市 Market Closed" }
+        ]
+      }
+    },
+    "allow_trading_when_closed": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "闭市/非盘中时段允许模拟下单",
+        "description": "开启后观众在美股盘前、盘后及闭市时段仍可按最新报价或演练行情模拟开平仓"
+      }
+    },
+    "marquee_major_tickers": {
+      "type": "string",
+      "value": "SPY,QQQ,NVDA,TSLA,AAPL,MSFT,META,AMZN",
+      "meta": {
+        "max_length": 200,
+        "placeholder": "SPY,QQQ,NVDA,TSLA,AAPL,MSFT,META,AMZN",
+        "label": "顶部大盘与科技巨头跑马灯标的",
+        "description": "逗号分隔的美股代码，展示于顶部双层跑马灯上层"
+      }
+    },
+    "watchlist_tickers": {
+      "type": "string",
+      "value": "NVDA,TSLA,AAPL,MSFT,SPY,QQQ,META,AMZN",
+      "meta": {
+        "max_length": 200,
+        "placeholder": "NVDA,TSLA,AAPL,MSFT,SPY,QQQ,META,AMZN",
+        "label": "2×4 自选报价矩阵标的 (最多 8 个)",
+        "description": "左侧顶部 2×4 自选矩阵展示与默认自动轮换关注标的"
+      }
+    },
+    "require_fan_medal": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "粉丝牌 (灯牌) 硬性准入",
+        "description": "开启后仅佩戴粉丝牌的观众弹幕会被撮合引擎受理，无灯牌指令静默忽略"
+      }
+    },
+    "room_medal_name": {
+      "type": "string",
+      "value": "",
+      "meta": {
+        "max_length": 40,
+        "placeholder": "留空校验任意已佩戴粉丝牌；填入名称则严格限定本直播间牌名",
+        "label": "限定本直播间粉丝牌名称",
+        "description": "建议填写当前直播间粉丝牌名称以确保跨房灯牌不可参与（留空则接受任意有效灯牌）"
+      }
+    },
+    "min_medal_level": {
+      "type": "number",
+      "value": 1,
+      "meta": {
+        "min": 1,
+        "max": 40,
+        "step": 1,
+        "format": "integer",
+        "label": "最低粉丝牌等级门槛"
+      }
+    },
+    "guard_bypass_medal": {
+      "type": "bool",
+      "value": false,
+      "meta": {
+        "label": "大航海成员免粉丝牌准入",
+        "description": "默认关闭以严格执行灯牌准入；开启后已知总督/提督/舰长可免灯牌参与"
+      }
+    },
+    "focus_auto_rotate_sec": {
+      "type": "number",
+      "value": 10,
+      "meta": {
+        "min": 3,
+        "max": 120,
+        "step": 1,
+        "format": "integer",
+        "label": "自选矩阵自动轮换间隔 (秒)"
+      }
+    },
+    "focus_lock_lv0_sec": {
+      "type": "number",
+      "value": 8,
+      "meta": {
+        "min": 3,
+        "max": 60,
+        "step": 1,
+        "format": "integer",
+        "label": "普通灯牌玩家焦点锁定时长 (秒)"
+      }
+    },
+    "focus_lock_lv1_sec": {
+      "type": "number",
+      "value": 12,
+      "meta": {
+        "min": 4,
+        "max": 60,
+        "step": 1,
+        "format": "integer",
+        "label": "舰长 (Lv1) 焦点锁定时长 (秒)"
+      }
+    },
+    "focus_lock_lv2_sec": {
+      "type": "number",
+      "value": 20,
+      "meta": {
+        "min": 5,
+        "max": 120,
+        "step": 1,
+        "format": "integer",
+        "label": "提督 (Lv2) 焦点锁定时长 (秒)"
+      }
+    },
+    "focus_lock_lv3_sec": {
+      "type": "number",
+      "value": 25,
+      "meta": {
+        "min": 5,
+        "max": 120,
+        "step": 1,
+        "format": "integer",
+        "label": "总督 (Lv3) 焦点锁定时长 (秒)"
+      }
+    },
+    "pos_card_duration_sec": {
+      "type": "number",
+      "value": 6,
+      "meta": {
+        "min": 3,
+        "max": 20,
+        "step": 1,
+        "format": "integer",
+        "label": "持仓悬浮卡片展示时长 (秒)"
+      }
+    },
+    "initial_balance": {
+      "type": "number",
+      "value": 100000,
+      "meta": {
+        "min": 1000,
+        "max": 100000000,
+        "step": 1000,
+        "format": "integer",
+        "label": "初始模拟资金 (USD)"
+      }
+    },
+    "min_trade_usd": {
+      "type": "number",
+      "value": 100,
+      "meta": {
+        "min": 1,
+        "max": 100000,
+        "step": 50,
+        "format": "integer",
+        "label": "单笔最小下单金额 (USD)"
+      }
+    },
+    "allow_fractional_shares": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "支持碎股成交 (按金额下单自动换算小数股)",
+        "description": "开启后 买入(buy)/做空(short) 按输入金额精确折算股数；关闭则向下取整股"
+      }
+    },
+    "short_leverage": {
+      "type": "number",
+      "value": 2,
+      "meta": {
+        "min": 1,
+        "max": 10,
+        "step": 0.5,
+        "label": "做空杠杆倍数",
+        "description": "做空名义价值 = 保证金 × 倍数，杠杆越高爆仓阈值越敏感"
+      }
+    },
+    "liquidation_maint_ratio": {
+      "type": "number",
+      "value": 0.2,
+      "meta": {
+        "min": 0.05,
+        "max": 0.8,
+        "step": 0.05,
+        "format": "slider",
+        "label": "做空强平维持保证金率",
+        "description": "当空头仓位净值 <= 初始保证金 × 该比例时立即触发爆仓强平与战报横幅"
+      }
+    },
+    "commission_bps": {
+      "type": "number",
+      "value": 0,
+      "meta": {
+        "min": 0,
+        "max": 100,
+        "step": 1,
+        "format": "integer",
+        "label": "交易手续费率 (基点 bps，10bps=0.1%)"
+      }
+    },
+    "trade_cooldown_ms": {
+      "type": "number",
+      "value": 1500,
+      "meta": {
+        "min": 0,
+        "max": 15000,
+        "step": 100,
+        "format": "integer",
+        "label": "单玩家指令冷却 (毫秒)"
+      }
+    },
+    "whale_threshold_usd": {
+      "type": "number",
+      "value": 25000,
+      "meta": {
+        "min": 1000,
+        "max": 10000000,
+        "step": 1000,
+        "format": "integer",
+        "label": "Whale Alert 大单触发门槛 (USD)"
+      }
+    },
+    "banner_duration_sec": {
+      "type": "number",
+      "value": 5,
+      "meta": {
+        "min": 2,
+        "max": 15,
+        "step": 1,
+        "format": "integer",
+        "label": "大单/爆仓战报横幅停留时长 (秒)"
+      }
+    },
+    "hud_title": {
+      "type": "string",
+      "value": "US.TERM // 美股弹幕实盘",
+      "meta": {
+        "max_length": 48,
+        "label": "终端左上角标题标识"
+      }
+    },
+    "bg_mode": {
+      "type": "enum",
+      "value": "solid",
+      "meta": {
+        "label": "背景渲染风格",
+        "description": "OBS 叠加推荐切换半透明毛玻璃或纯透明模式",
+        "options": [
+          { "value": "solid", "label": "深炭灰/午夜蓝金融终端" },
+          { "value": "glass", "label": "半透明毛玻璃叠加" },
+          { "value": "transparent", "label": "纯透明背景 (OBS 强叠加)" }
+        ]
+      }
+    },
+    "bg_opacity": {
+      "type": "number",
+      "value": 0.95,
+      "meta": {
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "format": "slider",
+        "label": "终端面板背景不透明度"
+      }
+    },
+    "color_up": {
+      "type": "string",
+      "value": "#00E676",
+      "meta": {
+        "format": "color",
+        "label": "上涨/做多语义色 (默认荧光翠绿)"
+      }
+    },
+    "color_down": {
+      "type": "string",
+      "value": "#FF3B30",
+      "meta": {
+        "format": "color",
+        "label": "下跌/做空语义色 (默认警示珊瑚红)"
+      }
+    },
+    "color_gold": {
+      "type": "string",
+      "value": "#F59E0B",
+      "meta": {
+        "format": "color",
+        "label": "榜首/巨鲸高亮色 (默认赛博琥珀金)"
+      }
+    },
+    "leaderboard_top_n": {
+      "type": "number",
+      "value": 6,
+      "meta": {
+        "min": 5,
+        "max": 8,
+        "step": 1,
+        "format": "integer",
+        "label": "排行榜展示人数 (5-8 名)"
+      }
+    },
+    "leaderboard_sort": {
+      "type": "enum",
+      "value": "equity",
+      "meta": {
+        "label": "排行榜排序依据",
+        "options": [
+          { "value": "equity", "label": "按实时总资产排序" },
+          { "value": "return_pct", "label": "按总收益率排序" }
+        ]
+      }
+    },
+    "holding_rotate_sec": {
+      "type": "number",
+      "value": 3.5,
+      "meta": {
+        "min": 1.5,
+        "max": 15,
+        "step": 0.5,
+        "label": "榜单重仓持仓标签轮播间隔 (秒)"
+      }
+    },
+    "marquee_speed_sec": {
+      "type": "number",
+      "value": 38,
+      "meta": {
+        "min": 12,
+        "max": 90,
+        "step": 2,
+        "format": "integer",
+        "label": "顶部双层跑马灯滚动周期 (秒)"
+      }
+    },
+    "reserve_overlay_corner": {
+      "type": "bool",
+      "value": true,
+      "meta": {
+        "label": "避开右上角桌面控制条安全区 (104×44px)",
+        "description": "在 Dambo 桌面悬浮窗中保持开启以防控制条遮挡顶部右侧"
+      }
+    }
+  }
+}
